@@ -28,7 +28,7 @@ einox 是通用 agent 基座库——三层栈 eino（LLM 框架）→ einox（a
 
 ## 架构约定
 
-- `contract/` 不 import eino，本模块不 import 业务应用代码——两道边界由 `boundary_test.go` 守卫
+- `contract/` 不 import eino；外部依赖收敛在 `boundary_test.go` 的白名单内——新增依赖需同步更新清单，守卫拒绝清单外的一切模块
 - 能力统一经 `engine.Options` 装配：新能力建模为可选配置字段，nil 即不生效、不改变既有行为
 - 机制与内容分离：业务工具、提示词内容、审批名单等业务资产不属于本仓
 - eino 已有的能力（中间件 / 原语 / 预置拓扑）优先复用；确需自研时在 PR 中说明 eino 的缺口
