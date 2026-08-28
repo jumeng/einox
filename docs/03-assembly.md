@@ -122,3 +122,33 @@ func (t *createOrder) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 ### 5. 子代理白名单（多代理编排的权限面）
 
 `SubAgents.Tools` 只列读面与工作区探索/验证件；数据域写、repo 写、采集类进 `DenyTools`——子代理只读勘察，数据变更以建议清单回传、父用自有写工具代执行走既有审批。并发上限 `MaxConcurrent` 照看 LLM 端点压力（超限信号量排队不失败）。
+
+## 业务侧边界守卫（建议）
+
+「业务 0 import eino」是架构验收线，守卫放业务仓（检查的是 eino 这个固定名字，与业务仓自己叫什么无关）。任一业务仓在仓根放一个测试文件即可：
+
+```go
+func TestNoEinoImports(t *testing.T) {
+	// root 指向业务仓根（按测试文件所在目录调整相对层级）
+	cmd := exec.Command("go", "list", "-test", "-f",
+		"{{.ImportPath}}\t{{range .Imports}}{{.}} {{end}}", "./...")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Skipf("go list 失败: %v", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		pkg, imports, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		for _, imp := range strings.Fields(imports) {
+			if imp == "github.com/cloudwego/eino" || strings.HasPrefix(imp, "github.com/cloudwego/eino/") {
+				t.Errorf("业务禁直接依赖 eino：%s → %s（只应 import 基座契约面）", pkg, imp)
+			}
+		}
+	}
+}
+```
+
+配套的 `-test` 注意点：`go list -test` 会输出 `[pkg.test]` 形式的测试变体引用，属输出格式而非真实 import，跳过以 `[` 开头的项即可。基座侧的反向边界（einox 不依赖任何业务模块）由 einox 仓自己的依赖白名单守卫承担，业务仓无需关心。
