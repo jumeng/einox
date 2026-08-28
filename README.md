@@ -71,7 +71,7 @@ go get github.com/jumeng/einox
 
 ## 贡献
 
-欢迎 issue 与 PR。开发约定（架构红线、溯源纪律、编码规范）见 [AGENTS.md](AGENTS.md)；提交前 `go build ./... && go test ./...` 全绿。
+欢迎 issue 与 PR。仓库工作说明（命令、架构约定、许可与溯源）见 [AGENTS.md](AGENTS.md)；提交前 `go build ./... && go test ./...` 全绿。
 
 ## 许可
 
