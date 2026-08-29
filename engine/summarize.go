@@ -146,19 +146,9 @@ func (m *Manager) summarizerFailover(ctx context.Context, s *session.Session, wi
 	if len(m.Opt.SummarizerFallbackModels) == 0 {
 		return nil, nil
 	}
-	chain := make([]model.BaseModel[*schema.Message], 0, len(m.Opt.SummarizerFallbackModels))
-	for _, key := range m.Opt.SummarizerFallbackModels {
-		p, spec, ok := llm.FindSpec(m.Opt.Providers(), key)
-		if !ok {
-			return nil, &configError{"摘要降级模型不在可用清单内：" + key}
-		}
-		cm, err := m.Opt.NewModel(ctx, p, spec, s.Model.Effort)
-		if err != nil {
-			return nil, &configError{"摘要降级模型构造失败：" + err.Error()}
-		}
-		cm = llm.NewVisionModel(cm, spec, m.Opt.ImageResolve)
-		cm = llm.NewHistoryShapeModel(cm, p.Kind)
-		chain = append(chain, cm)
+	chain, err := m.modelChain(ctx, s, m.Opt.SummarizerFallbackModels, "摘要")
+	if err != nil {
+		return nil, err
 	}
 	maxR := len(chain)
 	mkInput := trimModelInput(window)

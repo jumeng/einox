@@ -100,17 +100,8 @@ var (
 	probeStat Status
 )
 
-// Probe 探测 OS 级后端可用性（进程级缓存，装配期调用一次即可让告警进启动
-// 日志；序 = 哨兵握手 → 后端实测，真源 §1.3）。
-func Probe() Status {
-	probeOnce.Do(func() {
-		probeStat = probeBackend()
-		if probeStat.Enforcement == EnforcementUnusable {
-			log.Printf("einox-sandbox: 后端不可用（%s）——auto 档命令将裸跑；拒跑须显式 require（真源 §1.3）", probeStat.Detail)
-		}
-	})
-	return probeStat
-}
+// Probe 见下方 OSProvider 出口（进程级缓存，装配期调用一次即可让告警进
+// 启动日志；序 = 哨兵握手 → 后端实测，真源 §1.3）。
 
 // probeBackend 探测序（不缓存——测试可复调）：①哨兵握手自检（失败 = 产品
 // main 未挂 RunHelper 钩子；内核 ABI 探测只证内核支持，不证哨兵在位）→
@@ -193,18 +184,43 @@ func abiUncovered(abi int) []string {
 	return out
 }
 
-// Wrap 探测后构造沙箱化执行参数（runcommand buildCmd 沙箱分支入口）。
-// 后端可用 → wrapOSBackend 平台形（Linux=re-exec 哨兵；darwin=哨兵内再包
-// sandbox-exec；windows=直执行 + AttachToken 侧挂 token）；不可用 →
-// argv=nil（auto 档裸跑降级，Probe 已告警一次——拒跑须显式 require 姿态，
-// 装配层接线留待首个消费者）。ProtectedReadOnly 告警在 Linux 分支发——
-// Landlock 做不到可写区内回盖（审查 B-2），darwin/windows 后端可真回盖
-// （require-not 排除 / deny ACE），不发该告警。
+// Wrap 探测后构造沙箱化执行参数（OSProvider 的包级出口——应用直用
+// runcommand/sandbox 不经 engine 时的既有入口，行为不变）。
 func Wrap(pol *Policy, workspace, cmdLine string) (argv []string, env []string) {
+	return OSProvider.Wrap(pol, workspace, cmdLine)
+}
+
+// Probe OSProvider 的包级出口（既有入口，行为不变）。
+func Probe() Status { return OSProvider.Probe() }
+
+// OSProvider 平台内建后端（默认 Provider：Linux Landlock+seccomp+rlimit /
+// darwin Seatbelt / windows restricted token，构建标签分流——wrapOSBackend
+// 平台实现）。ProtectedReadOnly 告警在 Linux 分支发——Landlock 做不到可写区
+// 内回盖（审查 B-2），darwin/windows 后端可真回盖（require-not 排除 /
+// deny ACE），不发该告警。
+var OSProvider Provider = osProvider{}
+
+// osProvider 平台内建后端实现（Wrap/Probe 主体 = 既有自由函数收拢）。
+type osProvider struct{}
+
+func (osProvider) Wrap(pol *Policy, workspace, cmdLine string) ([]string, []string) {
 	if Probe().Enforcement == EnforcementUnusable {
-		return nil, nil
+		return nil, nil // auto 档裸跑降级（探测已告警一次——拒跑须显式 require，真源 §10.4 接线留待）
 	}
 	return wrapOSBackend(pol, workspace, cmdLine)
+}
+
+func (osProvider) Probe() Status { return probeOS() }
+
+// probeOS 进程级探测缓存（既有 Probe 主体，收拢不改语义）。
+func probeOS() Status {
+	probeOnce.Do(func() {
+		probeStat = probeBackend()
+		if probeStat.Enforcement == EnforcementUnusable {
+			log.Printf("einox-sandbox: 后端不可用（%s）——auto 档命令将裸跑；拒跑须显式 require（真源 §1.3）", probeStat.Detail)
+		}
+	})
+	return probeStat
 }
 
 // ArgvEnv 纯构造（不探测——argv/env 形态测试与特殊装配用）。
@@ -214,11 +230,37 @@ func ArgvEnv(pol *Policy, workspace, cmdLine string) (argv []string, env []strin
 }
 
 // payloadEnv 策略载荷 + Policy.Env 合并环境（哨兵协议统一 env 形态；
-// darwin 的 sandbox-exec 包裹形同样经哨兵，共用本载体）。
+// darwin 的 sandbox-exec 包裹形同样经哨兵，共用本载体）。基础环境经
+// baseEnv 分档（EnvMode：inherit 全继承 / minimal 白名单）。
 func payloadEnv(pol *Policy, workspace string) []string {
 	payload, _ := json.Marshal(policyPayload{Policy: *pol, Workspace: workspace})
 	extra := append([]string{policyEnvKey + "=" + string(payload)}, pol.Env...)
-	return mergeEnv(os.Environ(), extra)
+	return mergeEnv(baseEnv(pol), extra)
+}
+
+// minimalEnvKeys 围栏内环境白名单（EnvMinimal 档；键名大小写不敏感——
+// windows 环境键名惯例异形）。PATH/HOME/TMPDIR 覆盖 unix 主场景；TEMP/TMP/
+// SystemRoot/USERPROFILE/HOMEDRIVE/HOMEPATH 覆盖 windows（SystemRoot 是 Go
+// 程序与大量 syscall 的硬前提）。其余环境（凭据面在内）默认不进围栏——
+// 业务所需经 Policy.Env 显式注入。
+var minimalEnvKeys = map[string]bool{
+	"PATH": true, "HOME": true, "TMPDIR": true,
+	"TEMP": true, "TMP": true, "SYSTEMROOT": true,
+	"USERPROFILE": true, "HOMEDRIVE": true, "HOMEPATH": true,
+}
+
+// baseEnv 围栏内基础环境（EnvMode 分档；windows 直执行分支同用）。
+func baseEnv(pol *Policy) []string {
+	if pol.EnvMode != EnvMinimal {
+		return os.Environ() // 缺省 inherit：全继承（cleanseEnv 剥 LLM_*/载荷）
+	}
+	var out []string
+	for _, kv := range os.Environ() {
+		if k, _, ok := strings.Cut(kv, "="); ok && minimalEnvKeys[strings.ToUpper(k)] {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // mergeEnv 环境合并——同名键后者覆盖（env 数组重复键首见生效，必须去重：

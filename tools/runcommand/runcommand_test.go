@@ -153,22 +153,15 @@ func TestBackgroundTasks(t *testing.T) {
 	}
 }
 
-func TestDockerWrapArgv(t *testing.T) {
-	t.Setenv("EINO_RUN_DOCKER", "")
-	if dockerWrap("/ws") != nil {
-		t.Fatal("未启用应返回 nil")
-	}
+// TestDockerEnvRetired EINO_RUN_DOCKER env 魔法开关退役（批次 C，设计真源
+// findings/2026-08-29-assembly-seams-design.md §4）：旧开关不再有任何效果
+// ——容器形态正规化为 sandbox.DockerProvider 经 Config.SandboxProvider 注入
+// （argv 映射测试归 sandbox/docker_test.go）。
+func TestDockerEnvRetired(t *testing.T) {
 	t.Setenv("EINO_RUN_DOCKER", "1")
-	pre := dockerWrap("/ws")
-	want := []string{"docker", "run", "--rm", "-v", "/ws:/workspace", "-w", "/workspace", "-m", "512m", "--network", "bridge", "alpine:3.20", "sh", "-c"}
-	if strings.Join(pre, " ") != strings.Join(want, " ") {
-		t.Fatalf("包裹参数错：%v", pre)
-	}
-	t.Setenv("EINO_RUN_IMAGE", "golang:1.26")
-	t.Setenv("EINO_RUN_DOCKER_NET", "none")
-	pre = dockerWrap("/ws")
-	if !strings.Contains(strings.Join(pre, " "), "golang:1.26") || !strings.Contains(strings.Join(pre, " "), "--network none") {
-		t.Fatalf("镜像/网络定制未生效：%v", pre)
+	cmd, sandboxed := buildCmd(context.Background(), "/ws", nil, nil, "echo hi")
+	if sandboxed || cmd.Args[0] != "sh" {
+		t.Fatalf("退役开关不应再生效（应直执行）：%v", cmd.Args)
 	}
 }
 

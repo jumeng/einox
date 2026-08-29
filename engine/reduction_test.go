@@ -34,18 +34,21 @@ func newReductionManager(t *testing.T, window int, ts []contract.Tool, fm llm.Mo
 		spec.Limit = &llm.Limit{Context: window, Output: 4096}
 	}
 	reg := session.NewRegistry(st)
-	m := NewManager(reg, Options{
+	m, err := NewManager(reg, Options{
 		Providers: func() []llm.ProviderSpec {
 			return []llm.ProviderSpec{{ID: "p", Kind: "openai", Enabled: true, Models: []llm.ModelSpec{spec}}}
 		},
 		Instruction: func(SessionBrief) string { return "test" },
-		Tools:       func() []contract.Tool { return ts },
+		Tools:       func(SessionBrief) []contract.Tool { return ts },
 		NewModel:    fm,
 		CheckPoints: func(operator, sid string) CheckPointStore {
 			return checkpoint.NewCheckPointStore(st, operator, sid)
 		},
 		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
 	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
 	for _, f := range mut {
 		f(&m.Opt)
 	}

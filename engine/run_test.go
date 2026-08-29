@@ -64,7 +64,7 @@ func newRunManager(t *testing.T, ts []contract.Tool, fm llm.ModelFactory) (*Mana
 func newRunManagerOn(t *testing.T, ts []contract.Tool, fm llm.ModelFactory, st session.Store) *Manager {
 	t.Helper()
 	reg := session.NewRegistry(st)
-	m := NewManager(reg, Options{
+	m, err := NewManager(reg, Options{
 		Providers: func() []llm.ProviderSpec {
 			return []llm.ProviderSpec{{
 				ID: "p", Kind: "openai", Enabled: true,
@@ -72,7 +72,7 @@ func newRunManagerOn(t *testing.T, ts []contract.Tool, fm llm.ModelFactory, st s
 			}}
 		},
 		Instruction: func(SessionBrief) string { return "test" },
-		Tools:       func() []contract.Tool { return ts },
+		Tools:       func(SessionBrief) []contract.Tool { return ts },
 		NewModel:    fm,
 		CheckPoints: func(operator, sid string) CheckPointStore {
 			return checkpoint.NewCheckPointStore(st, operator, sid)
@@ -80,6 +80,9 @@ func newRunManagerOn(t *testing.T, ts []contract.Tool, fm llm.ModelFactory, st s
 		Approval:      hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}},
 		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
 	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
 	return m
 }
 

@@ -1,7 +1,45 @@
 # macOS
 .DS_Store
 
-# Go
+# Go 编译产物（二进制 / 测试 / 覆盖度）
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 *.test
 *.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# 依赖目录与本地工作区文件
+vendor/
+go.work
+go.work.sum
+
+# env 文件（本地密钥注入位）
+.env
+
+# 编辑器/IDE
+.vscode/
+# .idea/
+
+# ---- einox ----
+
+# 运行过程态与临时域（.agent/ = 过程态全量如 .agent/llm、.agent/users，
+# .tmp/ = 临时域会话工作区，随时可消失；均不进仓）
+.agent/
+.tmp/
+
+# 本地构建产物
 bin/
+
+# Obsidian 本地编辑器配置
+.obsidian/
+
+# ZCode 会话工件（计划草稿等工具本地态，不进仓）
+.zcode/
+
+
+findings/

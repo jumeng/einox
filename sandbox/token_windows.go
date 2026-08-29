@@ -90,7 +90,7 @@ func AttachToken(cmd *exec.Cmd, pol *Policy, workspace string) error {
 // 审查 B-1：linux/darwin 经哨兵 helperExec 清洗，windows 直执行路径须
 // 同款——C-3 加固跨平台一致）。
 func wrapOSBackend(pol *Policy, workspace, cmdLine string) ([]string, []string) {
-	return []string{"sh", "-c", cmdLine}, cleanseEnv(mergeEnv(os.Environ(), pol.Env))
+	return []string{"sh", "-c", cmdLine}, cleanseEnv(mergeEnv(baseEnv(pol), pol.Env))
 }
 
 // applySandbox windows：哨兵路径不经（围栏在父进程侧），误入即报错拒绝。

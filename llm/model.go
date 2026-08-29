@@ -116,6 +116,22 @@ func thinkingBudget(effort string, m ModelSpec) int64 {
 // intPtr 便捷取址（openai 组件指针字段）。
 func intPtr(v int) *int { return &v }
 
+// f32Ptr 采样参数取址（组件字段是 *float32）。
+func f32Ptr(v float64) *float32 { f := float32(v); return &f }
+
+// samplingOf 采样参数映射（temperature/top_p）——显式声明才下发，nil = 不发
+// 字段走端点默认（多数推理端点拒绝显式 temperature）。两协议组件同款映射，
+// 单点锚定供单测断言 nil 不发/显式下发。
+func samplingOf(m ModelSpec) (temp, topP *float32) {
+	if m.Temperature != nil {
+		temp = f32Ptr(*m.Temperature)
+	}
+	if m.TopP != nil {
+		topP = f32Ptr(*m.TopP)
+	}
+	return
+}
+
 // deepseekThinkingFields DeepSeek 思考扩展字段（thinking 闸门恒开 +
 // reasoning_effort 三档直传）——提为独立函数供单测锚定 effort → 请求字段映射。
 func deepseekThinkingFields(effort string) map[string]any {
@@ -151,6 +167,7 @@ func newClaudeModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort str
 		maxTokens = m.Limit.Output
 	}
 	cfg.MaxTokens = maxTokens
+	cfg.Temperature, cfg.TopP = samplingOf(m) // 显式声明才下发（nil = 不发字段走端点默认）
 	cfg.ThinkingConfig = &anthropic.ThinkingConfigParamUnion{
 		OfEnabled: &anthropic.ThinkingConfigEnabledParam{BudgetTokens: thinkingBudget(effort, m)},
 	}
@@ -169,6 +186,8 @@ func newOpenAIModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort str
 	if m.Limit != nil && m.Limit.Output > 0 {
 		cfg.MaxTokens = intPtr(m.Limit.Output)
 	}
+	// 采样参数：显式声明才下发（nil = 不发字段走端点默认）
+	cfg.Temperature, cfg.TopP = samplingOf(m)
 	// 思考方言（厂家/通用知识只走 dialect，绝不写进通用分支——非方言端点
 	// 零思考字段，走端点默认）：deepseek = 私有块+档位直传；effort = 通用
 	// reasoning_effort（max→high 降档）；vLLM 等标准端点零污染不变。

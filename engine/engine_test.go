@@ -14,6 +14,7 @@ import (
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/internal/tstore"
+	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
 
@@ -70,16 +71,28 @@ func TestSanitizeHistoryRepairsEmptyArgs(t *testing.T) {
 func TestSessionToolsRepoFamily(t *testing.T) {
 	st := tstore.New(t.TempDir())
 	reg := session.NewRegistry(st)
-	m := NewManager(reg, Options{
+	m, err := NewManager(reg, Options{
 		RepoMounts: stubMounts{},
+		Providers:  func() []llm.ProviderSpec { return nil },
+		Instruction: func(SessionBrief) string {
+			return "test"
+		},
+		CheckPoints: func(operator, sid string) CheckPointStore { return nil },
 		// WorkspaceRoot 必填（sessionTools 组装即取工作区根，nil 会 panic）
 		WorkspaceRoot: func(owner, sid string) string {
 			return filepath.Join(st.TmpDir(), "workspaces", owner, sid)
 		},
 	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
 	s := m.Registry().Create("张三", "编码", "manual", contract.UserPrefs{})
+	ts, err := m.sessionTools(s)
+	if err != nil {
+		t.Fatalf("sessionTools: %v", err)
+	}
 	var names []string
-	for _, x := range m.sessionTools(s) {
+	for _, x := range ts {
 		if info := x.Info(); info != nil {
 			names = append(names, info.Name)
 		}
@@ -90,12 +103,22 @@ func TestSessionToolsRepoFamily(t *testing.T) {
 		}
 	}
 	// nil RepoMounts = 不装配
-	m2 := NewManager(session.NewRegistry(tstore.New(t.TempDir())), Options{
+	m2, err := NewManager(session.NewRegistry(tstore.New(t.TempDir())), Options{
+		Providers:   func() []llm.ProviderSpec { return nil },
+		Instruction: func(SessionBrief) string { return "test" },
+		CheckPoints: func(operator, sid string) CheckPointStore { return nil },
 		WorkspaceRoot: func(owner, sid string) string {
 			return filepath.Join(t.TempDir(), "workspaces", owner, sid)
 		},
 	})
-	for _, x := range m2.sessionTools(m2.Registry().Create("张三", "x", "manual", contract.UserPrefs{})) {
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	ts2, err := m2.sessionTools(m2.Registry().Create("张三", "x", "manual", contract.UserPrefs{}))
+	if err != nil {
+		t.Fatalf("sessionTools: %v", err)
+	}
+	for _, x := range ts2 {
 		if n := x.Info().Name; strings.HasPrefix(n, "repo_") || n == "open_repo" || n == "export_patch" {
 			t.Fatal("未注入 RepoMounts 不应装配 repo 族：" + n)
 		}

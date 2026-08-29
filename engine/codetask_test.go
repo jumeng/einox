@@ -106,7 +106,7 @@ func TestRepoCommitApprovalCardDiff(t *testing.T) {
 	}}
 
 	st := tstore.New(t.TempDir())
-	m := NewManager(session.NewRegistry(st), Options{
+	m, err := NewManager(session.NewRegistry(st), Options{
 		Providers: func() []llm.ProviderSpec {
 			return []llm.ProviderSpec{{
 				ID: "p", Kind: "openai", Enabled: true,
@@ -129,6 +129,9 @@ func TestRepoCommitApprovalCardDiff(t *testing.T) {
 		WorkspaceRoot: func(owner, sid string) string { return filepath.Join(base, "ws", owner, sid) },
 		RepoMounts:    dirMounts{dir: cache},
 	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
 
 	s := m.Registry().Create("张三", "提交", "auto", contract.UserPrefs{Model: "p/m"})
 	mountFile = filepath.Join(base, "ws", "张三", s.SID, "repos", "base-app", "a.txt")

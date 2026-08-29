@@ -51,6 +51,16 @@ const (
 	DefaultFileSizeMB = 1024
 )
 
+// EnvMode 围栏内环境继承档（凭据外泄面治理：inherit 是 denylist——记住要剥
+// 谁，对未知凭据名结构性失效；minimal 是 allowlist——业务所需环境一律经
+// Policy.Env 显式注入，缓存重定向既有惯例不变）。
+type EnvMode string
+
+const (
+	EnvInherit EnvMode = ""        // 缺省零值 = 现状：全继承（− LLM_* − 策略载荷）
+	EnvMinimal EnvMode = "minimal" // 白名单：PATH/HOME/TMPDIR（windows 另含 TEMP/SystemRoot 等基础键）+ Policy.Env
+)
+
 // Policy 沙箱策略（对齐 codex legacy SandboxPolicy 形状 + 缓存重定向载体，
 // 审查 A2 修订）。静态一次装配（真源 §7.5——PM 会话工作区固定，per-call 留演进）。
 type Policy struct {
@@ -58,10 +68,31 @@ type Policy struct {
 	Network           bool     // 默认 false 断网；LLM 调用在服务进程内不受影响
 	WritableRoots     []string // workspace-write 档追加可写根（HOME 缓存类目录逃生门）
 	Env               []string // 附加环境变量 "K=V"（缓存重定向载体，注入点 = cmd.Env）
+	EnvMode           EnvMode  // 环境继承档（缺省 inherit 零行为变化；minimal = 白名单）
 	ExcludeTmpdir     bool     // true = $TMPDIR 不计入可写根（默认 false = 计入，审查 A1）
 	ExcludeSlashTmp   bool     // true = /tmp 不计入可写根（默认 false = 计入）
 	ProtectedReadOnly []string // 可写区内希望只读的子路径（Landlock 做不到——探测报 partial）
 	Limit             Limit
+}
+
+// Provider 沙箱后端面：把 Policy 翻译成一次命令的执行参数（默认 OSProvider
+// = 平台内建，构建标签分流；应用注入容器/gVisor 等自定义后端——
+// engine.Options.SandboxProvider / runcommand.Config.SandboxProvider）。
+// 名称不叫 Backend：该名已被姿态类型占用（上方 off/auto/require，真源 §1.3）。
+//
+// 义务：①Probe 如实上报三态（Enforcement 语义，dsh 哲学），策略映射不全时
+// 报 partial + Uncovered；②只许收紧不许放宽——宽于 Policy 的翻译即后端实现
+// 违约（readonly 档不得给出可写挂载）；③不修改 pol（并发共享的静态单份）。
+//
+// nil argv = 本次不可沙箱（调用方按姿态降级：auto 裸跑已告警；require 拒跑
+// 接线留待首个 fail-closed 消费者，真源 §10.4）。容器类后端形态兼容：一次性
+// 容器 Wrap 即 docker run；真源 §0.2/§5.3 的每会话长驻终局 = Wrap 实现
+// docker exec、容器生命周期归 Provider 内部，接口形状不变。
+type Provider interface {
+	// Wrap 一次命令的沙箱化执行参数（argv[0] 为可执行名，PATH 解析归调用方）。
+	Wrap(pol *Policy, workspace, cmdLine string) (argv, env []string)
+	// Probe 后端可用性（缓存策略归实现自担；OSProvider 维持进程级一次）。
+	Probe() Status
 }
 
 // Validate 构造期 fail-fast（模式名唯一硬校验——其余字段语义自洽）。

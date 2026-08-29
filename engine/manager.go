@@ -24,6 +24,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
+	"encoding/json"
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/einoext"
 	"github.com/jumeng/einox/hitl"
@@ -34,7 +35,6 @@ import (
 	"github.com/jumeng/einox/skills"
 	"github.com/jumeng/einox/tools/egress"
 	"github.com/jumeng/einox/tools/repo"
-	"encoding/json"
 )
 
 // CheckPointStore 会话检查点存储面（adk Get/Set 同构——结构直配 Runner）。
@@ -43,12 +43,15 @@ type CheckPointStore interface {
 	Set(ctx context.Context, key string, checkpoint []byte) error
 }
 
-// SessionBrief 会话配置概要（Instruction 组装入参——三件套随消息可变：
-// mode 每条消息可带，model/effort 会话内可切换，运行边界生效）。
+// SessionBrief 会话概要（Instruction / Tools / SkillsDir 组装入参——三件套
+// 随消息可变：mode 每条消息可带，model/effort 会话内可切换，运行边界生效；
+// Owner/SID 会话身份：工具面与 skill 目录按租户裁剪的寻址键）。
 type SessionBrief struct {
 	Mode   string
 	Model  string // 复合键 provider/model
 	Effort string
+	Owner  string // 会话归属用户
+	SID    string // 会话标识
 }
 
 // Options 引擎组装配置（应用装配层构造）。
@@ -58,10 +61,36 @@ type Options struct {
 	// Instruction 系统提示词（应用内容——业务职责段 + 通用段 + 会话配置段 +
 	// 模式段拼装归应用；入参 = 会话配置概要，每轮 assemble 实时注入）。
 	Instruction func(sess SessionBrief) string
-	// Tools 业务工具面（实现 contract.Tool；nil = 无业务工具）。
-	Tools func() []contract.Tool
+	// Tools 业务工具面（实现 contract.Tool；入参 = 会话概要——多租户按
+	// Owner 裁剪工具面、按会话身份定制；nil = 无业务工具）。闭包每轮
+	// assemble 求值、跨会话并发调用——应快速返回且无共享可变态。
+	Tools func(sess SessionBrief) []contract.Tool
 	// ProcessTools 进程级通用件（时间/网络等——应用选择加入的基座件）。
 	ProcessTools func() []contract.Tool
+	// SessionToolsOff 排除的会话域工具族（族名见 sessiontools.go 的族常量；
+	// nil/空 = 全挂（零变化——族构造失败照常上抛 CONFIG，不静默吞错），未知
+	// 名 NewManager 即拒——对齐 DenyTools 的 fail-fast 纪律）。repo 族不经此
+	// 缝，仍由 RepoMounts 条件装配。
+	// 裁 fs 族 = 放弃 reduction 外置换指针取回（外置指针经 read_file 虚拟
+	// 路径取回，工具不在场则超长结果只剩截断头尾）——留装配者知情决策，
+	// 引擎不联动（上游截断与外置在同一 handler 内一体，禁外置须复制其逻辑）。
+	SessionToolsOff []string
+	// ToolWrap 工具包装缝（契约层最外包装，挂 hitl 审批包装之外；主面与
+	// 子代理面同挂——审计/脱敏/动态准入覆盖主面与子代理面的全部契约工具，
+	// spawn 派发本体不经包装）。nil = 不包装，零行为变化。契约义务：
+	//  1. Info() 须透传原名（名字是审批名单/子代理白名单/动态装载分流的
+	//     寻址键）；
+	//  2. 拒绝执行以 {"ok":false,"error":…} 信封返回回喂模型自纠（勿返回
+	//     Go error——本缝在 errFeed 外层，Go error 会终止整轮且模型不可见）；
+	//  3. 只能收紧不能放宽：收到的是已含审批的实例，透传即保留全部审批
+	//     语义（ArgsForce/模式审批不可豁免——以会话域件为界成立，裸实例
+	//     在引擎内不可得；业务工具的裸实例本就在应用手中，绕过属应用
+	//     自毁）；伪造结果属违约；
+	//  4. 包装随每次 assemble 重建（Run/Resume 各一次）——有状态包装的
+	//     计数不跨轮；
+	//  5. 勿从包装内发起 *contract.Suspend（引擎三卡分叉与决议消费链路
+	//     未对应用开放）。
+	ToolWrap func(t contract.Tool) contract.Tool
 	// NewModel 模型构造口（缺省生产构造 llm.NewChatModel；测试注入假模型）。
 	NewModel llm.ModelFactory
 	// ImageResolve 图片引用解析（文档仓库路径 → 字节+MIME；nil = 图片不可用——
@@ -69,8 +98,18 @@ type Options struct {
 	ImageResolve llm.ImageResolver
 	// CheckPoints 会话检查点存储构造（operator+sid 定位）。
 	CheckPoints func(operator, sid string) CheckPointStore
-	// SkillsDir skill 物化目录（nil/空 = 不挂 skill middleware；物化归应用）。
-	SkillsDir func() string
+	// SkillsDir skill 物化目录（nil/空 = 不挂 skill middleware；物化归应用。
+	// 入参 = 会话概要——按租户物化不同 skill 包；与 Tools 同契约：每轮
+	// assemble 求值、并发安全）。
+	SkillsDir func(sess SessionBrief) string
+	// AgentsMD AGENTS.md 注入清单（nil/空清单 = 不挂零变化；绝对路径，按序
+	// 注入）。发现逻辑归应用（ZCode 双层形态：用户级文件先、工作区级文件后
+	// 收窄覆盖——两文件按序进清单即得）；跨会话记忆注入通道同走此缝（owner
+	// 级记忆文件进清单）。与 SkillsDir 同契约：每轮 assemble 求值、并发安全。
+	AgentsMD func(sess SessionBrief) []string
+	// AgentsMDMaxBytes 注入字节预算（0 = 缺省 32KiB；上游按序装载超限即跳过
+	// 余下文件——预算显式化，防提示词面失控）。
+	AgentsMDMaxBytes int
 	// Approval 审批配置（写工具名单/动作名/参数豁免——业务内容）。
 	Approval hitl.ApprovalConfig
 	// WorkspaceRoot 会话工作区根（用户域 workspaces/<sid>——repos/ 挂载
@@ -92,6 +131,10 @@ type Options struct {
 	// Sandbox run_command 沙箱策略（nil = 不沙箱——产品默认关 opt-in；
 	// 机制 = einox/sandbox re-exec 哨兵协议，产品 main 需挂 RunHelper 钩子）。
 	Sandbox *sandbox.Policy
+	// SandboxProvider 沙箱后端（nil = sandbox.OSProvider 平台内建；容器类
+	// 后端如 sandbox.DockerProvider 经此注入——与 Sandbox 正交：策略定
+	// 「施加什么」，后端定「怎么施加」）。
+	SandboxProvider sandbox.Provider
 	// Egress 网络出口校验器（S-9：run_command 命令串 URL 预检；nil = 不
 	// 预检零变化。webfetch 侧的注入在应用 ProcessTools（进程级工具归应用
 	// 装配），此处只管引擎持有的命令面）。
@@ -99,8 +142,44 @@ type Options struct {
 	// SummarizerFallbackModels 摘要模型 Failover 降级链（H9-10：主摘要模型
 	// 失败按序降级的复合键清单，逐个同链包装 vision/shape 后填 adk Failover；
 	// 空 = 不配降级零变化（单端点装配配了也白配）；链尽走既有清窗兜底不外抛。
-	// ShouldFailover 排除 ctx 取消/中断类、MaxRetries=链长——审查补差内建）。
+	// ShouldFailover 排除 ctx 取消/中断类、MaxRetries=链长——审查补差内建。
 	SummarizerFallbackModels []string
+	// FallbackModels 主对话模型 Failover 降级链（复合键清单；空 = 零变化）。
+	// 重试先耗尽（有界重连）、RetryExhaustedError 触发按序换链上模型（每档
+	// 各享完整重连预算）；粘滞上次成功模型归 adk。切换发 model_change 事件；
+	// 致命类（401/403/402 配置错）不降级直接停机；ctx 取消/审批中断不降级。
+	// 清单错配（键不在 Providers 内）不阻断运行：降级失效 + harness_note 留痕。
+	// 子代理/拓扑子面不挂（链按主模型语境配置，维持 retry-only）。
+	FallbackModels []string
+	// Recall 跨会话检索工具（记忆拉通道，opt-in）：模型可读本 owner 历史会话
+	// 的摘要与消息投影（三模式 sid 深读/query 检索/最近列表；恒排除当前会话、
+	// 有界、摘要级——授权五律见 recall.go）。是新能力面：装配即知情决策，
+	// false = 不装配零变化。条件装配先例 = repo 族之于 RepoMounts。
+	Recall bool
+	// TurnEpilogue 轮收尾交接钩子（记忆写通道，nil = 零变化）：自然收束
+	// （StateEnded）每轮触发，载荷与 session_end 事件同源（摘要+文件变更）。
+	// einox 的 session_end 是轮级——应用自行去重/节流。同步调用应快速返回，
+	// 重提取（LLM 蒸馏/外部写）归应用异步；panic 由引擎兜底不影响终态。
+	// 最小用法：把摘要追加进 owner 域记忆 markdown，经 AgentsMD 清单注入。
+	TurnEpilogue func(sum TurnEndSummary)
+	// FinalGate 收束质量门（nil = 零变化）：自然收束后、终态落盘前按
+	// GateConfig.Checkers 强制验证——失败经 harness_note 门卡 + 反馈消息
+	// 入史回灌重跑（有界，MaxRetries 缺省 2），耗尽 error 收束不静默放行。
+	// 闭包入参 SessionBrief：按模式/任务形态决定开门与否与判据清单（判据
+	// 归应用——build/test 命令或自包的对抗审查；基座只持门循环机制）。
+	// 挂起/中断/错误轮不触发；重试预算随 Run/Resume 执行体。
+	FinalGate func(sess SessionBrief) *GateConfig
+}
+
+// TurnEndSummary 轮收尾交接载荷（session_end 事件同源 + 会话身份）。
+type TurnEndSummary struct {
+	Owner   string
+	SID     string
+	Title   string
+	Task    string
+	Summary string               // 会话累计文本聚合（session_end 同源；列表摘要口径截 60 字，非单轮）
+	Files   []contract.FileChange // 文件变更清单（有改动才非空）
+	EndedAt time.Time
 }
 
 // Manager 引擎管理器（进程单例；会话态归 Registry）。
@@ -115,15 +194,50 @@ type Manager struct {
 }
 
 // NewManager 构造（reg = 会话注册表；opt 必填项：Providers/Instruction/
-// CheckPoints/WorkspaceRoot——缺省 NewModel 生产构造）。
-func NewManager(reg *session.Registry, opt Options) *Manager {
+// CheckPoints/WorkspaceRoot——缺一即报错，缺省 NewModel 生产构造）。
+// SessionToolsOff 含未知族名即报错（装配错误启动期暴露，不拖到首会话）。
+func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
+	// 必填项 nil 即拒（docs/04 装配面「四项必填」的构造期兑现——此前 nil
+	// 会拖到首 Run 才空指针 panic）。
+	var missing []string
+	if opt.Providers == nil {
+		missing = append(missing, "Providers")
+	}
+	if opt.Instruction == nil {
+		missing = append(missing, "Instruction")
+	}
+	if opt.CheckPoints == nil {
+		missing = append(missing, "CheckPoints")
+	}
+	if opt.WorkspaceRoot == nil {
+		missing = append(missing, "WorkspaceRoot")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("engine: Options 缺必填项 %s（不可为 nil）", strings.Join(missing, "/"))
+	}
+	off := make(map[string]bool, len(opt.SessionToolsOff))
+	for _, f := range opt.SessionToolsOff {
+		switch f {
+		case FamilyTodo, FamilyAsk, FamilyPlan, FamilyFS, FamilyCmd, FamilyPatch:
+			off[f] = true
+		default:
+			return nil, fmt.Errorf("engine: 未知的会话域工具族 %q（可用 %s/%s/%s/%s/%s/%s）",
+				f, FamilyTodo, FamilyAsk, FamilyPlan, FamilyFS, FamilyCmd, FamilyPatch)
+		}
+	}
 	if opt.NewModel == nil {
 		opt.NewModel = llm.NewChatModel
 	}
-	if opt.Sandbox != nil {
-		sandbox.Probe() // 装配期探测（C1）：未挂钩/内核不可用即启动日志告警
+	if opt.Sandbox != nil && !off[FamilyCmd] {
+		// 装配期探测（C1）：未挂钩/内核不可用即启动日志告警（cmd 族被裁即
+		// 无消费面，不探）。经注入的 provider 探测（nil 归一 OSProvider）。
+		if opt.SandboxProvider != nil {
+			opt.SandboxProvider.Probe()
+		} else {
+			sandbox.Probe()
+		}
 	}
-	return &Manager{reg: reg, Opt: opt}
+	return &Manager{reg: reg, Opt: opt}, nil
 }
 
 // Registry 会话注册表出口。
@@ -258,16 +372,20 @@ func estTokens(s string) int {
 // estimateContext 上下文分类估算（Run 在泵前已把本轮用户消息入史——中断保险，
 // CloneHistory 天然含本轮，无须另计）。
 func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
-	est := ctxEstimates{instruction: estTokens(m.Opt.Instruction(m.briefOf(s)))}
-	for _, ts := range []func() []contract.Tool{m.Opt.Tools, m.Opt.ProcessTools} {
-		if ts == nil {
-			continue
-		}
-		for _, t := range ts() {
+	brief := m.briefOf(s)
+	est := ctxEstimates{instruction: estTokens(m.Opt.Instruction(brief))}
+	addFace := func(ts []contract.Tool) {
+		for _, t := range ts {
 			if info := t.Info(); info != nil {
 				est.tools += estTokens(info.Name) + estTokens(info.Desc)
 			}
 		}
+	}
+	if m.Opt.Tools != nil {
+		addFace(m.Opt.Tools(brief)) // 会话面：随 Owner/SID 裁剪后的真实业务面
+	}
+	if m.Opt.ProcessTools != nil {
+		addFace(m.Opt.ProcessTools())
 	}
 	// H8-1 口径：est_messages = 整形后出站视图（真实发送面——与 H1 TokenCounter
 	// 同规则函数 llm.ShapeMessages）；saved = 原始口径差额（「整形节省」注记）。
@@ -430,6 +548,7 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 	runCtx = contract.WithOperator(runCtx, s.Owner) // 工具层审计主体 = 会话发起人
 	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
 	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s)) // 读图工具门禁：会话模型明示能力
+	runCtx = withEmitFn(runCtx, fn)                               // failover 切换事件的 live 转发面
 	s.SetCancel(cancel)
 	defer func() {
 		cancel()
@@ -453,7 +572,7 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 	s.AppendHistory(userMsgFinal)
 	m.reg.Persist(s)
 
-	acc, endState := m.pump(s, iter, fn, m.estimateContext(s), behaviors)
+	acc, endState := m.drive(runCtx, s, fn, iter, behaviors)
 	m.settleTurn(s, acc, endState, fn, finish)
 }
 
@@ -466,6 +585,7 @@ func (m *Manager) Resume(ctx context.Context, s *session.Session, fn emitFn) {
 	runCtx = contract.WithOperator(runCtx, s.Owner)
 	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
 	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s))
+	runCtx = withEmitFn(runCtx, fn) // failover 切换事件的 live 转发面
 	s.SetCancel(cancel)
 	defer func() {
 		cancel()
@@ -480,7 +600,7 @@ func (m *Manager) Resume(ctx context.Context, s *session.Session, fn emitFn) {
 		finish(session.StateError)
 		return
 	}
-	acc, endState := m.pump(s, iter, fn, m.estimateContext(s), behaviors)
+	acc, endState := m.drive(runCtx, s, fn, iter, behaviors)
 	m.settleTurn(s, acc, endState, fn, finish)
 }
 
@@ -525,6 +645,17 @@ func (m *Manager) FlushQueue(s *session.Session) bool {
 	return true
 }
 
+// turnEpilogue 轮收尾交接（记忆写通道）：载荷与 session_end 事件同源。钩子
+// panic 由引擎兜底（此时终态已落盘，不该被应用钩子拖垮）；同步调用——重
+// 提取归应用异步。
+func (m *Manager) turnEpilogue(s *session.Session) {
+	defer func() { _ = recover() }()
+	m.Opt.TurnEpilogue(TurnEndSummary{
+		Owner: s.Owner, SID: s.SID, Title: s.TitleOf(), Task: s.TaskOf(),
+		Summary: s.SummaryOf(), Files: s.FileChangesSnapshot(), EndedAt: time.Now(),
+	})
+}
+
 // hasAssistant 历史中是否已有 assistant 终态（首轮判定——用户消息自 Run
 // 开头即入史，不能再以「历史为空」判首轮）。
 func hasAssistant(msgs []*schema.Message) bool {
@@ -564,6 +695,9 @@ func (m *Manager) settleTurn(s *session.Session, acc *runAccum, endState string,
 	s.ClearTurnGrant()
 	s.SetPendingApproval("")
 	fn(endEv)
+	if m.Opt.TurnEpilogue != nil && endState == session.StateEnded {
+		m.turnEpilogue(s) // 记忆写通道：自然收束触发（挂起/中断/删除路径不触发）
+	}
 	if firstTurn && s.TitleOf() == "" {
 		done := s.MarkTitleFlight() // 在途信号挂会话：Run 后写可 join（测试收尾/删除方等待锚点）
 		go func() {
@@ -629,15 +763,27 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		Model:            cm,
 		MaxIterations:    maxIterations,
 		ModelRetryConfig: m.modelRetryConfig(), // 网络容错 ②：有界重试（机制默认挂接，应用零配置）
+		ModelFailoverConfig: m.modelFailoverConfig(ctx, s), // 主模型降级链（空清单 nil 零变化）
 	}
 	var ts []contract.Tool
 	if m.Opt.Tools != nil {
-		ts = append(ts, m.Opt.Tools()...)
+		ts = append(ts, m.Opt.Tools(m.briefOf(s))...)
 	}
 	if m.Opt.ProcessTools != nil {
 		ts = append(ts, m.Opt.ProcessTools()...)
 	}
-	ts = append(ts, m.sessionTools(s)...)         // 会话域件（todo/ask_user/工作区族）
+	sts, err := m.sessionTools(s) // 会话域件（todo/ask_user/工作区族，可经 SessionToolsOff 裁剪）
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ts = append(ts, sts...)
+	if m.Opt.Recall { // 记忆拉通道（opt-in；会话域件形态——owner/sid 装配期捕获）
+		rt, err := newRecallTool(m.reg, s)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		ts = append(ts, rt)
+	}
 	behaviors := make(map[string]string, len(ts)) // UI-B2：行为标记快照（tool_call 事件携带——前端分组数据源；值由工具自declare，引擎不判别）
 	for _, t := range ts {
 		if info := t.Info(); info != nil && info.Behavior != "" {
@@ -646,8 +792,7 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	}
 	var face []tool.BaseTool
 	if len(ts) > 0 {
-		wrapped := hitl.WrapTools(ts, s, s.ModePublic(), m.Opt.Approval)
-		face = einoext.Adapt(wrapped)
+		face = m.wrapFace(ts, s, s.ModePublic()) // hitl 审批 → ToolWrap（应用缝）→ 适配
 	}
 	if m.Opt.SubAgents != nil { // spawn 子代理（H2；白名单源 = 全量面）
 		sp, err := m.newSpawnTool(ctx, s, m.Opt.SubAgents, ts)
@@ -689,7 +834,25 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		}
 	}
 	if len(face) > 0 {
-		tc := adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: face}}
+		// 幻觉工具兜底（known 名单 = 静态面 + 动态装载名单；miss 分流见
+		// unknowntool.go）。
+		known := make([]string, 0, len(face)+8)
+		for _, t := range face {
+			if info, err := t.Info(ctx); err == nil && info != nil && info.Name != "" {
+				known = append(known, info.Name)
+			}
+		}
+		var dyn map[string]bool
+		if pol := m.Opt.ToolSearchPolicy; pol != nil {
+			dyn = make(map[string]bool, len(pol.DynamicTools))
+			for _, n := range pol.DynamicTools {
+				dyn[n] = true
+				known = append(known, n)
+			}
+		}
+		tc := adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
+			Tools: face, UnknownToolsHandler: newUnknownToolHandler(known, dyn),
+		}}
 		if m.Opt.SubAgents != nil && m.Opt.SubAgents.EmitEvents {
 			tc.EmitInternalEvents = true // H8-2 全量转发档：子代理内部事件 → 父流（泵翻译 EvSubAgent）
 		}
@@ -700,7 +863,7 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		agConf.Handlers = append(agConf.Handlers, searchMW)
 	}
 	if m.Opt.SkillsDir != nil {
-		if dir := m.Opt.SkillsDir(); dir != "" {
+		if dir := m.Opt.SkillsDir(m.briefOf(s)); dir != "" {
 			if mw := skills.NewMiddleware(ctx, dir); mw != nil {
 				agConf.Handlers = append(agConf.Handlers, mw)
 			}
@@ -721,6 +884,13 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		}
 		agConf.Handlers = append(agConf.Handlers, sm)
 	}
+	// AGENTS.md 注入（推通道）：挂 summarization 之后（上游官方建议位——注入
+	// 内容不进摘要基底、不会被压缩掉；transient 不入历史/检查点）。
+	if m.Opt.AgentsMD != nil {
+		if mw := newAgentsMDMiddleware(ctx, m.Opt.AgentsMD(m.briefOf(s)), m.Opt.AgentsMDMaxBytes); mw != nil {
+			agConf.Handlers = append(agConf.Handlers, mw)
+		}
+	}
 	ag, err := adk.NewChatModelAgent(ctx, agConf)
 	if err != nil {
 		return nil, nil, nil, err
@@ -739,6 +909,20 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	return ag, runner, behaviors, nil
 }
 
+// wrapFace 契约面统一包装序：hitl 审批 → ToolWrap（应用缝，最外）→ einoext
+// 适配。主面与子代理面（spawn/拓扑）同序——审计/准入对子代理同样生效；
+// 应用包装在审批外层即单调收紧（透传保留审批，额外拒绝生效，豁免不可达）。
+// nil ToolWrap = 只走 hitl，零变化。
+func (m *Manager) wrapFace(ts []contract.Tool, s *session.Session, mode string) []tool.BaseTool {
+	wrapped := hitl.WrapTools(ts, s, mode, m.Opt.Approval)
+	if m.Opt.ToolWrap != nil {
+		for i, t := range wrapped {
+			wrapped[i] = m.Opt.ToolWrap(t)
+		}
+	}
+	return einoext.Adapt(wrapped)
+}
+
 // imageCapableOf 会话模型是否声明图片输入（read_image 工具门禁——当前路由
 // 明示能力才放行，对齐官方 harness 的路由能力断言：未知即拒）。
 func (m *Manager) imageCapableOf(s *session.Session) bool {
@@ -749,7 +933,8 @@ func (m *Manager) imageCapableOf(s *session.Session) bool {
 // briefOf 会话 → Instruction 入参概要（每轮 assemble/estimate 实时取——
 // 会话内切换模型/effort 后下一轮提示即更新，永不陈旧）。
 func (m *Manager) briefOf(s *session.Session) SessionBrief {
-	return SessionBrief{Mode: s.ModePublic(), Model: s.Model.Model, Effort: s.Model.Effort}
+	return SessionBrief{Mode: s.ModePublic(), Model: s.Model.Model, Effort: s.Model.Effort,
+		Owner: s.Owner, SID: s.SID}
 }
 
 // configError 配置类错误（error 事件 code=CONFIG）。
@@ -969,18 +1154,32 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 // 事件 + 落盘——不留 running 僵尸。覆盖页面关闭/刷新/停止按钮。审批挂起
 // （pending_approval）不受影响——那是有意的跨页面等待，超时器兜底。
 // FlushQueue 的打断走 interrupted 行（非故障形态——紧跟的新一轮以排队消息
-// 为输入）。
+// 为输入）。打断语义告知（codex interrupted marker 对位）：中断轮的历史追
+// 加一条系统注记——模型续聊时知晓打断语境与「工具可能部分执行」语义，不
+// 假设中断前操作都已成功。
 func (m *Manager) interruptUnlessStopped(s *session.Session, fn emitFn) {
 	if s.Stopped() {
 		return
 	}
 	if s.TakeFlushMark() {
+		m.appendInterruptMarker(s)
 		m.emit(s, fn, contract.EvInterrupted, contract.InterruptOut{Message: "已打断当前任务，立即处理排队消息"})
 		m.finishOf(s)(session.StateError)
 		return
 	}
+	m.appendInterruptMarker(s)
 	m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: "ABORTED", Message: "手动停止，任务中断（已执行的操作不回滚）"})
 	m.finishOf(s)(session.StateError)
+}
+
+// appendInterruptMarker 打断历史标记（部分执行语义三义：被打断/后台进程可
+// 能仍在跑/工具可能部分执行——续聊轮的模型可见面；悬空 tool_call 的配对
+// 修补归 timers/sanitizeHistory，此处只补语义告知半边）。
+func (m *Manager) appendInterruptMarker(s *session.Session) {
+	s.AppendHistory(schema.UserMessage(
+		"（系统注记）上一轮执行被中断：部分工具调用可能未完成或未生效，后台进程可能仍在运行。" +
+			"继续任务前先用只读工具核对现场（文件状态/后台任务输出），不要假设中断前的操作都已成功。"))
+	m.reg.Persist(s)
 }
 
 // summaryOf 取列表摘要。

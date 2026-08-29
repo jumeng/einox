@@ -28,7 +28,7 @@ func newVisionRunManager(t *testing.T, imageInput bool, resolve llm.ImageResolve
 		input = append(input, "image")
 	}
 	reg := session.NewRegistry(st)
-	return NewManager(reg, Options{
+	m, err := NewManager(reg, Options{
 		Providers: func() []llm.ProviderSpec {
 			return []llm.ProviderSpec{{
 				ID: "p", Kind: "openai", Enabled: true,
@@ -43,6 +43,10 @@ func newVisionRunManager(t *testing.T, imageInput bool, resolve llm.ImageResolve
 		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
 		ImageResolve:  resolve,
 	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return m
 }
 
 // TestRunImageAttachmentResolved 含图附件经引擎与包装两层：Run 构造引用 part，

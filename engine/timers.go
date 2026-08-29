@@ -66,41 +66,55 @@ func (m *Manager) startApprovalTimer(s *session.Session, appID string, timeoutAt
 		approvalMu.Lock()
 		delete(approvalTimers, s.SID)
 		approvalMu.Unlock()
-		if s.Stopped() || s.PendingAppID() != appID {
-			return // 已决议/已删除
-		}
-		s.SetPendingApproval("")
-		if kind == "ask" {
-			// 提问超时：不作答即分支取消（Resume 时 Decision 为 nil → fail-closed）
-			s.Record(contract.EvAskTimeout, map[string]string{"ask_id": appID, "reason": "提问超时未作答"})
-			s.SetState(session.StateEnded)
-			m.reg.Persist(s)
-			return
-		}
-		if kind == "plan" {
-			// 计划超时：自动拒绝（fail-closed；文档停在 submitted 态——超时不
-			// Resume，工具恢复流不跑，续聊由模型从拒绝反馈中知晓）
-			s.SetDecision(contract.ApprovalDecision{Approve: false, Reason: "计划审批超时，自动拒绝"})
-			s.Record(contract.EvPlanTimeout, map[string]string{"plan_id": appID, "reason": "计划审批超时，自动拒绝"})
-			s.SetState(session.StateEnded)
-			m.reg.Persist(s)
-			return
-		}
-		// 审批超时：自动拒绝（fail-closed）。合并决议卡 = 全项拒绝（项清单
-		// 逐项落拒——Resume 重放时各工具按 item_id 领到拒绝）；旧单卡/无项
-		// 清单 = "" 槽单决议拒绝（既有语义不变）。
-		if items := s.PendingItems(); len(items) > 0 {
-			for _, id := range items {
-				s.SetDecisionFor(id, contract.ApprovalDecision{Approve: false, Reason: "审批超时，自动拒绝"})
-			}
-		} else {
-			s.SetDecision(contract.ApprovalDecision{Approve: false, Reason: "审批超时，自动拒绝"})
-		}
-		s.Record(contract.EvApprovalTimeout, map[string]string{"approval_id": appID, "reason": "审批超时，自动拒绝"})
-		s.SetState(session.StateEnded)
-		m.reg.Persist(s)
+		m.expirePending(s, appID, kind)
 	})
 	approvalMu.Unlock()
+}
+
+// expirePending 挂起超时动作（到点仍挂起且无决议 → 拒绝/取消 + 终态落盘）。
+// 决议已到达即让位：应用端点（决议登记 → Persist → BeginRun → go Resume）
+// 与停表之间存在窗口——Resume 的 stopApprovalTimer 是停表唯一入口，决议
+// 登记本身不清挂起态；窗口内到点若照常执行，会把用户刚 approve 的决议覆盖
+// 成超时拒绝、把 BeginRun 的 running 改写回 ended。部分到达（批量决议逐项
+// 写入的非原子窗口）同样让位——未决项由 Resume 重放 fail-closed 兜底。
+func (m *Manager) expirePending(s *session.Session, appID, kind string) {
+	if s.Stopped() || s.PendingAppID() != appID || s.HasPendingDecision() {
+		return // 已决议/已删除/决议已到达（Resume 将消费）
+	}
+	// 项清单先取：SetPendingApproval("") 会一并清空 pendingItems——先清后取
+	// 令合并卡逐项落拒从未生效（实落 "" 槽，重放各工具按 item_id 领不到决议，
+	// 走的是「无决议到达」文案的 fail-closed——语义偏差，实测暴露）。
+	items := s.PendingItems()
+	s.SetPendingApproval("")
+	if kind == "ask" {
+		// 提问超时：不作答即分支取消（Resume 时 Decision 为 nil → fail-closed）
+		s.Record(contract.EvAskTimeout, map[string]string{"ask_id": appID, "reason": "提问超时未作答"})
+		s.SetState(session.StateEnded)
+		m.reg.Persist(s)
+		return
+	}
+	if kind == "plan" {
+		// 计划超时：自动拒绝（fail-closed；文档停在 submitted 态——超时不
+		// Resume，工具恢复流不跑，续聊由模型从拒绝反馈中知晓）
+		s.SetDecision(contract.ApprovalDecision{Approve: false, Reason: "计划审批超时，自动拒绝"})
+		s.Record(contract.EvPlanTimeout, map[string]string{"plan_id": appID, "reason": "计划审批超时，自动拒绝"})
+		s.SetState(session.StateEnded)
+		m.reg.Persist(s)
+		return
+	}
+	// 审批超时：自动拒绝（fail-closed）。合并决议卡 = 全项拒绝（项清单
+	// 逐项落拒——Resume 重放时各工具按 item_id 领到拒绝）；旧单卡/无项
+	// 清单 = "" 槽单决议拒绝（既有语义不变）。
+	if len(items) > 0 {
+		for _, id := range items {
+			s.SetDecisionFor(id, contract.ApprovalDecision{Approve: false, Reason: "审批超时，自动拒绝"})
+		}
+	} else {
+		s.SetDecision(contract.ApprovalDecision{Approve: false, Reason: "审批超时，自动拒绝"})
+	}
+	s.Record(contract.EvApprovalTimeout, map[string]string{"approval_id": appID, "reason": "审批超时，自动拒绝"})
+	s.SetState(session.StateEnded)
+	m.reg.Persist(s)
 }
 
 // stopApprovalTimer 决议到达即停表（approve/reject 抢先于超时）。
