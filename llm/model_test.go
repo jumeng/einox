@@ -62,3 +62,19 @@ func TestThinkingBudget(t *testing.T) {
 		}
 	}
 }
+
+// TestSamplingOf 采样参数映射：未声明不发字段（nil=端点默认）、显式声明经
+// f32 窄化下发、单项声明互不影响（两协议组件共用此单点）。
+func TestSamplingOf(t *testing.T) {
+	if temp, topP := samplingOf(ModelSpec{}); temp != nil || topP != nil {
+		t.Fatalf("未声明应不发字段：%v %v", temp, topP)
+	}
+	tp, pp := 0.7, 0.9
+	temp, topP := samplingOf(ModelSpec{Temperature: &tp, TopP: &pp})
+	if temp == nil || *temp != float32(0.7) || topP == nil || *topP != float32(0.9) {
+		t.Fatalf("显式声明应下发（f32 窄化）：%v %v", temp, topP)
+	}
+	if temp, topP = samplingOf(ModelSpec{Temperature: &tp}); temp == nil || topP != nil {
+		t.Fatalf("单项声明应只发该项：%v %v", temp, topP)
+	}
+}

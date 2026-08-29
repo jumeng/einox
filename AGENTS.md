@@ -15,8 +15,8 @@ einox 是通用 agent 基座库——三层栈 eino（LLM 框架）→ einox（a
 ```
 
 - `contract/` 是对应用的唯一契约面，零 eino 类型；eino 只在基座内部被消费（engine / llm / einoext）
-- 一次运行的通路：`Manager.Run` 驱动 adk ReAct 循环（eino 模型组件调 LLM）→ 引擎把流翻译为 `contract.Event` → `Session.Record` 落会话记录 + emit 回调实时扇出；挂起交互（`Suspend`）转引擎 Interrupt，经 `Resume` 续流
-- 工具装配链（组装期逐层包装，由内向外）：业务工具 → mid guard / errFeed → hitl 审批包装 → `ToolWrap`（应用包装缝，nil 不挂——只能收紧不能放宽）→ einoext 桥（eino ParamsOneOf）；会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch，未知名构造期即拒）
+- 一次运行的通路：`Manager.Run` 驱动 adk ReAct 循环（eino 模型组件调 LLM）→ 引擎把流翻译为 `contract.Event` → `Session.Record` 落会话记录 + emit 回调实时扇出；自然收束可经 `FinalGate` 门循环回灌重跑（可选——判据归应用，见 docs/03）；挂起交互（`Suspend`）转引擎 Interrupt，经 `Resume` 续流
+- 工具装配链（组装期逐层包装，由内向外）：业务工具 → mid validate / errFeed / guard → hitl 审批包装 → `ToolWrap`（应用包装缝，nil 不挂——只能收紧不能放宽）→ einoext 桥（eino ParamsOneOf；幻觉工具名兜底信封回喂 + panic 单点收敛）；会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch，未知名构造期即拒）
 - 会话态归 `session`（Registry / Session / 快照 / 排队消息）；检查点经 `engine.CheckPointStore`；工具面路径圈进会话工作区
 - 测试：`boundary_test.go` 守两道依赖边界；`engine` 各测试用 `llmtest` 假模型验证行为，不碰真实端点
 

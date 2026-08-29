@@ -267,7 +267,8 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 			//（fail-closed——挂起无人决议宁可失败）。装配纪律：数据域写与 repo
 			// 写工具不进子面白名单。ToolWrap 与主面同序同挂（wrapFace）。
 			conf.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: m.wrapFace(subTs, s, mode),
+				Tools:               m.wrapFace(subTs, s, mode),
+				UnknownToolsHandler: newUnknownToolHandler(contractToolNames(subTs), nil), // 幻觉兜底与主面同策略
 			}}
 		}
 		if mw, err := m.newReductionMiddleware(s, window, false); err != nil {

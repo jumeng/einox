@@ -42,7 +42,9 @@ type Store interface {
 	WriteUserTreeFile(operator, rel string, data []byte) error
 	RemoveUserTree(operator, rel string) error
 	// UserTreeDir 用户域根绝对路径（.agent/users/<op>；会话工作区
-	// workspaces/<sid> 在其下——Delete/Sweep 清理链用）。
+	// workspaces/<sid> 在其下——Delete/Sweep 清理链用）。契约：须为本地
+	// 文件系统路径——Sweeper 与 recall 检索（persist_read.go）直用 os 操作，
+	// 文件保存会话是本基座唯一支持的存储形态（无 DB 型实现需求）。
 	UserTreeDir(operator string) string
 	ListUserTreeSessions(operator string) []string
 	ListUsers() []string
@@ -328,6 +330,14 @@ func (s *Session) TitleOf() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.Title
+}
+
+// TaskOf 会话任务摘要读（首条用户消息截断——与落盘 sessionRecord.Task 同源；
+// recall 检索与 TurnEpilogue 交接载荷用）。
+func (s *Session) TaskOf() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Task
 }
 
 // Subscribe 旁观订阅（返回通道与订阅时最新事件 ID——追赶回放去重基准）。

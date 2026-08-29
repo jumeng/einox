@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -89,9 +90,11 @@ func TestSpawnEndToEndIsolation(t *testing.T) {
 	}
 }
 
-// TestSpawnWhitelistAndFailFeed 白名单硬筛（write_tool 不在子面 → 子调用即败）
-// + 失败显式回传（errFeed JSON 回喂父、父运行正常收口不炸）。
-func TestSpawnWhitelistAndFailFeed(t *testing.T) {
+// TestSpawnWhitelistMissSelfCorrects 白名单硬筛：write_tool 不在子面（物理
+// 未装配）→ 子调用经幻觉兜底信封回喂 → 子自纠收口；write_tool 从未被执行、
+// 父运行正常收口（2026-08-29 幻觉兜底后的新语义——原「子调用即败」路径
+// 改由 TestSpawnSubErrorFailFeed 覆盖）。
+func TestSpawnWhitelistMissSelfCorrects(t *testing.T) {
 	rt, _ := tools.InferTool("read_tool", "读桩", func(context.Context, struct{}) (map[string]any, error) {
 		return map[string]any{"ok": true}, nil
 	})
@@ -103,8 +106,9 @@ func TestSpawnWhitelistAndFailFeed(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "收到失败"})
 	}}
-	// 子（Generate 路径）调 write_tool：不在白名单 → 子面无此工具 → 子运行报错。
-	// scriptedModel.Generate 恒回文本——改用本地子剧本模型驱动工具调用：
+	// 子（Generate 路径）调 write_tool：不在白名单 → 子面无此工具 → 兜底信封
+	// 回喂 → 子第二调文本收口。scriptedModel.Generate 恒回文本——改用本地
+	// 子剧本模型驱动工具调用：
 	subFM := &toolCallOnceModel{call: "write_tool"}
 	m, _ := newReductionManager(t, 0, []contract.Tool{rt}, subFM.factory(fm), func(o *Options) {
 		o.SubAgents = &SubAgentsConfig{Tools: []string{"read_tool"}}
@@ -115,9 +119,63 @@ func TestSpawnWhitelistAndFailFeed(t *testing.T) {
 	waitTitleFlight(t, s)
 
 	if s.StateOf() != session.StateEnded {
-		t.Fatalf("子失败不得杀父运行，终态 %s", s.StateOf())
+		t.Fatalf("白名单失配不得杀父运行，终态 %s", s.StateOf())
 	}
 	over := toolMsgOf(fm.inputs[len(fm.inputs)-1]) // 父收口前最后一调（genTitle 走 Generate 不入 inputs）
+	selfCorrected, leaked := false, false
+	for _, c := range over {
+		if strings.Contains(c, "子完成") {
+			selfCorrected = true // 子经信封自纠后的正常结论
+		}
+		if strings.Contains(c, "子代理执行失败") {
+			leaked = true
+		}
+	}
+	if !selfCorrected || leaked {
+		t.Fatalf("白名单失配应信封自纠（子完成回传），实得 %+v", over)
+	}
+	// 子第二调的输入须含「不存在」信封（write_tool 未被执行的直接证据）
+	subFed := false
+	for _, in := range subFM.inputsOf() {
+		for _, msg := range in {
+			if msg.Role == schema.Tool && strings.Contains(msg.Content, "不存在") {
+				subFed = true
+			}
+		}
+	}
+	if !subFed {
+		t.Fatal("子模型应收到不存在信封（write_tool 物理未装配）")
+	}
+}
+
+// TestSpawnSubErrorFailFeed 子运行真错误（致命类不重试）：errFeed JSON 显式
+// 回传父、父运行不炸正常收口（spawnFailFeed 语义回归——幻觉兜底后由本测试
+// 承接原「子失败」覆盖面）。
+func TestSpawnSubErrorFailFeed(t *testing.T) {
+	rt, _ := tools.InferTool("read_tool", "读桩", func(context.Context, struct{}) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("c1", "spawn", `{"task":"会失败的任务"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "收到失败"})
+	}}
+	subFM := &failOnceModel{}
+	m, _ := newReductionManager(t, 0, []contract.Tool{rt}, subFM.factory(fm), func(o *Options) {
+		o.SubAgents = &SubAgentsConfig{Tools: []string{"read_tool"}}
+	})
+	s := m.Registry().Create("张三", "子失败", "plan", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	m.Run(context.Background(), s, "派子", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+
+	if s.StateOf() != session.StateEnded {
+		t.Fatalf("子失败不得杀父运行，终态 %s", s.StateOf())
+	}
+	over := toolMsgOf(fm.inputs[len(fm.inputs)-1])
 	found := false
 	for _, c := range over {
 		if strings.Contains(c, "子代理执行失败") {
@@ -263,10 +321,14 @@ func (r *recGenModel) Stream(ctx context.Context, in []*schema.Message, o ...mod
 
 // toolCallOnceModel 首调发起工具调用、后续恒文本的子模型（父模型仍用
 // scriptedModel——工厂按模型键分叉：spawn 子模型键与父相同，需按调用序分派）。
+// inputs 记录各次入参（幻觉兜底信封断言面）。
 type toolCallOnceModel struct {
-	call string
-	done bool
+	call   string
+	done   bool
+	inputs [][]*schema.Message
 }
+
+func (t *toolCallOnceModel) inputsOf() [][]*schema.Message { return t.inputs }
 
 func (t *toolCallOnceModel) factory(parent *scriptedModel) llm.ModelFactory {
 	n := 0
@@ -279,7 +341,8 @@ func (t *toolCallOnceModel) factory(parent *scriptedModel) llm.ModelFactory {
 	}
 }
 
-func (t *toolCallOnceModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+func (t *toolCallOnceModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	t.inputs = append(t.inputs, append([]*schema.Message(nil), input...))
 	if t.done {
 		return schema.AssistantMessage("子完成", nil), nil
 	}
@@ -429,19 +492,53 @@ func TestSpawnSemaphoreSerializes(t *testing.T) {
 }
 
 // failOneModel 子剧本模型：一次调用轮转——调用 1 直接文本结论（成功）、
-// 调用 2 发起白名单外工具调用（子面无此工具 → 子运行报错 → errFeed）。
+// 调用 2 返回致命错误（未知类不重试 → 子运行报错 → errFeed；幻觉兜底后
+// 「白名单外工具」路径已改自纠，失败面由此承接）。
 type failOneModel struct {
 	seq atomic.Int32
 }
 
 func (f *failOneModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	if f.seq.Add(1) == 2 {
-		return schema.AssistantMessage("", []schema.ToolCall{tcOf("gc1", "ghost_tool", `{}`)}), nil
+		return nil, errors.New("子执行崩溃")
 	}
 	return schema.AssistantMessage("子结论：勘察成功", nil), nil
 }
 
 func (f *failOneModel) Stream(ctx context.Context, in []*schema.Message, o ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := f.Generate(ctx, in, o...)
+	if err != nil {
+		return nil, err
+	}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(msg, nil)
+	sw.Close()
+	return sr, nil
+}
+
+// failOnceModel 首调直接报错（致命类）、续调文本收口的子模型（单失败面）。
+type failOnceModel struct{ done bool }
+
+func (f *failOnceModel) factory(parent *scriptedModel) llm.ModelFactory {
+	n := 0
+	return func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n == 2 {
+			return f, nil
+		}
+		return parent, nil
+	}
+}
+
+func (f *failOnceModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	if f.done {
+		return schema.AssistantMessage("子完成", nil), nil
+	}
+	f.done = true
+	return nil, errors.New("子执行崩溃")
+}
+
+func (f *failOnceModel) Stream(ctx context.Context, in []*schema.Message, o ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	msg, err := f.Generate(ctx, in, o...)
 	if err != nil {
 		return nil, err

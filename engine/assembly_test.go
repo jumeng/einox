@@ -143,7 +143,8 @@ func TestSessionToolsOffTrimsFamilies(t *testing.T) {
 }
 
 // TestSessionToolsOffPatchCallErrors 裁 patch 族后面上无 apply_patch——模型
-// 调用即引擎错误收线（物理移除执行面，非审批语义可绕）。
+// 调用经幻觉兜底信封回喂自纠（不执行、不杀轮；物理移除执行面仍成立——信封
+// 即「不在可用清单」，非审批语义可绕）。
 func TestSessionToolsOffPatchCallErrors(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		if n == 1 {
@@ -164,8 +165,21 @@ func TestSessionToolsOffPatchCallErrors(t *testing.T) {
 	s.SetState(session.StateRunning)
 	var names []string
 	m.Run(context.Background(), s, "改一下", nil, func(ev session.Event) { names = append(names, ev.Event) })
-	if !contains(names, contract.EvError) {
-		t.Fatalf("面外工具调用应以错误收线：%v", names)
+	if contains(names, contract.EvError) {
+		t.Fatalf("面外工具调用应信封回喂自纠（非错误收线）：%v", names)
+	}
+	if !contains(names, contract.EvSessionEnd) {
+		t.Fatalf("自纠后应正常收线：%v", names)
+	}
+	// 模型第二调必须看到「不存在」信封（apply_patch 未被执行的直接证据）
+	fed := false
+	for _, c := range toolMsgOf(fm.inputs[len(fm.inputs)-1]) {
+		if strings.Contains(c, "apply_patch") && strings.Contains(c, "不存在") {
+			fed = true
+		}
+	}
+	if !fed {
+		t.Fatalf("面外调用应回喂不存在信封，实得 %+v", toolMsgOf(fm.inputs[len(fm.inputs)-1]))
 	}
 	for _, x := range toolNamesOf(t, m, s) {
 		if x == "apply_patch" {

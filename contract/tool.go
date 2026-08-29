@@ -36,7 +36,8 @@ const (
 )
 
 // Schema 参数 JSON Schema 的最小子集（object 形）。与 eino ParamsOneOf 经
-// JSON 往返互转（einox/einoext 的 Adapt/Bridge 桥）。
+// JSON 往返互转（einox/einoext 的 Adapt/Bridge 桥）。Minimum/Maximum 供
+// mid.Validate 数值边界校验（数值类型约束，声明了才校验）。
 type Schema struct {
 	Type        string             `json:"type,omitempty"`
 	Description string             `json:"description,omitempty"`
@@ -44,4 +45,6 @@ type Schema struct {
 	Items       *Schema            `json:"items,omitempty"`
 	Properties  map[string]*Schema `json:"properties,omitempty"`
 	Required    []string           `json:"required,omitempty"`
+	Minimum     *float64           `json:"minimum,omitempty"`
+	Maximum     *float64           `json:"maximum,omitempty"`
 }

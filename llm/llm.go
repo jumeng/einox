@@ -52,6 +52,11 @@ type ModelSpec struct {
 	Limit     *Limit     `json:"limit,omitempty"`
 	Input     []string   `json:"input"` // ⊆ text/image（空 = text）
 	Priority  int        `json:"priority"`
+	// Temperature / TopP 采样参数（nil = 不发字段走端点默认——多数推理端点
+	// 拒绝显式 temperature，只在用户显式设置时下发；随会话模型快照粘住，
+	// 会话内不变即前缀缓存友好）。建议二选一，不同时设。
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty"`
 }
 
 // ProviderSpec 端点条目。

@@ -102,6 +102,14 @@ type Options struct {
 	// 入参 = 会话概要——按租户物化不同 skill 包；与 Tools 同契约：每轮
 	// assemble 求值、并发安全）。
 	SkillsDir func(sess SessionBrief) string
+	// AgentsMD AGENTS.md 注入清单（nil/空清单 = 不挂零变化；绝对路径，按序
+	// 注入）。发现逻辑归应用（ZCode 双层形态：用户级文件先、工作区级文件后
+	// 收窄覆盖——两文件按序进清单即得）；跨会话记忆注入通道同走此缝（owner
+	// 级记忆文件进清单）。与 SkillsDir 同契约：每轮 assemble 求值、并发安全。
+	AgentsMD func(sess SessionBrief) []string
+	// AgentsMDMaxBytes 注入字节预算（0 = 缺省 32KiB；上游按序装载超限即跳过
+	// 余下文件——预算显式化，防提示词面失控）。
+	AgentsMDMaxBytes int
 	// Approval 审批配置（写工具名单/动作名/参数豁免——业务内容）。
 	Approval hitl.ApprovalConfig
 	// WorkspaceRoot 会话工作区根（用户域 workspaces/<sid>——repos/ 挂载
@@ -134,8 +142,44 @@ type Options struct {
 	// SummarizerFallbackModels 摘要模型 Failover 降级链（H9-10：主摘要模型
 	// 失败按序降级的复合键清单，逐个同链包装 vision/shape 后填 adk Failover；
 	// 空 = 不配降级零变化（单端点装配配了也白配）；链尽走既有清窗兜底不外抛。
-	// ShouldFailover 排除 ctx 取消/中断类、MaxRetries=链长——审查补差内建）。
+	// ShouldFailover 排除 ctx 取消/中断类、MaxRetries=链长——审查补差内建。
 	SummarizerFallbackModels []string
+	// FallbackModels 主对话模型 Failover 降级链（复合键清单；空 = 零变化）。
+	// 重试先耗尽（有界重连）、RetryExhaustedError 触发按序换链上模型（每档
+	// 各享完整重连预算）；粘滞上次成功模型归 adk。切换发 model_change 事件；
+	// 致命类（401/403/402 配置错）不降级直接停机；ctx 取消/审批中断不降级。
+	// 清单错配（键不在 Providers 内）不阻断运行：降级失效 + harness_note 留痕。
+	// 子代理/拓扑子面不挂（链按主模型语境配置，维持 retry-only）。
+	FallbackModels []string
+	// Recall 跨会话检索工具（记忆拉通道，opt-in）：模型可读本 owner 历史会话
+	// 的摘要与消息投影（三模式 sid 深读/query 检索/最近列表；恒排除当前会话、
+	// 有界、摘要级——授权五律见 recall.go）。是新能力面：装配即知情决策，
+	// false = 不装配零变化。条件装配先例 = repo 族之于 RepoMounts。
+	Recall bool
+	// TurnEpilogue 轮收尾交接钩子（记忆写通道，nil = 零变化）：自然收束
+	// （StateEnded）每轮触发，载荷与 session_end 事件同源（摘要+文件变更）。
+	// einox 的 session_end 是轮级——应用自行去重/节流。同步调用应快速返回，
+	// 重提取（LLM 蒸馏/外部写）归应用异步；panic 由引擎兜底不影响终态。
+	// 最小用法：把摘要追加进 owner 域记忆 markdown，经 AgentsMD 清单注入。
+	TurnEpilogue func(sum TurnEndSummary)
+	// FinalGate 收束质量门（nil = 零变化）：自然收束后、终态落盘前按
+	// GateConfig.Checkers 强制验证——失败经 harness_note 门卡 + 反馈消息
+	// 入史回灌重跑（有界，MaxRetries 缺省 2），耗尽 error 收束不静默放行。
+	// 闭包入参 SessionBrief：按模式/任务形态决定开门与否与判据清单（判据
+	// 归应用——build/test 命令或自包的对抗审查；基座只持门循环机制）。
+	// 挂起/中断/错误轮不触发；重试预算随 Run/Resume 执行体。
+	FinalGate func(sess SessionBrief) *GateConfig
+}
+
+// TurnEndSummary 轮收尾交接载荷（session_end 事件同源 + 会话身份）。
+type TurnEndSummary struct {
+	Owner   string
+	SID     string
+	Title   string
+	Task    string
+	Summary string               // 会话累计文本聚合（session_end 同源；列表摘要口径截 60 字，非单轮）
+	Files   []contract.FileChange // 文件变更清单（有改动才非空）
+	EndedAt time.Time
 }
 
 // Manager 引擎管理器（进程单例；会话态归 Registry）。
@@ -504,6 +548,7 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 	runCtx = contract.WithOperator(runCtx, s.Owner) // 工具层审计主体 = 会话发起人
 	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
 	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s)) // 读图工具门禁：会话模型明示能力
+	runCtx = withEmitFn(runCtx, fn)                               // failover 切换事件的 live 转发面
 	s.SetCancel(cancel)
 	defer func() {
 		cancel()
@@ -527,7 +572,7 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 	s.AppendHistory(userMsgFinal)
 	m.reg.Persist(s)
 
-	acc, endState := m.pump(s, iter, fn, m.estimateContext(s), behaviors)
+	acc, endState := m.drive(runCtx, s, fn, iter, behaviors)
 	m.settleTurn(s, acc, endState, fn, finish)
 }
 
@@ -540,6 +585,7 @@ func (m *Manager) Resume(ctx context.Context, s *session.Session, fn emitFn) {
 	runCtx = contract.WithOperator(runCtx, s.Owner)
 	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
 	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s))
+	runCtx = withEmitFn(runCtx, fn) // failover 切换事件的 live 转发面
 	s.SetCancel(cancel)
 	defer func() {
 		cancel()
@@ -554,7 +600,7 @@ func (m *Manager) Resume(ctx context.Context, s *session.Session, fn emitFn) {
 		finish(session.StateError)
 		return
 	}
-	acc, endState := m.pump(s, iter, fn, m.estimateContext(s), behaviors)
+	acc, endState := m.drive(runCtx, s, fn, iter, behaviors)
 	m.settleTurn(s, acc, endState, fn, finish)
 }
 
@@ -599,6 +645,17 @@ func (m *Manager) FlushQueue(s *session.Session) bool {
 	return true
 }
 
+// turnEpilogue 轮收尾交接（记忆写通道）：载荷与 session_end 事件同源。钩子
+// panic 由引擎兜底（此时终态已落盘，不该被应用钩子拖垮）；同步调用——重
+// 提取归应用异步。
+func (m *Manager) turnEpilogue(s *session.Session) {
+	defer func() { _ = recover() }()
+	m.Opt.TurnEpilogue(TurnEndSummary{
+		Owner: s.Owner, SID: s.SID, Title: s.TitleOf(), Task: s.TaskOf(),
+		Summary: s.SummaryOf(), Files: s.FileChangesSnapshot(), EndedAt: time.Now(),
+	})
+}
+
 // hasAssistant 历史中是否已有 assistant 终态（首轮判定——用户消息自 Run
 // 开头即入史，不能再以「历史为空」判首轮）。
 func hasAssistant(msgs []*schema.Message) bool {
@@ -638,6 +695,9 @@ func (m *Manager) settleTurn(s *session.Session, acc *runAccum, endState string,
 	s.ClearTurnGrant()
 	s.SetPendingApproval("")
 	fn(endEv)
+	if m.Opt.TurnEpilogue != nil && endState == session.StateEnded {
+		m.turnEpilogue(s) // 记忆写通道：自然收束触发（挂起/中断/删除路径不触发）
+	}
 	if firstTurn && s.TitleOf() == "" {
 		done := s.MarkTitleFlight() // 在途信号挂会话：Run 后写可 join（测试收尾/删除方等待锚点）
 		go func() {
@@ -703,6 +763,7 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		Model:            cm,
 		MaxIterations:    maxIterations,
 		ModelRetryConfig: m.modelRetryConfig(), // 网络容错 ②：有界重试（机制默认挂接，应用零配置）
+		ModelFailoverConfig: m.modelFailoverConfig(ctx, s), // 主模型降级链（空清单 nil 零变化）
 	}
 	var ts []contract.Tool
 	if m.Opt.Tools != nil {
@@ -716,6 +777,13 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		return nil, nil, nil, err
 	}
 	ts = append(ts, sts...)
+	if m.Opt.Recall { // 记忆拉通道（opt-in；会话域件形态——owner/sid 装配期捕获）
+		rt, err := newRecallTool(m.reg, s)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		ts = append(ts, rt)
+	}
 	behaviors := make(map[string]string, len(ts)) // UI-B2：行为标记快照（tool_call 事件携带——前端分组数据源；值由工具自declare，引擎不判别）
 	for _, t := range ts {
 		if info := t.Info(); info != nil && info.Behavior != "" {
@@ -766,7 +834,25 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		}
 	}
 	if len(face) > 0 {
-		tc := adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: face}}
+		// 幻觉工具兜底（known 名单 = 静态面 + 动态装载名单；miss 分流见
+		// unknowntool.go）。
+		known := make([]string, 0, len(face)+8)
+		for _, t := range face {
+			if info, err := t.Info(ctx); err == nil && info != nil && info.Name != "" {
+				known = append(known, info.Name)
+			}
+		}
+		var dyn map[string]bool
+		if pol := m.Opt.ToolSearchPolicy; pol != nil {
+			dyn = make(map[string]bool, len(pol.DynamicTools))
+			for _, n := range pol.DynamicTools {
+				dyn[n] = true
+				known = append(known, n)
+			}
+		}
+		tc := adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
+			Tools: face, UnknownToolsHandler: newUnknownToolHandler(known, dyn),
+		}}
 		if m.Opt.SubAgents != nil && m.Opt.SubAgents.EmitEvents {
 			tc.EmitInternalEvents = true // H8-2 全量转发档：子代理内部事件 → 父流（泵翻译 EvSubAgent）
 		}
@@ -797,6 +883,13 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 			return nil, nil, nil, err
 		}
 		agConf.Handlers = append(agConf.Handlers, sm)
+	}
+	// AGENTS.md 注入（推通道）：挂 summarization 之后（上游官方建议位——注入
+	// 内容不进摘要基底、不会被压缩掉；transient 不入历史/检查点）。
+	if m.Opt.AgentsMD != nil {
+		if mw := newAgentsMDMiddleware(ctx, m.Opt.AgentsMD(m.briefOf(s)), m.Opt.AgentsMDMaxBytes); mw != nil {
+			agConf.Handlers = append(agConf.Handlers, mw)
+		}
 	}
 	ag, err := adk.NewChatModelAgent(ctx, agConf)
 	if err != nil {
@@ -1061,18 +1154,32 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 // 事件 + 落盘——不留 running 僵尸。覆盖页面关闭/刷新/停止按钮。审批挂起
 // （pending_approval）不受影响——那是有意的跨页面等待，超时器兜底。
 // FlushQueue 的打断走 interrupted 行（非故障形态——紧跟的新一轮以排队消息
-// 为输入）。
+// 为输入）。打断语义告知（codex interrupted marker 对位）：中断轮的历史追
+// 加一条系统注记——模型续聊时知晓打断语境与「工具可能部分执行」语义，不
+// 假设中断前操作都已成功。
 func (m *Manager) interruptUnlessStopped(s *session.Session, fn emitFn) {
 	if s.Stopped() {
 		return
 	}
 	if s.TakeFlushMark() {
+		m.appendInterruptMarker(s)
 		m.emit(s, fn, contract.EvInterrupted, contract.InterruptOut{Message: "已打断当前任务，立即处理排队消息"})
 		m.finishOf(s)(session.StateError)
 		return
 	}
+	m.appendInterruptMarker(s)
 	m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: "ABORTED", Message: "手动停止，任务中断（已执行的操作不回滚）"})
 	m.finishOf(s)(session.StateError)
+}
+
+// appendInterruptMarker 打断历史标记（部分执行语义三义：被打断/后台进程可
+// 能仍在跑/工具可能部分执行——续聊轮的模型可见面；悬空 tool_call 的配对
+// 修补归 timers/sanitizeHistory，此处只补语义告知半边）。
+func (m *Manager) appendInterruptMarker(s *session.Session) {
+	s.AppendHistory(schema.UserMessage(
+		"（系统注记）上一轮执行被中断：部分工具调用可能未完成或未生效，后台进程可能仍在运行。" +
+			"继续任务前先用只读工具核对现场（文件状态/后台任务输出），不要假设中断前的操作都已成功。"))
+	m.reg.Persist(s)
 }
 
 // summaryOf 取列表摘要。

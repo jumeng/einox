@@ -1,6 +1,6 @@
-# 04 · 装配：快速使用、自由裁剪与业务扩展
+# 04 · 装配
 
-> 全部能力经 `engine.Options` 注入与启停——**四项必填，其余全部可选：nil 即不装配，零行为变化**。应用对基座只装配、不修改：组装根 = 构造 `Options` 交给 `NewManager`，构造期定型、运行期不可变（形态的完整界定见 [01-why-eino.md](01-why-eino.md)“架构比较”章）。
+> 全部能力经 `engine.Options` 注入与启停：**四项必填，其余全部可选，nil 即不装配、零行为变化**。应用对基座只装配、不修改——组装根就是构造 `Options` 交给 `NewManager`，构造期定型、运行期不可变。
 
 ## 装配面（engine.Options）
 
@@ -17,6 +17,8 @@
 | `NewModel` | | 模型构造口（缺省 `llm.NewChatModel`；测试注入 `llmtest` 假模型） |
 | `ImageResolve` | | 图片引用解析（nil = 图片不可用，含图请求即错误面） |
 | `SkillsDir` | | skill 物化目录（`func(SessionBrief) string`——按租户物化不同 skill 包；nil/空 = 不挂 skill middleware） |
+| `AgentsMD` | | AGENTS.md 注入清单（`func(SessionBrief) []string` 绝对路径按序注入；nil/空 = 不挂零变化。发现逻辑归应用——ZCode 双层形态即用户级文件先、工作区级文件后进清单；注入纪律归 eino agentsmd 中间件：transient 不入历史、@import 递归、挂 summarization 之后不被压缩） |
+| `AgentsMDMaxBytes` | | 注入字节预算（0 = 缺省 32KiB；超限余下文件跳过——防提示词面失控） |
 | `Approval` | | 审批配置（写工具名单/动作名/ArgsForce——业务内容） |
 | `SubAgents` | | spawn 子代理装配（nil = 不装配 spawn） |
 | `Topology` | | 确定性多 agent 拓扑（nil = 单 agent react 主线） |
@@ -24,9 +26,13 @@
 | `RepoMounts` | | 代码仓定位 Resolver（nil = 不装配 repo 族） |
 | `RepoPatchWriter` | | 补丁导出落盘（nil = 导出面报未配置） |
 | `Sandbox` | | run_command 沙箱策略（nil = 不沙箱） |
-| `SandboxProvider` | | 沙箱后端（nil = OSProvider 平台内建；容器形态注入 `&sandbox.DockerProvider{Image: …}`——旧 `EINO_RUN_DOCKER` env 开关已退役） |
+| `SandboxProvider` | | 沙箱后端（nil = OSProvider 平台内建；容器形态注入 `&sandbox.DockerProvider{Image: …}`） |
 | `Egress` | | 网络出口校验器（nil = 不预检零变化） |
 | `SummarizerFallbackModels` | | 摘要模型 Failover 降级链（空 = 不配降级） |
+| `FallbackModels` | | 主对话模型 Failover 降级链（复合键清单；空 = 零变化。重试耗尽按序换备模型、每档各享完整重连预算；切换发 model_change 事件；致命类（401/403）不降级直接停机；子代理/拓扑子面不挂） |
+| `Recall` | | 跨会话检索工具 `recall`（记忆拉通道，opt-in——模型可读本 owner 历史会话摘要，新能力面装配即知情决策；false = 不装配零变化） |
+| `TurnEpilogue` | | 轮收尾交接钩子（记忆写通道；自然收束每轮触发、载荷与 session_end 同源。应用把摘要追加进 owner 域记忆 markdown、经 `AgentsMD` 清单注入即成读写环——文件格式/脱敏/追加式并发约定见 findings 记忆设计文档） |
+| `FinalGate` | | 收束质量门（`func(SessionBrief) *GateConfig`——按模式/任务形态开门；nil/返回 nil = 零变化。Checkers 为确定性判据（**归应用**——build/test 命令或自包对抗审查），失败回灌重跑（MaxRetries 负数=缺省 2、0=零回灌首验即报错——codex Guardian 普通/cyber 两档对位）、耗尽诚实报错；纯问答会话也会过门，闭包应按形态开门） |
 
 ## 最小装配
 
@@ -73,7 +79,7 @@ m.FlushQueue(sess)          // 排队消息落回轮
 **沙箱装配**（OS 后端 = re-exec 哨兵协议——应用 main 需挂 `sandbox.RunHelper` 钩子，装配期经沙箱 Provider 探测，内核不可用启动告警；`SandboxProvider` 注入容器等后端时无哨兵依赖；部署前提与平台限制见 [05-sandbox.md](05-sandbox.md)）：
 
 ```go
-&Sandbox: &sandbox.Policy{
+Sandbox: &sandbox.Policy{
     Mode:          sandbox.ModeWorkspaceWrite, // readonly / workspace-write / danger-full-access
     Network:       true,   // 断网档下依赖安装必死且模型无法自纠——内网形态须配 on
     EnvMode:       sandbox.EnvMinimal,         // 环境白名单——凭据面默认不进围栏（缺省 inherit 全继承）
@@ -86,9 +92,9 @@ m.FlushQueue(sess)          // 排队消息落回轮
 }
 ```
 
-容器形态：`SandboxProvider: &sandbox.DockerProvider{Image: "golang:1.26"}`——策略翻译进容器参数（三档挂载映射/断网/可写根/ro 子挂载回盖；旧 `EINO_RUN_DOCKER` env 开关已退役）。
+容器形态：`SandboxProvider: &sandbox.DockerProvider{Image: "golang:1.26"}`——策略翻译进容器参数（三档挂载映射/断网/可写根/ro 子挂载回盖）。
 
-**出口治理**：`egress.New([]string{"10.0.0.0/8", ...})`——私网默认阻断 + 白名单即工作面；建议开关打开而白名单缺失时启动即报错（fail-fast，防「开了开关忘了白名单」）。
+**出口治理**：`egress.New([]string{"10.0.0.0/8", ...})`——私网默认阻断（RFC1918 等）+ CIDR 白名单即工作面，`web_fetch` 前置与 `run_command` 命令串预检共用同一校验器。白名单缺失是否拒绝启动由应用装配层决定（防「开了开关忘了白名单」）——基座只在 CIDR 非法时返回 error。
 
 ## 扩展业务能力
 
@@ -129,11 +135,11 @@ func (t *createOrder) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 
 `einoext.NewExtTools(dir, einoext.MCPSpec{URL: …, Cmd: …})` 接入 eino-ext 官方组件与 MCP 远端件（`mcp_*` 前缀；写面语义未知 fail-closed——建议按写审批）。
 
-### 5. 子代理白名单（多代理编排的权限面）
+### 5. 子代理白名单
 
 `SubAgents.Tools` 只列读面与工作区探索/验证件；数据域写、repo 写、采集类进 `DenyTools`——子代理只读勘察，数据变更以建议清单回传、父用自有写工具代执行走既有审批。并发上限 `MaxConcurrent` 照看 LLM 端点压力（超限信号量排队不失败）。
 
-## 业务侧边界守卫（建议）
+## 业务侧边界守卫
 
 「业务 0 import eino」是架构验收线，守卫放业务仓（检查的是 eino 这个固定名字，与业务仓自己叫什么无关）。任一业务仓在仓根放一个测试文件即可：
 

@@ -199,14 +199,14 @@ func (a *approvalTool) Invoke(ctx context.Context, args json.RawMessage) (json.R
 	return nil, &contract.Suspend{Info: card, State: approvalState{Args: string(args), ItemID: itemID}}
 }
 
-// WrapTools 组装期包装：全量工具内层套 errFeed（业务错误回喂模型）+ guard
-// （防死循环/硬上限）；写工具按模式再套审批 wrapper，读工具裸传。
-// 挂起哨兵（*contract.Suspend）经 errFeed 直通（ask_user 同构——包装链
-// 不吞挂起信号，故无需裸传名单）。
+// WrapTools 组装期包装：全量工具内层套 validate（入参 schema 子集校验）+
+// errFeed（业务错误/校验失败回喂模型）+ guard（防死循环/硬上限）；写工具按
+// 模式再套审批 wrapper，读工具裸传。挂起哨兵（*contract.Suspend）经 errFeed
+// 直通（ask_user 同构——包装链不吞挂起信号，故无需裸传名单）。
 func WrapTools(ts []contract.Tool, src DecisionSource, mode string, cfg ApprovalConfig) []contract.Tool {
 	out := make([]contract.Tool, 0, len(ts))
 	for _, t := range ts {
-		fed := mid.Guard(mid.ErrFeed(t))
+		fed := mid.Guard(mid.ErrFeed(mid.Validate(t)))
 		name := t.Info().Name
 		if !cfg.IsWrite(name) {
 			out = append(out, fed)
