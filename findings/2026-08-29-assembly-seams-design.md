@@ -449,6 +449,8 @@ emitFn + 事件落盘已覆盖（§5.2）；「拦截/改写事件流」与「�
 
 **eino 重叠汇总**（实现序铁律的对账）：缝 1/2/3(ii)/5 均为 einox 装配面自身概念，eino 无对应物（adk ToolsConfig 消费的是 einox 已组装好的面）；缝 3(i) 若开则复用 adk middleware 既有挂点（docs/02:114）——不缺挂点缺契约化对价，故不开；缝 4 与 eino 无关（LLM 框架不含执行沙箱），自研已按「平台内建优先」路线完成，接口化只是把既有实现收拢为默认后端。
 
+> **批次全量收官注记（2026-08-29）**：A/B/C 三批全部落地（提交 1c29a8d / 731c207 / 264598c），触发条件由用户以部署方身份直接授权（无外部测试场景——架构先行）。§7 的批次 C 触发条件条目据此视为已满足；后续缝 4 的演进（每会话长驻容器终局、require 档接线）仍按 §9.7 记录的触发等待。
+
 ---
 
 ## 8. 第二轮严格复审：五缝之外的架构提升面
@@ -642,5 +644,14 @@ if err != nil { /* 启动失败 */ }
 
 - 批次 A 已实施（分支 `feat/assembly-batch-a` 提交 1c29a8d）：D1 = 采纳（NewManager 返回 error）、D2 = 随批；装配缝回归八例（engine/assembly_test.go）全绿，全仓 21 包 `go test ./...` 全绿。
 - 批次 B 已实施（提交 731c207）：ToolWrap 五例（engine/toolwrap_test.go）+ 注册出口正反例（einoext/register_test.go）全绿；-race 实测发现存量并发 spawn 竞态（§8.11，非本批引入）。
-- 文档同步（§9.3 之 A2+B1+边界声明）已完成于工作树：AGENTS.md 工具装配链句、docs/02 会话域件裁剪句 + 单进程会话域声明、docs/03 装配面表（Tools/SkillsDir 签名、+SessionToolsOff/+ToolWrap 行）+ 最小装配示例（error 形态）+ 极简装配裁剪行 + Suspend 注册义务——**未提交**：这些文件上有装配缝工作之前的在途未提交改动，混提会误标，待 review 后一并提交。
-- 批次 C 未实施：按 §7 触发条件等待（首个容器/gVisor 需求或 dockerWrap 投诉），D3/D4 届时拍板。
+- 批次 C 已实施（提交 264598c）：真源在 einox-pm 仓补齐并按其约束落地（见 9.7）；D3 = string 枚举（零值 inherit）、D4 = 即迁 dockerWrap；全仓测试与边界守卫全绿。
+- 文档同步（§9.3 之 A2+B1+C1+边界声明）已完成于工作树：AGENTS.md 工具装配链句、docs/02 会话域件裁剪句 + 单进程会话域声明 + 沙箱节 EnvMode/provider、docs/03 装配面表（Tools/SkillsDir 签名、+SessionToolsOff/+ToolWrap/+SandboxProvider 行）+ 最小装配示例（error 形态）+ 极简装配裁剪行 + Suspend 注册义务——**未提交**：这些文件上有装配缝工作之前的在途未提交改动，混提会误标，待 review 后一并提交。
+
+### 9.7 批次 C 对设计的修订（真源补齐后）
+
+真源 `findings/2026-08-26-einox-sandbox-design.md` 实际存于 einox-pm 仓（用户 2026-08-29 指引），落地时按其约束做了三处修订：
+
+1. **接口更名 Backend → Provider**：真源 §5.1 已把 `Backend` 定为 off/auto/require 姿态字符串类型（sandbox.go 既有，真源 §1.3）——接口改称 `sandbox.Provider` / `OSProvider` / `DockerProvider`（「provider 接口」本即任务书原词）。§4.3 草图中的 `Backend`/`OSBackend`/`Options.SandboxBackend` 相应读作 Provider 形。
+2. **Docker 后端形态定位**：真源 §0.2/§5.3 的终局 = 每会话长驻容器（Manus 形态：懒启动/会话终销毁、只挂工作区、凭证在围栏外），dockerWrap 一次性容器只是过渡。落地 = DockerProvider 按一次性形态实现（策略全量翻译：readonly/workspace-write/danger 三档容器根/挂载映射、断网、WritableRoots 同路径挂载、ProtectedReadOnly 嵌套 ro bind 遮蔽——Landlock 做不到的回盖此处可治、--pids-limit），Wrap 接口形状兼容终局（长驻后端 Wrap 即 docker exec，生命周期归 Provider 内部）。
+3. **真源既有裁决保持不动**：require 档维持未接线（§10.4——首个 fail-closed 消费者出现才补）；Policy 静态单份（§7.5）；docker attached 形态杀 CLI 不杀容器的缝隙（§5.3 缝隙②）随终局长驻形态治，记档不修。
+4. **一处真源滞后修正**：真源 §5.2 的「dockerWrap 显式启用 > 沙箱」优先级（审查 C3）随 dockerWrap 退役一并消亡——注入位（SandboxProvider）成为唯一容器入口，绕过 policy 的告警路径不再存在。
