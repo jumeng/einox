@@ -56,7 +56,7 @@ func (f *fakeProvider) Probe() sandbox.Status {
 
 // TestBuildCmdProviderInjection 后端注入：fake 的 argv 即执行面（sandboxed
 // 标记真值）；后端不可用（nil argv）= auto 语义裸跑降级。旧 dockerWrap
-//「显式启用 > 沙箱」优先级告警随开关一并退役——注入位是唯一容器入口。
+// 「显式启用 > 沙箱」优先级告警随开关一并退役——注入位是唯一容器入口。
 func TestBuildCmdProviderInjection(t *testing.T) {
 	ok := &fakeProvider{usable: true, argv: []string{"echo", "PROVIDER_OK"}}
 	cmd, sandboxed := buildCmd(context.Background(), "/ws",

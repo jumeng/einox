@@ -73,13 +73,27 @@ func toolNamesOf(t *testing.T, m *Manager, s *session.Session) []string {
 // DenyTools 纪律）；合法名单（含全六族）通过。
 func TestNewManagerRejectsUnknownSessionToolFamily(t *testing.T) {
 	_, err := NewManager(session.NewRegistry(tstore.New(t.TempDir())), Options{
+		Providers:   func() []llm.ProviderSpec { return nil },
+		Instruction: func(SessionBrief) string { return "test" },
+		CheckPoints: func(operator, sid string) CheckPointStore { return nil },
+		WorkspaceRoot: func(owner, sid string) string {
+			return t.TempDir() + "/ws/" + owner + "/" + sid
+		},
 		SessionToolsOff: []string{"shell"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "未知") {
 		t.Fatalf("未知族名应构造期报错：%v", err)
 	}
+	// 缺必填项同样构造期即拒（NewManager 校验面：未知名 → 必填 nil，逐项报）
+	if _, err := NewManager(session.NewRegistry(tstore.New(t.TempDir())), Options{}); err == nil ||
+		!strings.Contains(err.Error(), "必填") {
+		t.Fatalf("缺必填项应构造期报错：%v", err)
+	}
 	m, err := NewManager(session.NewRegistry(tstore.New(t.TempDir())), Options{
 		SessionToolsOff: []string{FamilyTodo, FamilyAsk, FamilyPlan, FamilyFS, FamilyCmd, FamilyPatch},
+		Providers:       func() []llm.ProviderSpec { return nil },
+		Instruction:     func(SessionBrief) string { return "test" },
+		CheckPoints:     func(operator, sid string) CheckPointStore { return nil },
 		// WorkspaceRoot 必填（sessionTools 组装即取工作区根，nil 会 panic）
 		WorkspaceRoot: func(owner, sid string) string {
 			return t.TempDir() + "/ws/" + owner + "/" + sid

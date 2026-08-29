@@ -1,0 +1,43 @@
+# CI 门（独立审查 Q-3 落地）：本仓开发在 darwin 单机，平台分支文件
+# （_linux/_windows 后缀与构建标签）无交叉验证即成盲区——批次 C 的
+# token_windows.go 遗漏即此形态（语义遗漏，编译门防同类中的编译性子集）。
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # 交叉编译矩阵：三平台可构建是硬门（沙箱后端按 GOOS 构建标签分流）。
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+
+  # 单测（linux 侧）：linux 专属构建标签测试（Landlock/seccomp）在开发机
+  # （darwin）恒跳过，仅在 linux 运行时执行。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...

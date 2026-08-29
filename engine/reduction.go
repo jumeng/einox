@@ -63,7 +63,7 @@ func (m *Manager) newReductionMiddleware(s *session.Session, window int, notify 
 	cfg := &reduction.Config{
 		Backend:                   spillBackend{st: m.reg.Store(), owner: s.Owner, sid: s.SID, note: note},
 		MaxLengthForTrunc:         truncMaxLength,
-		ReadFileToolName:          "read_file",
+		ReadFileToolName:          "read_file", // 耦合 fs 族（sessionTools）：裁 fs 族后外置指针不可取回（Options.SessionToolsOff 注释与 docs/04 裁剪表已警示）；不联动禁外置——上游截断与外置在同一 handler 内一体，禁外置须复制其逻辑
 		TruncExcludeTools:         toolSearchExclude,
 		ClearExcludeTools:         toolSearchExclude,
 		ClearRetentionSuffixLimit: 2, // 保最近 2 个工具轮（eino 默认 1）

@@ -14,6 +14,7 @@ import (
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/internal/tstore"
+	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
 
@@ -72,6 +73,11 @@ func TestSessionToolsRepoFamily(t *testing.T) {
 	reg := session.NewRegistry(st)
 	m, err := NewManager(reg, Options{
 		RepoMounts: stubMounts{},
+		Providers:  func() []llm.ProviderSpec { return nil },
+		Instruction: func(SessionBrief) string {
+			return "test"
+		},
+		CheckPoints: func(operator, sid string) CheckPointStore { return nil },
 		// WorkspaceRoot 必填（sessionTools 组装即取工作区根，nil 会 panic）
 		WorkspaceRoot: func(owner, sid string) string {
 			return filepath.Join(st.TmpDir(), "workspaces", owner, sid)
@@ -98,6 +104,9 @@ func TestSessionToolsRepoFamily(t *testing.T) {
 	}
 	// nil RepoMounts = 不装配
 	m2, err := NewManager(session.NewRegistry(tstore.New(t.TempDir())), Options{
+		Providers:   func() []llm.ProviderSpec { return nil },
+		Instruction: func(SessionBrief) string { return "test" },
+		CheckPoints: func(operator, sid string) CheckPointStore { return nil },
 		WorkspaceRoot: func(owner, sid string) string {
 			return filepath.Join(t.TempDir(), "workspaces", owner, sid)
 		},

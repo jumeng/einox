@@ -24,6 +24,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
+	"encoding/json"
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/einoext"
 	"github.com/jumeng/einox/hitl"
@@ -34,7 +35,6 @@ import (
 	"github.com/jumeng/einox/skills"
 	"github.com/jumeng/einox/tools/egress"
 	"github.com/jumeng/einox/tools/repo"
-	"encoding/json"
 )
 
 // CheckPointStore 会话检查点存储面（adk Get/Set 同构——结构直配 Runner）。
@@ -68,18 +68,24 @@ type Options struct {
 	// ProcessTools 进程级通用件（时间/网络等——应用选择加入的基座件）。
 	ProcessTools func() []contract.Tool
 	// SessionToolsOff 排除的会话域工具族（族名见 sessiontools.go 的族常量；
-	// nil/空 = 全挂零行为变化，未知名 NewManager 即拒——对齐 DenyTools 的
-	// fail-fast 纪律）。repo 族不经此缝，仍由 RepoMounts 条件装配。
+	// nil/空 = 全挂（零变化——族构造失败照常上抛 CONFIG，不静默吞错），未知
+	// 名 NewManager 即拒——对齐 DenyTools 的 fail-fast 纪律）。repo 族不经此
+	// 缝，仍由 RepoMounts 条件装配。
+	// 裁 fs 族 = 放弃 reduction 外置换指针取回（外置指针经 read_file 虚拟
+	// 路径取回，工具不在场则超长结果只剩截断头尾）——留装配者知情决策，
+	// 引擎不联动（上游截断与外置在同一 handler 内一体，禁外置须复制其逻辑）。
 	SessionToolsOff []string
 	// ToolWrap 工具包装缝（契约层最外包装，挂 hitl 审批包装之外；主面与
-	// 子代理面同挂——审计/脱敏/动态准入覆盖全量工具调用）。nil = 不包装，
-	// 零行为变化。契约义务：
+	// 子代理面同挂——审计/脱敏/动态准入覆盖主面与子代理面的全部契约工具，
+	// spawn 派发本体不经包装）。nil = 不包装，零行为变化。契约义务：
 	//  1. Info() 须透传原名（名字是审批名单/子代理白名单/动态装载分流的
 	//     寻址键）；
 	//  2. 拒绝执行以 {"ok":false,"error":…} 信封返回回喂模型自纠（勿返回
 	//     Go error——本缝在 errFeed 外层，Go error 会终止整轮且模型不可见）；
 	//  3. 只能收紧不能放宽：收到的是已含审批的实例，透传即保留全部审批
-	//     语义（ArgsForce/模式审批不可豁免）；伪造结果属违约；
+	//     语义（ArgsForce/模式审批不可豁免——以会话域件为界成立，裸实例
+	//     在引擎内不可得；业务工具的裸实例本就在应用手中，绕过属应用
+	//     自毁）；伪造结果属违约；
 	//  4. 包装随每次 assemble 重建（Run/Resume 各一次）——有状态包装的
 	//     计数不跨轮；
 	//  5. 勿从包装内发起 *contract.Suspend（引擎三卡分叉与决议消费链路
@@ -144,9 +150,27 @@ type Manager struct {
 }
 
 // NewManager 构造（reg = 会话注册表；opt 必填项：Providers/Instruction/
-// CheckPoints/WorkspaceRoot——缺省 NewModel 生产构造）。SessionToolsOff 含
-// 未知族名即报错（装配错误启动期暴露，不拖到首会话）。
+// CheckPoints/WorkspaceRoot——缺一即报错，缺省 NewModel 生产构造）。
+// SessionToolsOff 含未知族名即报错（装配错误启动期暴露，不拖到首会话）。
 func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
+	// 必填项 nil 即拒（docs/04 装配面「四项必填」的构造期兑现——此前 nil
+	// 会拖到首 Run 才空指针 panic）。
+	var missing []string
+	if opt.Providers == nil {
+		missing = append(missing, "Providers")
+	}
+	if opt.Instruction == nil {
+		missing = append(missing, "Instruction")
+	}
+	if opt.CheckPoints == nil {
+		missing = append(missing, "CheckPoints")
+	}
+	if opt.WorkspaceRoot == nil {
+		missing = append(missing, "WorkspaceRoot")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("engine: Options 缺必填项 %s（不可为 nil）", strings.Join(missing, "/"))
+	}
 	off := make(map[string]bool, len(opt.SessionToolsOff))
 	for _, f := range opt.SessionToolsOff {
 		switch f {

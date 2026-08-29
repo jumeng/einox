@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-einox 是通用 agent 基座库——三层栈 eino（LLM 框架）→ einox（agent 运行时基座）→ 业务 agent 中的机制层：循环引擎、会话、审批、沙箱、harness、通用工具族。文档自述用语保持一致：可嵌入运行时库、端口-适配器（`contract` = 端口面）、组装根（`engine.Options` 构造期装配）、封闭枚举的装配缝——不是插件系统。定位与能力面见 [docs/](docs/01-positioning.md)。
+einox 是通用 agent 基座库——三层栈 eino（LLM 框架）→ einox（agent 运行时基座）→ 业务 agent 中的机制层：循环引擎、会话、审批、沙箱、harness、通用工具族。文档自述用语保持一致：可嵌入运行时库、端口-适配器（`contract` = 端口面）、组装根（`engine.Options` 构造期装配）、封闭枚举的装配缝——不是插件系统。选型与能力面见 [docs/](docs/01-why-eino.md)。
 
 ## 架构速览
 
@@ -23,6 +23,7 @@ einox 是通用 agent 基座库——三层栈 eino（LLM 框架）→ einox（a
 ## 常用命令
 
 - 构建：`go build ./...`
+- 交叉编译（改动平台分支文件 `_linux/_windows/_darwin` 或构建标签时必跑；CI 有同款矩阵门）：`GOOS=windows go build ./... && GOOS=linux go build ./...`——注意编译门只证可构建，平台分支的语义同步靠评审核对共享逻辑的各平台变体
 - 测试：`go test ./...`（提交前应全绿；沙箱相关包按平台构建标签分流，非目标平台自动跳过）
 - 引擎与工具循环的测试使用 `llmtest` 假模型，不依赖真实模型端点
 

@@ -278,23 +278,52 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 		return adk.NewChatModelAgent(bctx, conf)
 	}
 
-	syncAgent, err := buildSub(ctx, "auto")
+	// 模板 agent 仅供 Info 形态（名称/描述/入参 schema）——同步执行体每调用
+	// 新建（perCallAgentTool）：eino adk 的 agent 实例态无锁，单实例并发 Run
+	// 有数据竞态（chatmodel.go 闭包写实例态，-race 实测，§8.11）；与「assemble
+	// 每轮重建」同形态。后台路径本就每调用新建（runSpawnBG → buildSub）。
+	tpl, err := buildSub(ctx, "auto")
 	if err != nil {
 		return nil, err
 	}
-	at := adk.NewAgentTool(ctx, syncAgent, adk.WithAgentInputSchema(spawnParam))
-	it, ok := at.(tool.InvokableTool) // agent_tool 恒为 invokable（直跑 + 中断桥接走此面）
-	if !ok {
-		return nil, fmt.Errorf("agent_tool 未实现 InvokableTool（eino 形态变更，需适配）")
+	info, err := adk.NewAgentTool(ctx, tpl, adk.WithAgentInputSchema(spawnParam)).Info(ctx)
+	if err != nil {
+		return nil, err
 	}
-	var inner tool.InvokableTool = &spawnFailFeed{inner: it}
+	exec := &perCallAgentTool{buildSub: buildSub, info: info}
+	var inner tool.InvokableTool = &spawnFailFeed{inner: exec}
 	if cfg.MaxConcurrent > 0 {
 		// 会话域信号量（W-2 修正：原 per-Run chan 跨轮后台任务会无界累积）——
-		// 同步/后台同一池，同步保留额由 bgGate 保证（见 spawnbg.go）
+		// 同步/后台同一池，同步保留额由 bgGate 保证（见 spawnbg.go）；
+		// throttledSpawn.InvokableRun 自包 spawnFailFeed，此处传裸执行体。
 		reg := m.spawnReg(s, cfg.MaxConcurrent)
-		inner = &throttledSpawn{inner: it, sem: reg.sem}
+		inner = &throttledSpawn{inner: exec, sem: reg.sem}
 	}
 	return &bgSpawnTool{m: m, s: s, cfg: cfg, inner: inner, buildSub: buildSub}, nil
+}
+
+// perCallAgentTool 同步 spawn 执行体：每调用新建子 agent 再包 agent_tool
+// （实例不跨调用共享——竞态根因即共享单例的并发 Run）。Info 形态取自装配
+// 期模板一次；模型组件（subCM）仍 assemble 级共享——eino 模型件按可复用
+// 设计，测试假模型亦并发安全。
+type perCallAgentTool struct {
+	buildSub func(ctx context.Context, mode string) (*adk.ChatModelAgent, error)
+	info     *schema.ToolInfo
+}
+
+func (p *perCallAgentTool) Info(context.Context) (*schema.ToolInfo, error) { return p.info, nil }
+
+func (p *perCallAgentTool) InvokableRun(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+	sub, err := p.buildSub(ctx, "auto")
+	if err != nil {
+		return "", err
+	}
+	at := adk.NewAgentTool(ctx, sub, adk.WithAgentInputSchema(spawnParam))
+	it, ok := at.(tool.InvokableTool) // agent_tool 恒为 invokable（直跑 + 中断桥接走此面）
+	if !ok {
+		return "", fmt.Errorf("agent_tool 未实现 InvokableTool（eino 形态变更，需适配）")
+	}
+	return it.InvokableRun(ctx, args, opts...)
 }
 
 // spawnFailFeed 失败语义包装：interrupt 错误原样穿透（审批/提问续流链路），

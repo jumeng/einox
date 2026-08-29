@@ -44,7 +44,10 @@ import (
 )
 
 // localOperator commandline.Operator 的本地实现（工作区限定：读写与命令
-// cwd 全部圈进 root，路径穿越显式拒绝）。
+// cwd 全部圈进 root，路径穿越显式拒绝）。注意其 RunCommand 是裸 exec——
+// 不经 sandbox 策略（python_execute 的内层执行面，真源 2026-08-26 沙箱设计
+// 缝隙①，与 run_command 的围栏语义不同面）；工具调用本身照常过 hitl 审批
+// 与 ToolWrap（ProcessTools 面的标准链路）。
 type localOperator struct{ root string }
 
 // abs 归一并校验 containment。filepath.Join 会把 ".." 清洗进结果路径——

@@ -7,6 +7,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -338,5 +339,55 @@ func TestToolWrapDenyAtReplayTime(t *testing.T) {
 	}
 	if !seenDeny {
 		t.Fatal("重放拒绝应信封入史")
+	}
+}
+
+// goErrTool 违约包装样板：Invoke 返回 Go error（义务 2 的反面）。
+type goErrTool struct{ t contract.Tool }
+
+func (w *goErrTool) Info() *contract.ToolInfo { return w.t.Info() }
+
+func (w *goErrTool) Invoke(context.Context, json.RawMessage) (json.RawMessage, error) {
+	return nil, errors.New("包装违约：Go error 而非信封")
+}
+
+// TestToolWrapGoErrorTerminatesRound 义务 2 反例钉板：本缝在 errFeed 外层，
+// 包装返回 Go error 不再被转信封——整轮以 error 事件终止（模型不可见、不
+// 可自纠）。这是「拒绝必须走 {"ok":false} 信封」契约的行为依据。
+func TestToolWrapGoErrorTerminatesRound(t *testing.T) {
+	var calls int32
+	wt := gateWriteTool(t, "write_tool", &calls)
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{tcOf("c1", "write_tool", `{}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	m := newSeamManager(t, func(o *Options) {
+		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
+		o.ToolWrap = func(t contract.Tool) contract.Tool { return &goErrTool{t: t} }
+		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return fm, nil
+		}
+	})
+	s := m.Registry().Create("张三", "写", "auto", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	var names []string
+	m.Run(context.Background(), s, "写一个", nil, func(ev session.Event) { names = append(names, ev.Event) })
+	waitTitleFlight(t, s)
+	if !contains(names, contract.EvError) {
+		t.Fatalf("包装 Go error 应终止整轮（error 事件）：%v", names)
+	}
+	if s.StateOf() != session.StateError {
+		t.Fatalf("Go error 终止后应为 error 终态，实得 %s", s.StateOf())
+	}
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Fatal("违约包装不得透传执行")
+	}
+	for _, msg := range s.CloneHistory() { // 无信封回喂——模型侧不可见
+		if msg.Role == schema.Tool && strings.Contains(msg.Content, "Go error 而非信封") {
+			t.Fatal("Go error 不应转信封入史（errFeed 在内层管不到本缝）")
+		}
 	}
 }

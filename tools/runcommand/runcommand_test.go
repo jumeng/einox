@@ -156,7 +156,7 @@ func TestBackgroundTasks(t *testing.T) {
 // TestDockerEnvRetired EINO_RUN_DOCKER env 魔法开关退役（批次 C，设计真源
 // findings/2026-08-29-assembly-seams-design.md §4）：旧开关不再有任何效果
 // ——容器形态正规化为 sandbox.DockerProvider 经 Config.SandboxProvider 注入
-//（argv 映射测试归 sandbox/docker_test.go）。
+// （argv 映射测试归 sandbox/docker_test.go）。
 func TestDockerEnvRetired(t *testing.T) {
 	t.Setenv("EINO_RUN_DOCKER", "1")
 	cmd, sandboxed := buildCmd(context.Background(), "/ws", nil, nil, "echo hi")
