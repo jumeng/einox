@@ -4,7 +4,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-early_development-orange)](docs/01-why-eino.md)
 
-**A general-purpose agent base built on [cloudwego/eino](https://github.com/cloudwego/eino).**
+**Not an agent but an agent factory: an embeddable runtime on [cloudwego/eino](https://github.com/cloudwego/eino) where each system assembles its own agent — tools, approvals and prompts stay first-class code in its repo, and delivery form (single binary, multi-tenant server, mobile thin client) is an assembly decision, not an architectural fork.**
 
 在 eino 之上提供 agent 运行时：循环引擎、会话、HITL 审批、沙箱、检查点、skill、多代理编排、通用工具族。einox 是可嵌入的运行时库：`contract` 是端口面，`engine.Options` 是组装根（构造期装配、nil 即不生效），业务只装配、不扩展。
 
