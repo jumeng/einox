@@ -43,12 +43,15 @@ type CheckPointStore interface {
 	Set(ctx context.Context, key string, checkpoint []byte) error
 }
 
-// SessionBrief 会话配置概要（Instruction 组装入参——三件套随消息可变：
-// mode 每条消息可带，model/effort 会话内可切换，运行边界生效）。
+// SessionBrief 会话概要（Instruction / Tools / SkillsDir 组装入参——三件套
+// 随消息可变：mode 每条消息可带，model/effort 会话内可切换，运行边界生效；
+// Owner/SID 会话身份：工具面与 skill 目录按租户裁剪的寻址键）。
 type SessionBrief struct {
 	Mode   string
 	Model  string // 复合键 provider/model
 	Effort string
+	Owner  string // 会话归属用户
+	SID    string // 会话标识
 }
 
 // Options 引擎组装配置（应用装配层构造）。
@@ -58,10 +61,16 @@ type Options struct {
 	// Instruction 系统提示词（应用内容——业务职责段 + 通用段 + 会话配置段 +
 	// 模式段拼装归应用；入参 = 会话配置概要，每轮 assemble 实时注入）。
 	Instruction func(sess SessionBrief) string
-	// Tools 业务工具面（实现 contract.Tool；nil = 无业务工具）。
-	Tools func() []contract.Tool
+	// Tools 业务工具面（实现 contract.Tool；入参 = 会话概要——多租户按
+	// Owner 裁剪工具面、按会话身份定制；nil = 无业务工具）。闭包每轮
+	// assemble 求值、跨会话并发调用——应快速返回且无共享可变态。
+	Tools func(sess SessionBrief) []contract.Tool
 	// ProcessTools 进程级通用件（时间/网络等——应用选择加入的基座件）。
 	ProcessTools func() []contract.Tool
+	// SessionToolsOff 排除的会话域工具族（族名见 sessiontools.go 的族常量；
+	// nil/空 = 全挂零行为变化，未知名 NewManager 即拒——对齐 DenyTools 的
+	// fail-fast 纪律）。repo 族不经此缝，仍由 RepoMounts 条件装配。
+	SessionToolsOff []string
 	// NewModel 模型构造口（缺省生产构造 llm.NewChatModel；测试注入假模型）。
 	NewModel llm.ModelFactory
 	// ImageResolve 图片引用解析（文档仓库路径 → 字节+MIME；nil = 图片不可用——
@@ -69,8 +78,10 @@ type Options struct {
 	ImageResolve llm.ImageResolver
 	// CheckPoints 会话检查点存储构造（operator+sid 定位）。
 	CheckPoints func(operator, sid string) CheckPointStore
-	// SkillsDir skill 物化目录（nil/空 = 不挂 skill middleware；物化归应用）。
-	SkillsDir func() string
+	// SkillsDir skill 物化目录（nil/空 = 不挂 skill middleware；物化归应用。
+	// 入参 = 会话概要——按租户物化不同 skill 包；与 Tools 同契约：每轮
+	// assemble 求值、并发安全）。
+	SkillsDir func(sess SessionBrief) string
 	// Approval 审批配置（写工具名单/动作名/参数豁免——业务内容）。
 	Approval hitl.ApprovalConfig
 	// WorkspaceRoot 会话工作区根（用户域 workspaces/<sid>——repos/ 挂载
@@ -115,15 +126,26 @@ type Manager struct {
 }
 
 // NewManager 构造（reg = 会话注册表；opt 必填项：Providers/Instruction/
-// CheckPoints/WorkspaceRoot——缺省 NewModel 生产构造）。
-func NewManager(reg *session.Registry, opt Options) *Manager {
+// CheckPoints/WorkspaceRoot——缺省 NewModel 生产构造）。SessionToolsOff 含
+// 未知族名即报错（装配错误启动期暴露，不拖到首会话）。
+func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
+	off := make(map[string]bool, len(opt.SessionToolsOff))
+	for _, f := range opt.SessionToolsOff {
+		switch f {
+		case FamilyTodo, FamilyAsk, FamilyPlan, FamilyFS, FamilyCmd, FamilyPatch:
+			off[f] = true
+		default:
+			return nil, fmt.Errorf("engine: 未知的会话域工具族 %q（可用 %s/%s/%s/%s/%s/%s）",
+				f, FamilyTodo, FamilyAsk, FamilyPlan, FamilyFS, FamilyCmd, FamilyPatch)
+		}
+	}
 	if opt.NewModel == nil {
 		opt.NewModel = llm.NewChatModel
 	}
-	if opt.Sandbox != nil {
-		sandbox.Probe() // 装配期探测（C1）：未挂钩/内核不可用即启动日志告警
+	if opt.Sandbox != nil && !off[FamilyCmd] {
+		sandbox.Probe() // 装配期探测（C1）：未挂钩/内核不可用即启动日志告警（cmd 族被裁即无消费面，不探）
 	}
-	return &Manager{reg: reg, Opt: opt}
+	return &Manager{reg: reg, Opt: opt}, nil
 }
 
 // Registry 会话注册表出口。
@@ -258,16 +280,20 @@ func estTokens(s string) int {
 // estimateContext 上下文分类估算（Run 在泵前已把本轮用户消息入史——中断保险，
 // CloneHistory 天然含本轮，无须另计）。
 func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
-	est := ctxEstimates{instruction: estTokens(m.Opt.Instruction(m.briefOf(s)))}
-	for _, ts := range []func() []contract.Tool{m.Opt.Tools, m.Opt.ProcessTools} {
-		if ts == nil {
-			continue
-		}
-		for _, t := range ts() {
+	brief := m.briefOf(s)
+	est := ctxEstimates{instruction: estTokens(m.Opt.Instruction(brief))}
+	addFace := func(ts []contract.Tool) {
+		for _, t := range ts {
 			if info := t.Info(); info != nil {
 				est.tools += estTokens(info.Name) + estTokens(info.Desc)
 			}
 		}
+	}
+	if m.Opt.Tools != nil {
+		addFace(m.Opt.Tools(brief)) // 会话面：随 Owner/SID 裁剪后的真实业务面
+	}
+	if m.Opt.ProcessTools != nil {
+		addFace(m.Opt.ProcessTools())
 	}
 	// H8-1 口径：est_messages = 整形后出站视图（真实发送面——与 H1 TokenCounter
 	// 同规则函数 llm.ShapeMessages）；saved = 原始口径差额（「整形节省」注记）。
@@ -632,12 +658,16 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	}
 	var ts []contract.Tool
 	if m.Opt.Tools != nil {
-		ts = append(ts, m.Opt.Tools()...)
+		ts = append(ts, m.Opt.Tools(m.briefOf(s))...)
 	}
 	if m.Opt.ProcessTools != nil {
 		ts = append(ts, m.Opt.ProcessTools()...)
 	}
-	ts = append(ts, m.sessionTools(s)...)         // 会话域件（todo/ask_user/工作区族）
+	sts, err := m.sessionTools(s) // 会话域件（todo/ask_user/工作区族，可经 SessionToolsOff 裁剪）
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ts = append(ts, sts...)
 	behaviors := make(map[string]string, len(ts)) // UI-B2：行为标记快照（tool_call 事件携带——前端分组数据源；值由工具自declare，引擎不判别）
 	for _, t := range ts {
 		if info := t.Info(); info != nil && info.Behavior != "" {
@@ -700,7 +730,7 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		agConf.Handlers = append(agConf.Handlers, searchMW)
 	}
 	if m.Opt.SkillsDir != nil {
-		if dir := m.Opt.SkillsDir(); dir != "" {
+		if dir := m.Opt.SkillsDir(m.briefOf(s)); dir != "" {
 			if mw := skills.NewMiddleware(ctx, dir); mw != nil {
 				agConf.Handlers = append(agConf.Handlers, mw)
 			}
@@ -749,7 +779,8 @@ func (m *Manager) imageCapableOf(s *session.Session) bool {
 // briefOf 会话 → Instruction 入参概要（每轮 assemble/estimate 实时取——
 // 会话内切换模型/effort 后下一轮提示即更新，永不陈旧）。
 func (m *Manager) briefOf(s *session.Session) SessionBrief {
-	return SessionBrief{Mode: s.ModePublic(), Model: s.Model.Model, Effort: s.Model.Effort}
+	return SessionBrief{Mode: s.ModePublic(), Model: s.Model.Model, Effort: s.Model.Effort,
+		Owner: s.Owner, SID: s.SID}
 }
 
 // configError 配置类错误（error 事件 code=CONFIG）。

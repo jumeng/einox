@@ -47,46 +47,95 @@ func (p sessionPlanSrc) GrantTask()                   { p.s.GrantTask() }
 func (p sessionPlanSrc) ModePublic() string           { return p.s.ModePublic() }
 func (p sessionPlanSrc) NextPlanSeq() int             { return p.s.NextPlanSeq() }
 
-// sessionTools 会话域工具面（组装期追加，见 assemble）。
-func (m *Manager) sessionTools(s *session.Session) []contract.Tool {
-	var out []contract.Tool
-	if ts, err := todo.NewTools(todo.Config{Store: sessionTodos{s}}); err == nil {
-		out = append(out, ts...)
+// 会话域工具族名（Options.SessionToolsOff 的封闭取值集——NewManager 期校验）。
+const (
+	FamilyTodo  = "todo"  // todo_write（任务清单）
+	FamilyAsk   = "ask"   // ask_user（结构化提问）
+	FamilyPlan  = "plan"  // submit_plan（计划卡）
+	FamilyFS    = "fs"    // read_file / list_dir / search_files / delete_file
+	FamilyCmd   = "cmd"   // run_command / task_output / task_stop
+	FamilyPatch = "patch" // apply_patch
+)
+
+// familyOff 族是否被 SessionToolsOff 裁掉（名单已经 NewManager 校验，线性查够用）。
+func familyOff(off []string, family string) bool {
+	for _, f := range off {
+		if f == family {
+			return true
+		}
 	}
-	if ts, err := askuser.NewTools(askuser.Config{Resolver: sessionAskResolver{s}}); err == nil {
-		out = append(out, ts...)
-	}
-	if ts, err := plan.NewTools(plan.Config{
-		S:   sessionPlanSrc{s},
-		SID: s.SID,
-		Writer: func(rel string, data []byte) error { // 用户域文件面（不走 DATA_DIR 数据门禁——计划是过程态）
-			return m.reg.Store().WriteUserTreeFile(s.Owner, rel, data)
-		},
-	}); err == nil {
-		out = append(out, ts...)
-	}
+	return false
+}
+
+// sessionTools 会话域工具面（组装期追加，见 assemble）。SessionToolsOff 按
+// 族裁剪（nil/空 = 全挂零行为变化）；各族构造错误上抛（assemble 转 CONFIG
+// 错误事件）——族无声缺席是装配错误，不静默。
+func (m *Manager) sessionTools(s *session.Session) ([]contract.Tool, error) {
+	off := m.Opt.SessionToolsOff
 	ws := m.workspaceOf(s)
-	if ts, err := fsutil.NewTools(fsutil.Config{Root: ws, Spill: m.spillDirOf(s)}); err == nil {
+	var out []contract.Tool
+	if !familyOff(off, FamilyTodo) {
+		ts, err := todo.NewTools(todo.Config{Store: sessionTodos{s}})
+		if err != nil {
+			return nil, &configError{"todo 工具族构造失败：" + err.Error()}
+		}
 		out = append(out, ts...)
 	}
-	if ts, err := runcommand.NewTools(runcommand.Config{Root: ws, Sandbox: m.Opt.Sandbox, Egress: m.Opt.Egress}); err == nil {
+	if !familyOff(off, FamilyAsk) {
+		ts, err := askuser.NewTools(askuser.Config{Resolver: sessionAskResolver{s}})
+		if err != nil {
+			return nil, &configError{"ask_user 工具族构造失败：" + err.Error()}
+		}
 		out = append(out, ts...)
 	}
-	if ts, err := applypatch.NewTools(applypatch.Config{Root: ws}); err == nil {
+	if !familyOff(off, FamilyPlan) {
+		ts, err := plan.NewTools(plan.Config{
+			S:   sessionPlanSrc{s},
+			SID: s.SID,
+			Writer: func(rel string, data []byte) error { // 用户域文件面（不走 DATA_DIR 数据门禁——计划是过程态）
+				return m.reg.Store().WriteUserTreeFile(s.Owner, rel, data)
+			},
+		})
+		if err != nil {
+			return nil, &configError{"submit_plan 工具族构造失败：" + err.Error()}
+		}
+		out = append(out, ts...)
+	}
+	if !familyOff(off, FamilyFS) {
+		ts, err := fsutil.NewTools(fsutil.Config{Root: ws, Spill: m.spillDirOf(s)})
+		if err != nil {
+			return nil, &configError{"文件面工具族构造失败：" + err.Error()}
+		}
+		out = append(out, ts...)
+	}
+	if !familyOff(off, FamilyCmd) {
+		ts, err := runcommand.NewTools(runcommand.Config{Root: ws, Sandbox: m.Opt.Sandbox, Egress: m.Opt.Egress})
+		if err != nil {
+			return nil, &configError{"命令工具族构造失败：" + err.Error()}
+		}
+		out = append(out, ts...)
+	}
+	if !familyOff(off, FamilyPatch) {
+		ts, err := applypatch.NewTools(applypatch.Config{Root: ws})
+		if err != nil {
+			return nil, &configError{"apply_patch 工具族构造失败：" + err.Error()}
+		}
 		out = append(out, ts...)
 	}
 	if m.Opt.RepoMounts != nil {
-		if ts, err := repo.NewTools(repo.Config{
+		ts, err := repo.NewTools(repo.Config{
 			Resolver:    m.Opt.RepoMounts,
 			Root:        ws,
 			Owner:       s.Owner,
 			SID:         s.SID,
 			PatchWriter: m.Opt.RepoPatchWriter,
-		}); err == nil {
-			out = append(out, ts...)
+		})
+		if err != nil {
+			return nil, &configError{"repo 工具族构造失败：" + err.Error()}
 		}
+		out = append(out, ts...)
 	}
-	return out
+	return out, nil
 }
 
 // workspaceOf 会话工作区（WorkspaceRoot 注入，用户域 workspaces/<sid>；
