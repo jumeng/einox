@@ -80,6 +80,7 @@ type Session struct {
 	runDone     chan struct{} // 执行体结束信号（BeginRun 创建；Run/Resume defer 关——FlushQueue 等待接管锚点）
 	titleCh     chan struct{} // 标题异步生成在途信号（MarkTitleFlight 置；goroutine 收尾 close——Run 后在途写可 join 的唯一窗口）
 	flushing    bool          // 立即处理排队标记（打断形态分叉：interrupted 事件而非 ABORTED 错误）
+	writeMu     sync.Mutex    // persist 写序锁（持 mu 时获取——快照序即落盘提交序，见 Registry.persist）
 
 	// 审批域（M3-5）+ ask_user 域（P1a——与审批共用挂起通道）
 	// decisions 按 item_id 的决议表（H4-2 合并决议多槽；"" 键 = 旧单决议——
@@ -161,6 +162,31 @@ func (s *Session) TakeDecisionFor(itemID string) *ApprovalDecision {
 	d := s.decisions[itemID]
 	delete(s.decisions, itemID)
 	return d
+}
+
+// HasPendingDecision 挂起决议/作答是否已登记。决议到达（SetDecision/
+// SetDecisionFor/SetAskDecision）先于超时到点或 Resume 停表时，超时兜底
+// 须让位——覆盖已到达的决议等于把用户的 approve 改写成超时拒绝。审批看
+// "" 槽与挂起项槽（批量决议逐项写入的非原子窗口：任一到达即让位，未决项
+// 由 Resume 重放 fail-closed 兜底）；提问看 askDecision。
+func (s *Session) HasPendingDecision() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.askDecision != nil {
+		return true
+	}
+	if s.decisions == nil {
+		return false
+	}
+	if _, ok := s.decisions[""]; ok {
+		return true
+	}
+	for _, id := range s.pendingItems {
+		if _, ok := s.decisions[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // RecordDecision 决议回执落流（approve 端点在 SetDecision 后调用）。事件流是
@@ -1036,6 +1062,13 @@ func (r *Registry) persist(s *Session) {
 	if s.Stopped() {
 		return // 已删除会话不再落盘（防删除后残留）
 	}
+	// 写序锁先于快照锁获取：并发 Persist 同一会话（应用端点的决议/排队编辑
+	// 落盘 × 引擎泵状态迁移落盘——einox-pm 实测形态）时，快照序即提交序——
+	// 旧快照若后提交会覆盖新快照（事件/决议/队列编辑在盘上丢失，重启
+	// Reattach 才显形）。锁序 writeMu → mu 全仓唯一，无反转；文件写在 mu 外，
+	// Record/订阅扇出不被文件 IO 阻塞。
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	rec := sessionRecord{
 		SID: s.SID, Owner: s.Owner, Scope: s.Scope, Task: s.Task, Title: s.Title,
@@ -1050,7 +1083,7 @@ func (r *Registry) persist(s *Session) {
 	}
 	// 序列化须持锁完成：Messages 是共享消息对象的浅拷贝切片，锁外 marshal
 	// 会与下一轮 Run 的 sanitizeHistory 原地改写同批消息并发读写（-race 实报
-	// 的存量竞态，2026-08-24 移植测试时捕获；文件写在锁外——字节已定型）。
+	// 的存量竞态，2026-08-24 移植测试时捕获）。
 	data, err := json.MarshalIndent(rec, "", "  ")
 	s.mu.Unlock()
 	if err != nil {
