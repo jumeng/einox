@@ -109,7 +109,7 @@ func (m *Manager) sessionTools(s *session.Session) ([]contract.Tool, error) {
 		out = append(out, ts...)
 	}
 	if !familyOff(off, FamilyCmd) {
-		ts, err := runcommand.NewTools(runcommand.Config{Root: ws, Sandbox: m.Opt.Sandbox, Egress: m.Opt.Egress})
+		ts, err := runcommand.NewTools(runcommand.Config{Root: ws, Sandbox: m.Opt.Sandbox, SandboxProvider: m.Opt.SandboxProvider, Egress: m.Opt.Egress})
 		if err != nil {
 			return nil, &configError{"命令工具族构造失败：" + err.Error()}
 		}

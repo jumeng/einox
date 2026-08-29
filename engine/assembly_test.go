@@ -8,6 +8,7 @@ package engine
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cloudwego/eino/components/model"
@@ -17,6 +18,7 @@ import (
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/internal/tstore"
 	"github.com/jumeng/einox/llm"
+	"github.com/jumeng/einox/sandbox"
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/tools"
 )
@@ -306,5 +308,60 @@ func TestSessionToolsErrorSurfacesAsConfig(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("应以 CONFIG 错误卡暴露构造失败：%+v", errs)
+	}
+}
+
+// sandboxFakeProvider 引擎端注入桩（Options.SandboxProvider → sessiontools →
+// runcommand 全链接线验证）。
+type sandboxFakeProvider struct {
+	calls int32
+}
+
+func (f *sandboxFakeProvider) Wrap(*sandbox.Policy, string, string) ([]string, []string) {
+	atomic.AddInt32(&f.calls, 1)
+	return []string{"echo", "SANDBOX_PROVIDER_OK"}, nil
+}
+
+func (f *sandboxFakeProvider) Probe() sandbox.Status {
+	return sandbox.Status{Enforcement: sandbox.EnforcementFull}
+}
+
+// TestSandboxProviderPlumbing 沙箱后端注入链（批次 C）：Options.SandboxProvider
+// 经 sessiontools 透传 runcommand——run_command 执行面即注入后端的 argv。
+func TestSandboxProviderPlumbing(t *testing.T) {
+	fp := &sandboxFakeProvider{}
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("c1", "run_command", `{"command":"echo hi"}`),
+			}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	m := newSeamManager(t, func(o *Options) {
+		o.Sandbox = &sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}
+		o.SandboxProvider = fp
+		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return fm, nil
+		}
+	})
+	s := m.Registry().Create("张三", "跑命令", "auto", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	var outputs []string
+	m.Run(context.Background(), s, "跑一下", nil, func(ev session.Event) {
+		if ev.Event == contract.EvToolResult {
+			if tr, ok := ev.Data.(contract.ToolResult); ok {
+				outputs = append(outputs, tr.Preview)
+			}
+		}
+	})
+	waitTitleFlight(t, s)
+	if atomic.LoadInt32(&fp.calls) != 1 {
+		t.Fatalf("注入后端 Wrap 应被调用一次，实得 %d", fp.calls)
+	}
+	joined := strings.Join(outputs, "\n")
+	if !strings.Contains(joined, "SANDBOX_PROVIDER_OK") {
+		t.Fatalf("执行面应为注入后端的 argv（echo SANDBOX_PROVIDER_OK）：%q", joined)
 	}
 }

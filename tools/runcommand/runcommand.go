@@ -27,12 +27,15 @@ import (
 
 // Config 构造配置。Root = 工作区根（空 = 拒绝构造，P0 纪律）；Sandbox =
 // 可选沙箱策略（nil = 不沙箱——默认零行为变化，真源 findings/2026-08-26-
-// einox-sandbox-design.md §5.2）；Egress = 可选出口校验器（nil = 不预检，
-// 真源 §9——Network 开放形态下命令串 URL 预检是命令面的唯一网络治理层）。
+// einox-sandbox-design.md §5.2）；SandboxProvider = 可选沙箱后端（nil =
+// sandbox.OSProvider 平台内建；容器类后端经此注入——engine.Options 同名
+// 字段透传）；Egress = 可选出口校验器（nil = 不预检，真源 §9——Network
+// 开放形态下命令串 URL 预检是命令面的唯一网络治理层）。
 type Config struct {
-	Root    string
-	Sandbox *sandbox.Policy
-	Egress  *egress.Validator
+	Root            string
+	Sandbox         *sandbox.Policy
+	SandboxProvider sandbox.Provider
+	Egress          *egress.Validator
 }
 
 type runIn struct {
@@ -68,7 +71,7 @@ var (
 const maxBgTasks = 50
 
 // startBackground 起后台进程，登记任务表。
-func startBackground(root string, sb *sandbox.Policy, cmdLine string) (string, error) {
+func startBackground(root string, sb *sandbox.Policy, sp sandbox.Provider, cmdLine string) (string, error) {
 	taskMu.Lock()
 	if len(taskTable) >= maxBgTasks {
 		taskMu.Unlock()
@@ -78,7 +81,7 @@ func startBackground(root string, sb *sandbox.Policy, cmdLine string) (string, e
 	id := fmt.Sprintf("t%d", taskSeq)
 	taskMu.Unlock()
 
-	cmd, _ := buildCmd(context.Background(), root, sb, cmdLine)
+	cmd, _ := buildCmd(context.Background(), root, sb, sp, cmdLine)
 	bt := &bgTask{id: id, cmd: cmdLine, start: time.Now(), proc: cmd.Process}
 	cmd.Stdout = bt
 	cmd.Stderr = bt
@@ -178,7 +181,7 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 	run, err := tools.InferTool("run_command",
 		"在会话工作区内执行 shell 命令（cwd = 工作区根）。command 为单条命令行；timeout_ms 可选（默认 30 秒，上限 10 分钟）；输出超长时头尾各保留 8KB 中间省略；退出码非 0 不算失败——输出里有全部信息。长任务（构建/测试/服务）传 background=true：立即返回 task_id，之后用 task_output 查输出、task_stop 终止。",
 		func(ctx context.Context, in runIn) (map[string]any, error) {
-			return run(ctx, root, cfg.Sandbox, cfg.Egress, in)
+			return run(ctx, root, cfg.Sandbox, cfg.SandboxProvider, cfg.Egress, in)
 		})
 	if err != nil {
 		return nil, err
@@ -208,70 +211,52 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 	return []contract.Tool{tools.WithBehavior(run, contract.BehaviorExec), tools.WithBehavior(out, contract.BehaviorRead), stop}, nil
 }
 
-// dockerWrap 可选 Docker 隔离（EINO_RUN_DOCKER=1 启用）：命令包进一次性容器，
-// 工作区挂载 /workspace、内存 512MB。镜像 EINO_RUN_IMAGE（默认 alpine:3.20）；
-// 网络 EINO_RUN_DOCKER_NET（默认 bridge；none = 断网隔离）。返回 nil = 未启用。
-func dockerWrap(root string) []string {
-	if os.Getenv("EINO_RUN_DOCKER") != "1" {
-		return nil
-	}
-	image := os.Getenv("EINO_RUN_IMAGE")
-	if image == "" {
-		image = "alpine:3.20"
-	}
-	net := os.Getenv("EINO_RUN_DOCKER_NET")
-	if net == "" {
-		net = "bridge"
-	}
-	return []string{
-		"docker", "run", "--rm",
-		"-v", root + ":/workspace",
-		"-w", "/workspace",
-		"-m", "512m",
-		"--network", net,
-		image, "sh", "-c",
-	}
-}
-
-// dockerPriorityWarn dockerWrap 优先告警（进程一次——真源 §5.2 审查 C3）。
-var dockerPriorityWarn sync.Once
+// dockerWrap 已退役（2026-08-29 批次 C，设计真源 findings/2026-08-29-
+// assembly-seams-design.md §4）：EINO_RUN_DOCKER env 魔法开关与「绕过
+// policy」优先级告警撤除，容器形态正规化为 sandbox.DockerProvider——
+// 经 Config.SandboxProvider / engine.Options.SandboxProvider 注入，策略
+// 翻译进容器参数（见 sandbox/docker.go）。
 
 // tokenAttachWarn windows token 构造失败告警（进程一次——auto 档裸跑降级，
 // 与 Probe unusable 告警同款节流；真源 §4）。
 var tokenAttachWarn sync.Once
 
-// buildCmd 组装执行命令。三分支优先级定死（真源 §5.2 审查 C3）：dockerWrap
-// 显式启用 > 沙箱 > 直执行——dockerWrap 优先时沙箱 policy 被绕过（告警一次）。
-// 沙箱分支 = re-exec 哨兵 argv（linux/darwin）或直执行+token 侧挂（windows，
-// sandbox.AttachToken）+ 进程组长（组杀锚点）+ Policy.Env 并入 cmd.Env（去重
-// 合并）；后端不可用（auto 档）裸跑（Probe 已告警）。第二返回值 = 是否走
-// 沙箱（拒绝提示标注仅沙箱生效路径）。
-func buildCmd(ctx context.Context, root string, sb *sandbox.Policy, cmdLine string) (*exec.Cmd, bool) {
-	if pre := dockerWrap(root); pre != nil {
-		if sb != nil {
-			dockerPriorityWarn.Do(func() {
-				log.Printf("run_command: EINO_RUN_DOCKER 显式启用——沙箱 policy 被绕过（dockerWrap 优先）")
-			})
-		}
-		return exec.CommandContext(ctx, pre[0], append(pre[1:], cmdLine)...), false
+// providerOf 配置归一（nil = OSProvider 平台内建）。
+func providerOf(sp sandbox.Provider) sandbox.Provider {
+	if sp != nil {
+		return sp
 	}
+	return sandbox.OSProvider
+}
+
+// buildCmd 组装执行命令。沙箱分支 = provider.Wrap（OS 后端：re-exec 哨兵
+// argv〔linux/darwin〕或直执行+token 侧挂〔windows〕；容器后端：一次性
+// 容器 argv）+ 进程组长（组杀锚点）+ cmd.Env（去重合并；EnvMode 分档在
+// provider 内）；后端不可用（auto 档）裸跑（Probe 已告警）。windows token
+// 侧挂仅对 OSProvider（容器后端的 CLI 进程不套 restricted token——它要
+// 正常访问 daemon 通道，围栏在容器层）。第二返回值 = 是否走沙箱（拒绝
+// 提示标注仅沙箱生效路径）。
+func buildCmd(ctx context.Context, root string, sb *sandbox.Policy, sp sandbox.Provider, cmdLine string) (*exec.Cmd, bool) {
 	if sb != nil {
-		if argv, env := sandbox.Wrap(sb, root, cmdLine); argv != nil {
+		p := providerOf(sp)
+		if argv, env := p.Wrap(sb, root, cmdLine); argv != nil {
 			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 			cmd.Dir = root
 			cmd.Env = env
 			sandbox.SetGroupLeader(cmd)
-			if err := sandbox.AttachToken(cmd, sb, root); err != nil {
-				// windows restricted token 构造失败：裸跑降级会失去围栏——
-				// 静默 fail-open 不可接受，告警一次（auto 语义；require 档
-				// 接线后此处应拒跑）
-				tokenAttachWarn.Do(func() {
-					log.Printf("run_command: 沙箱 token 构造失败（%v）——该命令裸跑（auto 档降级）", err)
-				})
-				fallback := exec.CommandContext(ctx, "sh", "-c", cmdLine)
-				fallback.Dir = root
-				fallback.Env = env // 已 cleanseEnv + Policy.Env 重定向——降级不回退到继承全量环境
-				return fallback, false
+			if p == sandbox.OSProvider {
+				if err := sandbox.AttachToken(cmd, sb, root); err != nil {
+					// windows restricted token 构造失败：裸跑降级会失去围栏——
+					// 静默 fail-open 不可接受，告警一次（auto 语义；require 档
+					// 接线后此处应拒跑）
+					tokenAttachWarn.Do(func() {
+						log.Printf("run_command: 沙箱 token 构造失败（%v）——该命令裸跑（auto 档降级）", err)
+					})
+					fallback := exec.CommandContext(ctx, "sh", "-c", cmdLine)
+					fallback.Dir = root
+					fallback.Env = env // 已 cleanseEnv + Policy.Env 重定向——降级不回退到继承全量环境
+					return fallback, false
+				}
 			}
 			cmd.Cancel = func() error { // 超时/取消通道同款进程组杀
 				sandbox.KillGroup(cmd.Process)
@@ -285,7 +270,7 @@ func buildCmd(ctx context.Context, root string, sb *sandbox.Policy, cmdLine stri
 	return cmd, false
 }
 
-func run(ctx context.Context, root string, sb *sandbox.Policy, eg *egress.Validator, in runIn) (map[string]any, error) {
+func run(ctx context.Context, root string, sb *sandbox.Policy, sp sandbox.Provider, eg *egress.Validator, in runIn) (map[string]any, error) {
 	cmdLine := strings.TrimSpace(in.Command)
 	if cmdLine == "" {
 		return fail("command 不能为空")
@@ -299,7 +284,7 @@ func run(ctx context.Context, root string, sb *sandbox.Policy, eg *egress.Valida
 		}
 	}
 	if in.Background {
-		id, err := startBackground(root, sb, cmdLine)
+		id, err := startBackground(root, sb, sp, cmdLine)
 		if err != nil {
 			return fail(err.Error())
 		}
@@ -317,7 +302,7 @@ func run(ctx context.Context, root string, sb *sandbox.Policy, eg *egress.Valida
 	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
 	defer cancel()
-	cmd, sandboxed := buildCmd(runCtx, root, sb, cmdLine)
+	cmd, sandboxed := buildCmd(runCtx, root, sb, sp, cmdLine)
 	start := time.Now()
 	out, _ := cmd.CombinedOutput() // 退出码/超时经 ProcessState 判定，err 不另用
 	timedOut := runCtx.Err() == context.DeadlineExceeded

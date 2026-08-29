@@ -117,6 +117,10 @@ type Options struct {
 	// Sandbox run_command 沙箱策略（nil = 不沙箱——产品默认关 opt-in；
 	// 机制 = einox/sandbox re-exec 哨兵协议，产品 main 需挂 RunHelper 钩子）。
 	Sandbox *sandbox.Policy
+	// SandboxProvider 沙箱后端（nil = sandbox.OSProvider 平台内建；容器类
+	// 后端如 sandbox.DockerProvider 经此注入——与 Sandbox 正交：策略定
+	// 「施加什么」，后端定「怎么施加」）。
+	SandboxProvider sandbox.Provider
 	// Egress 网络出口校验器（S-9：run_command 命令串 URL 预检；nil = 不
 	// 预检零变化。webfetch 侧的注入在应用 ProcessTools（进程级工具归应用
 	// 装配），此处只管引擎持有的命令面）。
@@ -157,7 +161,13 @@ func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
 		opt.NewModel = llm.NewChatModel
 	}
 	if opt.Sandbox != nil && !off[FamilyCmd] {
-		sandbox.Probe() // 装配期探测（C1）：未挂钩/内核不可用即启动日志告警（cmd 族被裁即无消费面，不探）
+		// 装配期探测（C1）：未挂钩/内核不可用即启动日志告警（cmd 族被裁即
+		// 无消费面，不探）。经注入的 provider 探测（nil 归一 OSProvider）。
+		if opt.SandboxProvider != nil {
+			opt.SandboxProvider.Probe()
+		} else {
+			sandbox.Probe()
+		}
 	}
 	return &Manager{reg: reg, Opt: opt}, nil
 }

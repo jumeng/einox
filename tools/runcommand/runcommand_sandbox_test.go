@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jumeng/einox/sandbox"
@@ -22,7 +23,7 @@ func TestMain(m *testing.M) {
 // SysProcAttr）。
 func TestBuildCmdDefaultOff(t *testing.T) {
 	t.Setenv("EINO_RUN_DOCKER", "")
-	cmd, sandboxed := buildCmd(context.Background(), "/ws", nil, "echo hi")
+	cmd, sandboxed := buildCmd(context.Background(), "/ws", nil, nil, "echo hi")
 	if sandboxed {
 		t.Fatal("nil 策略不应走沙箱")
 	}
@@ -34,14 +35,43 @@ func TestBuildCmdDefaultOff(t *testing.T) {
 	}
 }
 
-// TestBuildCmdDockerPriority 三分支优先级定死（审查 C3）：dockerWrap 显式
-// 启用 > 沙箱。
-func TestBuildCmdDockerPriority(t *testing.T) {
-	t.Setenv("EINO_RUN_DOCKER", "1")
+// fakeProvider 注入桩（Wrap 计数 + 定值 argv / nil 降级）。
+type fakeProvider struct {
+	calls  int32
+	argv   []string
+	usable bool
+}
+
+func (f *fakeProvider) Wrap(*sandbox.Policy, string, string) ([]string, []string) {
+	atomic.AddInt32(&f.calls, 1)
+	if !f.usable {
+		return nil, nil
+	}
+	return f.argv, nil
+}
+
+func (f *fakeProvider) Probe() sandbox.Status {
+	return sandbox.Status{Enforcement: sandbox.EnforcementFull}
+}
+
+// TestBuildCmdProviderInjection 后端注入：fake 的 argv 即执行面（sandboxed
+// 标记真值）；后端不可用（nil argv）= auto 语义裸跑降级。旧 dockerWrap
+//「显式启用 > 沙箱」优先级告警随开关一并退役——注入位是唯一容器入口。
+func TestBuildCmdProviderInjection(t *testing.T) {
+	ok := &fakeProvider{usable: true, argv: []string{"echo", "PROVIDER_OK"}}
 	cmd, sandboxed := buildCmd(context.Background(), "/ws",
-		&sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}, "echo hi")
-	if sandboxed || cmd.Args[0] != "docker" {
-		t.Fatalf("dockerWrap 应优先于沙箱：%v", cmd.Args)
+		&sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}, ok, "echo hi")
+	if !sandboxed || len(cmd.Args) != 2 || cmd.Args[0] != "echo" || cmd.Args[1] != "PROVIDER_OK" {
+		t.Fatalf("注入后端应成为执行面：%v sandboxed=%v", cmd.Args, sandboxed)
+	}
+	if atomic.LoadInt32(&ok.calls) != 1 {
+		t.Fatalf("Wrap 应被调用一次：%d", ok.calls)
+	}
+	down := &fakeProvider{}
+	cmd, sandboxed = buildCmd(context.Background(), "/ws",
+		&sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}, down, "echo hi")
+	if sandboxed || cmd.Args[0] != "sh" {
+		t.Fatalf("不可用后端应裸跑降级：%v", cmd.Args)
 	}
 }
 
