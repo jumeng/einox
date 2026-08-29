@@ -1,7 +1,7 @@
-# 02 · 能力清单
+# 03 · 能力清单
 
 > 与代码同步的全量清单：引擎面 / 事件流 / 工具族 / harness / 提示词 / 沙箱 / 模型面 / eino 地基面 / 其他。
-> 每项能力的启停方式见 [03-assembly.md](03-assembly.md)——除四项必填外全部可选，nil 即不装配、零行为变化。
+> 每项能力的启停方式见 [04-assembly.md](04-assembly.md)——除四项必填外全部可选，nil 即不装配、零行为变化。
 
 ## 引擎与会话域（engine / session / hitl / checkpoint）
 
@@ -29,7 +29,7 @@
 
 ## 工具族（tools/）
 
-工具分两类装配：**会话域件**（root 圈进会话工作区，引擎随会话装配：todo / 提问 / 计划 / 文件面 / 命令 / 补丁 / repo）与**进程级件**（应用经 `ProcessTools` 选择加入：时钟 / 网页抓取）。会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch；极简装配物理移除执行/写面，repo 族仍由 `RepoMounts` 条件装配）。
+工具分两类装配：**会话域件**（root 圈进会话工作区，引擎随会话装配：todo / 提问 / 计划 / 文件面 / 命令 / 补丁 / repo）与**进程级件**（应用经 `ProcessTools` 选择加入：时钟 / 网页抓取）。会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch；极简装配物理移除执行/写面，repo 族仍由 `RepoMounts` 条件装配；裁 fs 族即放弃 reduction 外置换指针取回——超长工具结果只剩截断头尾，见 [04-assembly.md](04-assembly.md) 裁剪表）。
 
 | 包 | 工具 | 说明 |
 |---|---|---|
@@ -69,7 +69,7 @@
 
 ## 沙箱（sandbox/）
 
-`run_command` 执行面沙箱，后端经 `sandbox.Provider` 注入（缺省 OSProvider 平台内建——OS 级走 re-exec 哨兵协议，应用 main 需挂 `RunHelper` 钩子、装配期探测告警；容器等自定义后端经注入位替换，无哨兵依赖）：
+`run_command` 执行面沙箱，后端经 `sandbox.Provider` 注入（缺省 OSProvider 平台内建——OS 级走 re-exec 哨兵协议，应用 main 需挂 `RunHelper` 钩子、装配期探测告警；容器等自定义后端经注入位替换，无哨兵依赖）。策略模型、部署前提与平台限制详见 [05-sandbox.md](05-sandbox.md)：
 
 | 平台 | 机制 | 构建标签 |
 |---|---|---|
@@ -80,7 +80,7 @@
 
 策略 `sandbox.Policy`：`Mode`（readonly / workspace-write / danger-full-access；nil = 不沙箱）+ `Network` 开关 + `WritableRoots`（围栏内可写根，如持久缓存目录）+ `Env` 注入（缓存重定向——围栏内 HOME 不可写，不重定向 go build 硬失败）+ `EnvMode` 环境档（缺省 inherit 全继承；`minimal` 白名单——凭据面默认不进围栏，业务所需环境经 `Env` 显式注入）。
 
-后端经 `sandbox.Provider` 注入（缺省 `OSProvider` 平台内建）；`DockerProvider` = 一次性容器过渡形态（策略翻译进容器参数，`ProtectedReadOnly` 经嵌套 ro bind 可治；终局为每会话长驻容器，接口形状不变）。
+后端经 `sandbox.Provider` 注入（缺省 `OSProvider` 平台内建）；`DockerProvider` = 一次性容器过渡形态（策略翻译进容器参数，`ProtectedReadOnly` 经嵌套 ro bind 可治；daemon 不可达 = 容器隔离失效，按姿态降级裸跑 + 启动告警——详见 [05-sandbox.md](05-sandbox.md)；终局为每会话长驻容器，接口形状不变）。
 
 ### 隔离边界随部署形态选择（纵深防御）
 

@@ -1,6 +1,6 @@
-# 03 · 装配：快速使用、自由裁剪与业务扩展
+# 04 · 装配：快速使用、自由裁剪与业务扩展
 
-> 全部能力经 `engine.Options` 注入与启停——**四项必填，其余全部可选：nil 即不装配，零行为变化**。应用对基座只装配、不修改：组装根 = 构造 `Options` 交给 `NewManager`，构造期定型、运行期不可变（形态的完整界定见 [01-positioning.md](01-positioning.md)「形态对比」章）。
+> 全部能力经 `engine.Options` 注入与启停——**四项必填，其余全部可选：nil 即不装配，零行为变化**。应用对基座只装配、不修改：组装根 = 构造 `Options` 交给 `NewManager`，构造期定型、运行期不可变（形态的完整界定见 [01-why-eino.md](01-why-eino.md)“架构比较”章）。
 
 ## 装配面（engine.Options）
 
@@ -12,7 +12,7 @@
 | `WorkspaceRoot` | ✅ | 会话工作区根（owner+sid 定位；repos/ 挂载持久、其余任务收尾清理） |
 | `Tools` | | 业务工具面（`func(SessionBrief) []contract.Tool`——入参含会话身份，多租户按 owner 裁剪工具面；nil = 无业务工具。闭包每轮求值、跨会话并发，应快速返回） |
 | `ProcessTools` | | 进程级通用件——应用**选择加入**的基座件（时钟/网页抓取等） |
-| `SessionToolsOff` | | 排除的会话域工具族（todo/ask/plan/fs/cmd/patch；nil = 全挂零变化，未知名构造期即拒——fail-fast） |
+| `SessionToolsOff` | | 排除的会话域工具族（todo/ask/plan/fs/cmd/patch；nil = 全挂零变化，未知名构造期即拒——fail-fast。裁 fs 族 = 放弃 reduction 外置换指针取回——超长工具结果只剩截断头尾） |
 | `ToolWrap` | | 工具包装缝（hitl 审批外层，主面与子代理面同挂——调用审计/结果脱敏/动态准入。只能收紧不能放宽：透传保留审批语义；拒绝以 `{"ok":false}` 信封回喂模型） |
 | `NewModel` | | 模型构造口（缺省 `llm.NewChatModel`；测试注入 `llmtest` 假模型） |
 | `ImageResolve` | | 图片引用解析（nil = 图片不可用，含图请求即错误面） |
@@ -65,12 +65,12 @@ m.FlushQueue(sess)          // 排队消息落回轮
 | 不要出口治理 | `Egress` 留 nil |
 | 沙箱开 workspace-write | 见下「沙箱装配」——`WritableRoots` + 缓存重定向 `Env` 是保命件 |
 | 大工具面瘦身 | `ToolSearchPolicy{DynamicTools: [...]}`——高频件与 ask_user/todo_write/submit_plan 留常驻 |
-| 极简装配（纯业务问答） | `SessionToolsOff: []string{engine.FamilyFS, engine.FamilyCmd, engine.FamilyPatch}`——物理移除文件/命令/补丁面；此时 Instruction 勿拼 `prompts.Coding()` 段 |
+| 极简装配（纯业务问答） | `SessionToolsOff: []string{engine.FamilyFS, engine.FamilyCmd, engine.FamilyPatch}`——物理移除文件/命令/补丁面；此时 Instruction 勿拼 `prompts.Coding()` 段，且超长工具结果只剩截断头尾（外置换指针经 read_file 取回，fs 族已裁） |
 | 确定性场景多 agent | `Topology{Kind, SubAgents}`（supervisor/deep；默认单 agent） |
 | 子代理限权 | `SubAgentsConfig{Tools: 白名单, DenyTools: 硬拒名单}`——交集或含全量面未同名 = 装配期报错（白名单写漏即暴露，fail-fast） |
 | 基座件按需 | `ProcessTools` 只放你要的（时钟/网页抓取各自独立构造） |
 
-**沙箱装配**（OS 后端 = re-exec 哨兵协议——应用 main 需挂 `sandbox.RunHelper` 钩子，装配期经沙箱 Provider 探测，内核不可用启动告警；`SandboxProvider` 注入容器等后端时无哨兵依赖）：
+**沙箱装配**（OS 后端 = re-exec 哨兵协议——应用 main 需挂 `sandbox.RunHelper` 钩子，装配期经沙箱 Provider 探测，内核不可用启动告警；`SandboxProvider` 注入容器等后端时无哨兵依赖；部署前提与平台限制见 [05-sandbox.md](05-sandbox.md)）：
 
 ```go
 &Sandbox: &sandbox.Policy{

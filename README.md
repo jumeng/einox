@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/go-1.26+-00ADD8)](https://go.dev)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Status](https://img.shields.io/badge/status-early_development-orange)](docs/01-positioning.md)
+[![Status](https://img.shields.io/badge/status-early_development-orange)](docs/01-why-eino.md)
 
 **A general-purpose agent base built on [cloudwego/eino](https://github.com/cloudwego/eino).**
 
@@ -14,7 +14,7 @@
 
 einox 的判断：**每个系统各自智能化，而不是一个智能体去管理不同系统**——基座做 agent 工厂，不做又一个 agent 产品。agent 的价值不在通用聊天框，而在嵌入领域系统后获得的数据、权限与流程；定位是**可装配的库，不是应用**——交互形态与业务面归应用，机制归基座。
 
-三层栈：eino（LLM 应用框架）→ **einox**（agent 运行时基座）→ 业务 agent。会话生命周期、HITL 审批、沙箱执行、网络容错、上下文整形这些「怎么跑起来」的运行时关切不在 eino 的面里，也不该散落在每个业务系统里各造一遍——einox 把它们收敛为机制，一次实现、处处装配。一份基座可服务多套业务系统：各自组装根装配各自的 agent 形态，机制单点修复、策略互不渗透。形态对比与场景适配的完整论证见 [docs/01-positioning.md](docs/01-positioning.md)。
+三层栈：eino（LLM 应用框架）→ **einox**（agent 运行时基座）→ 业务 agent。会话生命周期、HITL 审批、沙箱执行、网络容错、上下文整形这些「怎么跑起来」的运行时关切不在 eino 的面里，也不该散落在每个业务系统里各造一遍——einox 把它们收敛为机制，一次实现、处处装配。一份基座可服务多套业务系统：各自组装根装配各自的 agent 形态，机制单点修复、策略互不渗透。选型论证见 [docs/01-why-eino.md](docs/01-why-eino.md)，基座层论证与场景适配见 [docs/02-why-einox.md](docs/02-why-einox.md)。
 
 ## 核心能力
 
@@ -27,7 +27,7 @@ einox 的判断：**每个系统各自智能化，而不是一个智能体去管
 - **通用工具族**：apply_patch / 文件面 / 命令执行 / 代码仓 worktree / 网页提取 / docx·xlsx 等
 - **测试假模型**：`llmtest` 零真实端点跑通引擎与工具循环
 
-全量清单见 [docs/02-capabilities.md](docs/02-capabilities.md)。
+全量清单见 [docs/03-capabilities.md](docs/03-capabilities.md)。
 
 ## 快速开始
 
@@ -37,15 +37,17 @@ einox 的判断：**每个系统各自智能化，而不是一个智能体去管
 go get github.com/jumeng/einox
 ```
 
-最小装配（四项必填 Options + 运行面）见 [docs/03-assembly.md](docs/03-assembly.md)；测试注入 `llmtest` 假模型即可零真实端点跑通引擎 + 工具循环。
+最小装配（四项必填 Options + 运行面）见 [docs/04-assembly.md](docs/04-assembly.md)；测试注入 `llmtest` 假模型即可零真实端点跑通引擎 + 工具循环。
 
 ## 文档
 
 | 关注点 | 文档 |
 |---|---|
-| 定位与选型：为什么在 eino 与业务 agent 之间放一层基座 | [docs/01-positioning.md](docs/01-positioning.md) |
-| 能力清单：引擎 / 工具族 / harness / 提示词 / 沙箱 / 模型面 | [docs/02-capabilities.md](docs/02-capabilities.md) |
-| 装配：快速使用、自由裁剪、业务扩展 | [docs/03-assembly.md](docs/03-assembly.md) |
+| 为什么是 eino：思路、架构与交付形态 | [docs/01-why-eino.md](docs/01-why-eino.md) |
+| 为什么需要 einox：基座的设计与分层 | [docs/02-why-einox.md](docs/02-why-einox.md) |
+| 能力清单：引擎 / 工具族 / harness / 提示词 / 沙箱 / 模型面 | [docs/03-capabilities.md](docs/03-capabilities.md) |
+| 装配：快速使用、自由裁剪、业务扩展 | [docs/04-assembly.md](docs/04-assembly.md) |
+| 沙箱：执行围栏、部署前提与平台限制 | [docs/05-sandbox.md](docs/05-sandbox.md) |
 
 ## 状态
 
