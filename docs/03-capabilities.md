@@ -10,7 +10,7 @@
 | 会话域 | `session.Registry` + `Store` 接口：会话归属/快照（模型与档位粘住会话）、消息历史、事件流落盘、续聊（Reattach 装载）；`Sweeper` TTL 无活动清理 |
 | 运行中输入（steering） | running 时再输入三路径：引导插入（每次模型调用前的 hook 把排队消息追加进输入）、排队落回轮（轮次结束后到达的输入并入下一轮）、显式停止（取消运行上下文，循环在步间退出；已落事件不回滚，checkpoint 保留可续；停止即向历史注入打断注记——模型续聊时知晓「工具可能部分执行/后台进程可能仍在跑」，不假设中断前操作都已成功） |
 | HITL 审批 | `hitl.WrapTools` 按模式包装工具面：manual 逐写审批 / plan 计划卡（批准 = 任务期写授权）/ auto 直过；`ApprovalConfig` 定名单与 ArgsForce（参数级强制审批——**任何模式/任务期授权不豁免**）；无决议 fail-closed 一律拒绝 |
-| 跨会话记忆交接（写/拉） | `TurnEpilogue` 轮收尾钩子（自然收束触发，载荷与 session_end 同源——摘要+文件变更；应用落 owner 域记忆文件经 AgentsMD 注入即成读写环）+ `recall` 检索工具（见工具族表）；推通道 = AgentsMD 注入缝。三通道设计见 findings/2026-08-29-memory-three-channel-design.md |
+| 跨会话记忆交接（写/拉） | `TurnEpilogue` 轮收尾钩子（自然收束触发，载荷与 session_end 同源——摘要+文件变更；应用落 owner 域记忆文件经 AgentsMD 注入即成读写环）+ `recall` 检索工具（见工具族表）；推通道 = AgentsMD 注入缝。三通道设计见 findings/2026-08-29-memory-three-channel-design.md（仓外设计笔记，不随仓分发） |
 | 收束质量门（FinalGate） | 三层约束（事前审批/事中 ErrFeed）的收束空位：自然收束后按 `Options.FinalGate`（SessionBrief 闭包——按模式/形态开门）强制验证，失败经 harness_note 门卡 + 反馈消息入史回灌重跑（有界——MaxRetries 负数=缺省 2、0=零回灌首验即报错，codex Guardian 普通/cyber 两档对位），耗尽 error 收束不静默放行；checker panic fail-closed；挂起/中断/错误轮不触发。**判据归应用**（`GateChecker`——build/test 命令或自包对抗审查），基座只持门循环机制 |
 | 挂起-续流通道 | `contract.Suspend` 哨兵 + 引擎 Interrupt×Resume：审批卡、结构化提问、计划卡共用同一机制 |
 | 检查点 | `engine.CheckPointStore`（Get/Set 两方法），中断/取消恢复与审批挂起续流的事实载体 |

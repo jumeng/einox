@@ -31,12 +31,22 @@
 | `SummarizerFallbackModels` | | 摘要模型 Failover 降级链（空 = 不配降级） |
 | `FallbackModels` | | 主对话模型 Failover 降级链（复合键清单；空 = 零变化。重试耗尽按序换备模型、每档各享完整重连预算；切换发 model_change 事件；致命类（401/403）不降级直接停机；子代理/拓扑子面不挂） |
 | `Recall` | | 跨会话检索工具 `recall`（记忆拉通道，opt-in——模型可读本 owner 历史会话摘要，新能力面装配即知情决策；false = 不装配零变化） |
-| `TurnEpilogue` | | 轮收尾交接钩子（记忆写通道；自然收束每轮触发、载荷与 session_end 同源。应用把摘要追加进 owner 域记忆 markdown、经 `AgentsMD` 清单注入即成读写环——文件格式/脱敏/追加式并发约定见 findings 记忆设计文档） |
+| `TurnEpilogue` | | 轮收尾交接钩子（记忆写通道；自然收束每轮触发、载荷与 session_end 同源。应用把摘要追加进 owner 域记忆 markdown、经 `AgentsMD` 清单注入即成读写环——文件格式/脱敏/追加式并发约定见 findings 记忆设计文档，仓外笔记不随仓分发） |
 | `FinalGate` | | 收束质量门（`func(SessionBrief) *GateConfig`——按模式/任务形态开门；nil/返回 nil = 零变化。Checkers 为确定性判据（**归应用**——build/test 命令或自包对抗审查），失败回灌重跑（MaxRetries 负数=缺省 2、0=零回灌首验即报错——codex Guardian 普通/cyber 两档对位）、耗尽诚实报错；纯问答会话也会过门，闭包应按形态开门） |
 
 ## 最小装配
 
 ```go
+import (
+    "context"
+    "path/filepath"
+
+    "github.com/jumeng/einox/contract"
+    "github.com/jumeng/einox/engine"
+    "github.com/jumeng/einox/llm"
+    "github.com/jumeng/einox/session"
+)
+
 reg := session.NewRegistry(store) // store 实现 session.Store（落盘归应用）
 
 m, err := engine.NewManager(reg, engine.Options{
@@ -58,7 +68,7 @@ m.FlushQueue(sess)          // 排队消息落回轮
 
 提示词拼装的惯用形态：业务职责段（你写）+ `prompts.Coding()`（工作区工具面在场时）+ `prompts.Orchestration()`（spawn 装配时）+ 会话配置段（mode 语义——manual/plan/auto）。
 
-测试注入：`NewModel: llmtest.…`（假模型）即可零真实端点跑通引擎与工具循环，支持逐轮注错。
+测试注入：`NewModel: llmtest.New(逐轮剧本…).Factory()`（假模型——`*llmtest.Model` 经 `Factory()` 包成 `llm.ModelFactory` 才能注入）即可零真实端点跑通引擎与工具循环，剧本逐轮可注错。
 
 ## 自由裁剪
 
@@ -159,6 +169,9 @@ func TestNoEinoImports(t *testing.T) {
 			continue
 		}
 		for _, imp := range strings.Fields(imports) {
+			if strings.HasPrefix(imp, "[") {
+				continue // go list -test 的测试变体引用（[pkg.test]），非真实 import
+			}
 			if imp == "github.com/cloudwego/eino" || strings.HasPrefix(imp, "github.com/cloudwego/eino/") {
 				t.Errorf("业务禁直接依赖 eino：%s → %s（只应 import 基座契约面）", pkg, imp)
 			}

@@ -31,13 +31,31 @@ agent 的价值来自嵌入领域系统后获得的数据、权限与流程；�
 
 ## 快速开始
 
-要求 Go 1.26+。
+要求 Go 1.26+。einox 是库不是应用：在业务模块中 import 子包（根包无 Go 代码），依赖随 `go mod tidy` 进入 go.mod。最小装配四项必填：
 
-```bash
-go get github.com/jumeng/einox
+```go
+import (
+    "path/filepath"
+
+    "github.com/jumeng/einox/engine"
+    "github.com/jumeng/einox/llm"
+    "github.com/jumeng/einox/session"
+)
+
+reg := session.NewRegistry(store) // store 实现 session.Store（落盘归应用）
+
+m, err := engine.NewManager(reg, engine.Options{
+    Providers:     func() []llm.ProviderSpec { return llm.ResolveMerged(cfg) },
+    Instruction:   func(b engine.SessionBrief) string { return myInstruction(b) },
+    CheckPoints:   func(operator, sid string) engine.CheckPointStore { return myStore(operator, sid) },
+    WorkspaceRoot: func(owner, sid string) string { return filepath.Join(dataDir, owner, "workspaces", sid) },
+})
+
+// 事件经回调扇出（SSE/WebSocket/CLI 传输归应用），同时落会话记录
+m.Run(ctx, sess, userMsg, attachments, func(ev session.Event) { /* 编码转发 */ })
 ```
 
-最小装配（四项必填 Options）见 [docs/04-assembly.md](docs/04-assembly.md)。
+四项必填之外全部可选（nil 即不生效）；运行面全貌（Resume/FlushQueue）、业务工具与审批接入见 [docs/04-assembly.md](docs/04-assembly.md)。
 
 ## 文档
 
