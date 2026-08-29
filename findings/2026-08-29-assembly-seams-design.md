@@ -542,6 +542,10 @@ TTL 清理搭 `Registry.Create` 便车触发（session.go:793、:1608 注释）�
 
 五缝即「装配缝」维度的完备集——第二轮按契约/会话/持久化/安全/性能五个纵面重扫，**没有推翻任何一项原判**，新发现中真正新增可开的只有 8.1（Suspend 注册出口，小）；8.2/8.3 是既有缝的同域增强（分别并入缝 1 与缝 4）；其余为边界声明、观察项与记录在案。架构面上最大的非缝事实是 8.4（单进程会话域）——它应当被声明而不是被修补。
 
+### 8.11 并发 spawn 的存量数据竞态（批次 B 落地时实测发现，非本批引入）
+
+`go test -race` 下三个既有测试告警（TestSpawnConcurrentOverlap / TestBgNotifyBudgetGuard / TestBgSessionGateReserve，前两个偶发）：竞态点在 eino adk 内部——`chatmodel.go:1145/1147`（buildMessageReActRunFunc 闭包写实例态）。成因链：`newSpawnTool` 构造**单个** ChatModelAgent 复用于全部 spawn 调用（subagent.go:284-288 → adk.NewAgentTool），同一 agent 实例被并发 Run 时 einox 侧复用模式 × eino 实例态无锁 = 竞态。**已在批次 A 提交点复现（暂存批次 B 改动后 -race 仍报），非批次 B 引入**；批次 B 全部新测试（含子代理面覆盖）在 -race 下通过。处置方向（未实施，需单独分析）：每调用新建子 agent（与「assemble 每轮重建」的既有形态一致）或上游修复；触发条件 = 并发 spawn 场景上生产前必须解决。仓内测试基线（`go test ./...`，AGENTS.md 约定）不含 -race，本发现不阻塞批次提交。
+
 ---
 
 ## 9. 实施方案（PR 切分 / 迁移指南 / 验收 / 决策点 / 风险）

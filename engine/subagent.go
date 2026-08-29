@@ -25,8 +25,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
-	"github.com/jumeng/einox/einoext"
-	"github.com/jumeng/einox/hitl"
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/mid"
 	"github.com/jumeng/einox/session"
@@ -264,13 +262,12 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 			// approval policy never）：auto/bg 档直落——子代理在父的工具调用内
 			// （或后台 goroutine 中）同步运行，中途等审批 = 子任务卡死等人（并行
 			// 场景更糟），委派的无人值守价值归零。ArgsForce 参数级强制审批仍先生效
-			// （hitl 判定先于 mode 分支，红线「任何拓扑不豁免」）：同步路径中断走
+			//（hitl 判定先于 mode 分支，红线「任何拓扑不豁免」）：同步路径中断走
 			// 父审批链（CompositeInterrupt 防御）；后台路径 bg 档直接拒绝回喂
-			// （fail-closed——挂起无人决议宁可失败）。装配纪律：数据域写与 repo
-			// 写工具不进子面白名单。
-			wrapped := hitl.WrapTools(subTs, s, mode, m.Opt.Approval)
+			//（fail-closed——挂起无人决议宁可失败）。装配纪律：数据域写与 repo
+			// 写工具不进子面白名单。ToolWrap 与主面同序同挂（wrapFace）。
 			conf.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: einoext.Adapt(wrapped),
+				Tools: m.wrapFace(subTs, s, mode),
 			}}
 		}
 		if mw, err := m.newReductionMiddleware(s, window, false); err != nil {

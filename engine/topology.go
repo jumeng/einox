@@ -27,8 +27,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
-	"github.com/jumeng/einox/einoext"
-	"github.com/jumeng/einox/hitl"
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
@@ -96,8 +94,8 @@ func (m *Manager) newTopologySub(ctx context.Context, s *session.Session, spec S
 	if len(subTs) > 0 {
 		// 零审批直执（§3.2 红线表：supervisor/deep 派的子 agent 同样适用——
 		// 中途等审批 = 子任务卡死等人）；ArgsForce 参数级强制仍先于 mode 分支。
-		wrapped := hitl.WrapTools(subTs, s, "auto", m.Opt.Approval)
-		conf.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: einoext.Adapt(wrapped)}}
+		// ToolWrap 与主面同序同挂（wrapFace）。
+		conf.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: m.wrapFace(subTs, s, "auto")}}
 	}
 	if mw, err := m.newReductionMiddleware(s, windowOf(mspec), false); err != nil {
 		return nil, err

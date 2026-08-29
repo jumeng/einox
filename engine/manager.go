@@ -71,6 +71,20 @@ type Options struct {
 	// nil/空 = 全挂零行为变化，未知名 NewManager 即拒——对齐 DenyTools 的
 	// fail-fast 纪律）。repo 族不经此缝，仍由 RepoMounts 条件装配。
 	SessionToolsOff []string
+	// ToolWrap 工具包装缝（契约层最外包装，挂 hitl 审批包装之外；主面与
+	// 子代理面同挂——审计/脱敏/动态准入覆盖全量工具调用）。nil = 不包装，
+	// 零行为变化。契约义务：
+	//  1. Info() 须透传原名（名字是审批名单/子代理白名单/动态装载分流的
+	//     寻址键）；
+	//  2. 拒绝执行以 {"ok":false,"error":…} 信封返回回喂模型自纠（勿返回
+	//     Go error——本缝在 errFeed 外层，Go error 会终止整轮且模型不可见）；
+	//  3. 只能收紧不能放宽：收到的是已含审批的实例，透传即保留全部审批
+	//     语义（ArgsForce/模式审批不可豁免）；伪造结果属违约；
+	//  4. 包装随每次 assemble 重建（Run/Resume 各一次）——有状态包装的
+	//     计数不跨轮；
+	//  5. 勿从包装内发起 *contract.Suspend（引擎三卡分叉与决议消费链路
+	//     未对应用开放）。
+	ToolWrap func(t contract.Tool) contract.Tool
 	// NewModel 模型构造口（缺省生产构造 llm.NewChatModel；测试注入假模型）。
 	NewModel llm.ModelFactory
 	// ImageResolve 图片引用解析（文档仓库路径 → 字节+MIME；nil = 图片不可用——
@@ -676,8 +690,7 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	}
 	var face []tool.BaseTool
 	if len(ts) > 0 {
-		wrapped := hitl.WrapTools(ts, s, s.ModePublic(), m.Opt.Approval)
-		face = einoext.Adapt(wrapped)
+		face = m.wrapFace(ts, s, s.ModePublic()) // hitl 审批 → ToolWrap（应用缝）→ 适配
 	}
 	if m.Opt.SubAgents != nil { // spawn 子代理（H2；白名单源 = 全量面）
 		sp, err := m.newSpawnTool(ctx, s, m.Opt.SubAgents, ts)
@@ -767,6 +780,20 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		CheckPointStore: m.Opt.CheckPoints(s.Owner, s.SID),
 	})
 	return ag, runner, behaviors, nil
+}
+
+// wrapFace 契约面统一包装序：hitl 审批 → ToolWrap（应用缝，最外）→ einoext
+// 适配。主面与子代理面（spawn/拓扑）同序——审计/准入对子代理同样生效；
+// 应用包装在审批外层即单调收紧（透传保留审批，额外拒绝生效，豁免不可达）。
+// nil ToolWrap = 只走 hitl，零变化。
+func (m *Manager) wrapFace(ts []contract.Tool, s *session.Session, mode string) []tool.BaseTool {
+	wrapped := hitl.WrapTools(ts, s, mode, m.Opt.Approval)
+	if m.Opt.ToolWrap != nil {
+		for i, t := range wrapped {
+			wrapped[i] = m.Opt.ToolWrap(t)
+		}
+	}
+	return einoext.Adapt(wrapped)
 }
 
 // imageCapableOf 会话模型是否声明图片输入（read_image 工具门禁——当前路由

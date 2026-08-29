@@ -23,6 +23,14 @@ type suspendState struct{ State any }
 
 func init() { schema.Register[suspendState]() }
 
+// RegisterSuspendState 注册业务挂起态类型（*contract.Suspend 的 Info/State
+// 过 checkpoint 的 gob 序列化要求——接口字段持有的具体类型必须注册，eino
+// schema/serialization.go 明文）。等价转发 eino schema.Register——业务勿
+// 为此直接 import eino（业务 0 import eino 承诺）。业务包 init() 中对每个
+// 用作 Suspend 载荷的具体类型调用一次；未注册的挂起在 checkpoint 落盘时
+// 即报 gob 未注册错误（非跨进程才暴露）。
+func RegisterSuspendState[T any]() { schema.Register[T]() }
+
 // adaptTool contract.Tool → eino 工具。
 type adaptTool struct{ t contract.Tool }
 
