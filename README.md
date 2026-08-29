@@ -55,7 +55,7 @@ m, err := engine.NewManager(reg, engine.Options{
 m.Run(ctx, sess, userMsg, attachments, func(ev session.Event) { /* 编码转发 */ })
 ```
 
-四项必填之外全部可选（nil 即不生效）；运行面全貌（Resume/FlushQueue）、业务工具与审批接入见 [docs/04-assembly.md](docs/04-assembly.md)。
+四项必填之外全部可选（nil 即不生效）；运行面全貌（Resume/FlushQueue）、业务工具与审批接入见 [docs/04-assembly.md](docs/04-assembly.md)。完整可运行示例见 [einox-examples](https://github.com/jumeng/einox-examples)（最小装配 / hitl 审批续流 / 多轮与跨进程续聊，剧本假模型驱动、零端点零密钥可跑）。
 
 ## 文档
 
