@@ -1,6 +1,6 @@
-# 05 · 沙箱：run_command 执行围栏
+# 05 · 沙箱
 
-> 沙箱是 `run_command` 执行面的 per-execution 策略围栏——命令能读什么、能写哪里、能否联网、耗多少资源，由操作系统内核强制。它与部署边界正交：容器边界保护宿主机，不保护与 agent 同容器、同挂载卷的数据与进程；沙箱是纵深防御中的一层，不替代 HITL 审批与出口治理。机制归基座、选择归业务：`Options.Sandbox` 为 nil 即不沙箱（默认关、零行为变化），启用前提与平台限制见本文。实现借鉴的开源来源与协议逐项登记于 [NOTICE](../NOTICE.md)。
+> 沙箱是 `run_command` 的 per-execution 策略围栏——命令能读什么、写哪里、能否联网、耗多少资源，由内核强制。它是纵深防御中的一层，不替代 HITL 审批与出口治理，也不替代容器边界（容器保护宿主机，不保护同容器、同挂载卷的数据与进程）。`Options.Sandbox` 为 nil 即不沙箱（默认关）；启用前提与平台限制见本文。借鉴的开源来源与协议逐项登记于 [NOTICE](../NOTICE.md)。
 
 ## 策略模型（sandbox.Policy）
 
@@ -21,7 +21,7 @@
 
 | 后端 | 平台 / 形态 | 说明 |
 |---|---|---|
-| `sandbox.OSProvider`（默认） | Linux x86_64 / arm64 | Landlock 文件围栏 + seccomp 经典 BPF 断网（connect 无条件拒绝，AF_UNIX 同断——防 docker.sock 类本地套接字逃逸）+ rlimit |
+| `sandbox.OSProvider`（默认） | Linux x86_64 / arm64 | Landlock 文件围栏 + seccomp 经典 BPF 断网（仅断网档安装；default allow + deny 清单，connect 无条件拒绝、AF_UNIX 同断——防 docker.sock 类本地套接字逃逸）+ rlimit |
 | | macOS | Seatbelt（`/usr/bin/sandbox-exec` 固定路径，不查 PATH） |
 | | Windows | restricted token（剥特权 + 可写根 ACL 授权） |
 | | 其余 Linux 架构 | 运行时桩如实报 `unusable`（seccomp 号表仅 x86_64 / aarch64）——不做编译期拦截，保证仓库在任意平台可构建 |
@@ -65,9 +65,9 @@ Landlock / seccomp / rlimit 必须在 fork 后、exec 前于子进程内施加�
 
 装配期行为：`Options.Sandbox` 非 nil 且 cmd 族未被 `SessionToolsOff` 裁剪时，engine 构造期自动 `Probe()` 一次，后端状态进启动日志。装配示例见 [04-assembly.md](04-assembly.md)“沙箱装配”。
 
-## 平台已知限制（如实上报口径）
+## 平台已知限制
 
-**Linux**：`ProtectedReadOnly` 不可实现——Landlock 规则只能授不能收，可写区内只读回盖做不到，探测报 partial；`NProc` 对 root 进程被内核豁免（容器 root 形态无效，进程数硬约束归 cgroup `pids-max`）；触顶报 `EAGAIN` 不命中拒绝签名，模型看到的是莫名失败——大产物场景经 `Limit` 调大。
+**Linux**：seccomp 只在断网档（`Network=false`）安装——放行网络即不装 seccomp，ptrace / io_uring 免杀清单随之失效，该面归部署层；`ProtectedReadOnly` 不可实现——Landlock 规则只能授不能收，可写区内只读回盖做不到，探测报 partial；`NProc` 对 root 进程被内核豁免（容器 root 形态无效，进程数硬约束归 cgroup `pids-max`）；触顶报 `EAGAIN` 不命中拒绝签名，模型看到的是莫名失败——大产物场景经 `Limit` 调大。
 
 **Windows**：网络禁断不支持（WFP 需管理员安装持久过滤，后置）——Enforcement 恒 partial、`uncovered=network`；无进程组语义，超时 / 停止退化为单进程终结，孙进程残留但继承 restricted token、围栏不破（存活性缺口而非逃逸）；进程级硬约束归 Job Object（未做）。`ProtectedReadOnly` 经 deny ACE 真回盖。
 
