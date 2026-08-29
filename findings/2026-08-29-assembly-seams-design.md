@@ -637,3 +637,10 @@ if err != nil { /* 启动失败 */ }
 - **批次 B**：纯新增字段 + wrapFace 收拢（三处既有调用行是唯一触碰点）；nil 语义下收拢前后逐字节等价由全量既有测试背书。回退 = revert。
 - **批次 C**：sandbox 收拢重构的等价性以既有平台测试为安全网（构建标签分流照旧）；docker 迁移**改变 EINO_RUN_DOCKER 既有部署行为**（env 开关退役）——changelog 显著标注，属批次 C 明示的破坏点。回退 = revert（接口与迁移同 PR，不存在半迁移态）。
 - **共同不变量**：全程零新增外部依赖（boundary_test.go:18-40 白名单不动）；contract/ 零 eino（boundary_test.go:85-104 不动）；四批全部 nil 缺省零行为变化。
+
+### 9.6 落地记录（2026-08-29）
+
+- 批次 A 已实施（分支 `feat/assembly-batch-a` 提交 1c29a8d）：D1 = 采纳（NewManager 返回 error）、D2 = 随批；装配缝回归八例（engine/assembly_test.go）全绿，全仓 21 包 `go test ./...` 全绿。
+- 批次 B 已实施（提交 731c207）：ToolWrap 五例（engine/toolwrap_test.go）+ 注册出口正反例（einoext/register_test.go）全绿；-race 实测发现存量并发 spawn 竞态（§8.11，非本批引入）。
+- 文档同步（§9.3 之 A2+B1+边界声明）已完成于工作树：AGENTS.md 工具装配链句、docs/02 会话域件裁剪句 + 单进程会话域声明、docs/03 装配面表（Tools/SkillsDir 签名、+SessionToolsOff/+ToolWrap 行）+ 最小装配示例（error 形态）+ 极简装配裁剪行 + Suspend 注册义务——**未提交**：这些文件上有装配缝工作之前的在途未提交改动，混提会误标，待 review 后一并提交。
+- 批次 C 未实施：按 §7 触发条件等待（首个容器/gVisor 需求或 dockerWrap 投诉），D3/D4 届时拍板。
