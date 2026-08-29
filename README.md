@@ -6,15 +6,15 @@
 
 **A general-purpose agent base built on [cloudwego/eino](https://github.com/cloudwego/eino).**
 
-通用 agent 基座：在 eino 之上提供完整的 agent 运行时——循环引擎、会话、HITL 审批、沙箱、检查点、skill 机制、多代理编排、通用工具族。面向把 agent 作为**组件嵌入业务系统**的场景：业务系统对基座只装配、不修改。
+通用 agent 基座：在 eino 之上提供完整的 agent 运行时——循环引擎、会话、HITL 审批、沙箱、检查点、skill 机制、多代理编排、通用工具族。面向把 agent 作为**组件嵌入业务系统**的场景：**可嵌入的 agent 运行时库**——`contract` 为端口面（端口-适配器边界），`engine.Options` 为组装根（构造期装配、nil 即不生效）；业务对基座只装配、不扩展。
 
 > einox 是独立的第三方开源项目，与 CloudWeGo / ByteDance 无隶属关系。
 
 ## 为什么需要 einox
 
-agent 的价值不在通用聊天框，而在嵌入领域系统后获得的数据、权限与流程。einox 的定位是**可装配的库，不是应用**——交互形态与业务面归应用，机制归基座。
+einox 的判断：**每个系统各自智能化，而不是一个智能体去管理不同系统**——基座做 agent 工厂，不做又一个 agent 产品。agent 的价值不在通用聊天框，而在嵌入领域系统后获得的数据、权限与流程；定位是**可装配的库，不是应用**——交互形态与业务面归应用，机制归基座。
 
-三层栈：eino（LLM 应用框架）→ **einox**（agent 运行时基座）→ 业务 agent。会话生命周期、HITL 审批、沙箱执行、网络容错、上下文整形这些「怎么跑起来」的运行时关切不在 eino 的面里，也不该散落在每个业务系统里各造一遍——einox 把它们收敛为机制，一次实现、处处装配。完整论证与选型思考见 [docs/01-positioning.md](docs/01-positioning.md)。
+三层栈：eino（LLM 应用框架）→ **einox**（agent 运行时基座）→ 业务 agent。会话生命周期、HITL 审批、沙箱执行、网络容错、上下文整形这些「怎么跑起来」的运行时关切不在 eino 的面里，也不该散落在每个业务系统里各造一遍——einox 把它们收敛为机制，一次实现、处处装配。一份基座可服务多套业务系统：各自组装根装配各自的 agent 形态，机制单点修复、策略互不渗透。形态对比与场景适配的完整论证见 [docs/01-positioning.md](docs/01-positioning.md)。
 
 ## 核心能力
 

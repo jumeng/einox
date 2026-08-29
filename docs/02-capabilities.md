@@ -7,7 +7,7 @@
 
 | 能力 | 说明 |
 |---|---|
-| 循环引擎 | `engine.Manager`（`NewManager(reg, opt)`）驱动 ReAct 主循环；`MaxIterations` 默认 100 失控护栏（`EINO_MAX_ITERATIONS` 可覆盖） |
+| 循环引擎 | `engine.Manager`（`NewManager(reg, opt)` 返回 `(m, err)`——装配错误启动期即拒）驱动 ReAct 主循环；`MaxIterations` 默认 100 失控护栏（`EINO_MAX_ITERATIONS` 可覆盖） |
 | 会话域 | `session.Registry` + `Store` 接口：会话归属/快照（模型与档位粘住会话）、消息历史、事件流落盘、续聊（Reattach 装载）；`Sweeper` TTL 无活动清理 |
 | 运行中输入（steering） | running 时再输入三路径：引导插入（模型调用前 hook 注入）、排队落回轮、显式停止（安全点取消 + 超时升级强杀；已落事件不回滚，checkpoint 保留可续） |
 | HITL 审批 | `hitl.WrapTools` 按模式包装工具面：manual 逐写审批 / plan 计划卡（批准 = 任务期写授权）/ auto 直过；`ApprovalConfig` 定名单与 ArgsForce（参数级强制审批——**任何模式/任务期授权不豁免**）；无决议 fail-closed 一律拒绝 |
@@ -29,11 +29,11 @@
 
 ## 工具族（tools/）
 
-工具分两类装配：**会话域件**（root 圈进会话工作区，引擎随会话装配：todo / 提问 / 计划 / 文件面 / 命令 / 补丁 / repo）与**进程级件**（应用经 `ProcessTools` 选择加入：时钟 / 网页抓取）。
+工具分两类装配：**会话域件**（root 圈进会话工作区，引擎随会话装配：todo / 提问 / 计划 / 文件面 / 命令 / 补丁 / repo）与**进程级件**（应用经 `ProcessTools` 选择加入：时钟 / 网页抓取）。会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch；极简装配物理移除执行/写面，repo 族仍由 `RepoMounts` 条件装配）。
 
 | 包 | 工具 | 说明 |
 |---|---|---|
-| `tools/applypatch` | `apply_patch` | codex `*** Begin Patch` 格式补丁改文件：多文件增/改/删/改名、四档模糊匹配、多块锚点、事务性（任一失败全部不落盘） |
+| `tools/applypatch` | `apply_patch` | `*** Begin Patch` 格式补丁改文件：多文件增/改/删/改名、四档模糊匹配、多块锚点、事务性（任一失败全部不落盘） |
 | `tools/fsutil` | `read_file` / `list_dir` / `search_files` / `delete_file` | 工作区文件面：行号区间读（超宽行截断可放宽）、目录清单、glob+正则内容搜；路径圈进工作区根，穿越显式拒绝 |
 | `tools/runcommand` | `run_command` / `task_output` / `task_stop` | 工作区内 shell：超时、输出头尾截断（中间省略）、后台任务制；`IsSafeReadCommand` 白名单供审批豁免 |
 | `tools/repo` | `open_repo` / `repo_status` / `repo_diff` / `repo_commit` / `export_patch` | 代码仓 worktree 挂载进工作区 `repos/<短名>/`；任务分支 `agent/<sid>-<n>`；push 硬禁（pushurl 指向不可用协议）；commit 走 ArgsForce；成果出仓 = format-patch 导出 |
@@ -64,12 +64,12 @@
 
 | 出口 | 内容 | 注入时机 |
 |---|---|---|
-| `prompts.Coding()` | 编码工作模式：编辑纪律（apply_patch 优先/不动不明来源/破坏性命令先问）、验证纪律（改完必须验证、失败读输出定位再改）、apply_patch 格式规范 | 工作区工具面在场时由应用拼进 Instruction |
+| `prompts.Coding()` | 编码工作模式：编辑纪律（apply_patch 优先/不动不明来源/破坏性命令先问）、验证纪律（改完必须验证、失败读输出定位再改）、apply_patch 格式规范 | 工作区工具面在场时由应用拼进 Instruction（`SessionToolsOff` 裁掉 fs/cmd/patch 族时勿拼） |
 | `prompts.Orchestration()` | 子代理编排：何时派发（可并行独立子任务）/如何派发（简报自足）/后台派生纪律（禁止轮询·sleep·查进度·重复在途工作）/结论聚合 | spawn 装配时注入；不装配子代理可忽略 |
 
 ## 沙箱（sandbox/）
 
-`run_command` 执行面沙箱（re-exec 哨兵协议：应用 main 挂 `RunHelper` 钩子，装配期 `sandbox.Probe()` 探测可用性）：
+`run_command` 执行面沙箱，后端经 `sandbox.Provider` 注入（缺省 OSProvider 平台内建——OS 级走 re-exec 哨兵协议，应用 main 需挂 `RunHelper` 钩子、装配期探测告警；容器等自定义后端经注入位替换，无哨兵依赖）：
 
 | 平台 | 机制 | 构建标签 |
 |---|---|---|
@@ -78,7 +78,9 @@
 | Windows | restricted token（drop 权限 SID + 受限进程令牌） | `windows` |
 | macOS | Seatbelt（sandbox-exec 配置档） | `darwin` |
 
-策略 `sandbox.Policy`：`Mode`（readonly / workspace-write / danger-full-access；nil = 不沙箱）+ `Network` 开关 + `WritableRoots`（围栏内可写根，如持久缓存目录）+ `Env` 注入（缓存重定向——围栏内 HOME 不可写，不重定向 go build 硬失败）。
+策略 `sandbox.Policy`：`Mode`（readonly / workspace-write / danger-full-access；nil = 不沙箱）+ `Network` 开关 + `WritableRoots`（围栏内可写根，如持久缓存目录）+ `Env` 注入（缓存重定向——围栏内 HOME 不可写，不重定向 go build 硬失败）+ `EnvMode` 环境档（缺省 inherit 全继承；`minimal` 白名单——凭据面默认不进围栏，业务所需环境经 `Env` 显式注入）。
+
+后端经 `sandbox.Provider` 注入（缺省 `OSProvider` 平台内建）；`DockerProvider` = 一次性容器过渡形态（策略翻译进容器参数，`ProtectedReadOnly` 经嵌套 ro bind 可治；终局为每会话长驻容器，接口形状不变）。
 
 ### 隔离边界随部署形态选择（纵深防御）
 
@@ -91,6 +93,8 @@
 | 学习 / 研究 | 容器即边界，内层沙箱可省：接受容器内不设防（agent 可达容器内一切），以容器边界护住宿主。注意默认容器**共享内核、是粗粒度边界而非强安全边界**——保持非特权运行、裁剪能力集；需要强隔离再上 gVisor / 微 VM |
 
 与沙箱正交的**用户态出口治理**：`egress.New(allowCIDRs)` 覆盖 web_fetch 前置与 run_command 命令串 URL 预检（内网段白名单即工作面）。
+
+**单进程会话域**（架构边界声明）：会话态在进程内存（`session.Registry`）、Store 契约为文件树形——多副本部署需按 owner 粘性路由到创建会话的进程；库形态单二进制部署下此边界自然成立。
 
 ## 模型面（llm/）
 
