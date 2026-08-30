@@ -79,7 +79,7 @@ m.FlushQueue(sess)          // 排队消息落回轮
 | 不要子代理 | `SubAgents` 留 nil（提示词不拼 `Orchestration()` 段） |
 | 不要沙箱 | `Sandbox` 留 nil（默认即关，opt-in） |
 | 不要出口治理 | `Egress` 留 nil |
-| 沙箱开 workspace-write | 见下「沙箱装配」——`WritableRoots` + 缓存重定向 `Env` 是保命件 |
+| 沙箱开 workspace-write | 见下“沙箱装配”——`WritableRoots` + 缓存重定向 `Env` 是保命件 |
 | 大工具面瘦身 | `ToolSearchPolicy{DynamicTools: [...]}`——高频件与 ask_user/todo_write/submit_plan 留常驻 |
 | 极简装配（纯业务问答） | `SessionToolsOff: []string{engine.FamilyFS, engine.FamilyCmd, engine.FamilyPatch}`——物理移除文件/命令/补丁面；此时 Instruction 勿拼 `prompts.Coding()` 段，且超长工具结果只剩截断头尾（外置换指针经 read_file 取回，fs 族已裁） |
 | 确定性场景多 agent | `Topology{Kind, SubAgents}`（supervisor/deep；默认单 agent） |
@@ -104,7 +104,7 @@ Sandbox: &sandbox.Policy{
 
 容器形态：`SandboxProvider: &sandbox.DockerProvider{Image: "golang:1.26"}`——策略翻译进容器参数（三档挂载映射/断网/可写根/ro 子挂载回盖）。
 
-**出口治理**：`egress.New([]string{"10.0.0.0/8", ...})`——私网默认阻断（RFC1918 等）+ CIDR 白名单即工作面，`web_fetch` 前置与 `run_command` 命令串预检共用同一校验器。白名单缺失是否拒绝启动由应用装配层决定（防「开了开关忘了白名单」）——基座只在 CIDR 非法时返回 error。
+**出口治理**：`egress.New([]string{"10.0.0.0/8", ...})`——私网默认阻断（RFC1918 等）+ CIDR 白名单即工作面，`web_fetch` 前置与 `run_command` 命令串预检共用同一校验器。白名单缺失是否拒绝启动由应用装配层决定（防“开了开关忘了白名单”）——基座只在 CIDR 非法时返回 error。
 
 ## 扩展业务能力
 
@@ -134,7 +134,7 @@ func (t *createOrder) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 
 ### 2. 审批名单（业务内容）
 
-`Approval: hitl.ApprovalConfig{…}` 定三件事：哪些工具算**写**（进审批矩阵）、各工具审批动作名、**ArgsForce 名单**（如「置完成」「commit」——任何模式/任务期授权不豁免，人工逐次批准）。三档会话模式（manual 逐写审批 / plan 计划卡 / auto 直过）由引擎按模式包装，名单不变。
+`Approval: hitl.ApprovalConfig{…}` 定三件事：哪些工具算**写**（进审批矩阵）、各工具审批动作名、**ArgsForce 名单**（如“置完成”“commit”——任何模式/任务期授权不豁免，人工逐次批准）。三档会话模式（manual 逐写审批 / plan 计划卡 / auto 直过）由引擎按模式包装，名单不变。
 
 ### 3. 提示词与 skill
 
@@ -151,7 +151,7 @@ func (t *createOrder) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 
 ## 业务侧边界守卫
 
-「业务 0 import eino」是架构验收线，守卫放业务仓（检查的是 eino 这个固定名字，与业务仓自己叫什么无关）。任一业务仓在仓根放一个测试文件即可：
+“业务 0 import eino”是架构验收线，守卫放业务仓（检查的是 eino 这个固定名字，与业务仓自己叫什么无关）。任一业务仓在仓根放一个测试文件即可：
 
 ```go
 func TestNoEinoImports(t *testing.T) {

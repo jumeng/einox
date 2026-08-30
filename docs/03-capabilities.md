@@ -8,7 +8,7 @@
 |---|---|
 | 循环引擎 | `engine.Manager`（`NewManager(reg, opt)` 返回 `(m, err)`——装配错误启动期即拒）驱动 ReAct 主循环；`MaxIterations` 默认 100 失控护栏（`EINO_MAX_ITERATIONS` 可覆盖） |
 | 会话域 | `session.Registry` + `Store` 接口：会话归属/快照（模型与档位粘住会话）、消息历史、事件流落盘、续聊（Reattach 装载）；`Sweeper` TTL 无活动清理 |
-| 运行中输入（steering） | running 时再输入三路径：引导插入（每次模型调用前的 hook 把排队消息追加进输入）、排队落回轮（轮次结束后到达的输入并入下一轮）、显式停止（取消运行上下文，循环在步间退出；已落事件不回滚，checkpoint 保留可续；停止即向历史注入打断注记——模型续聊时知晓「工具可能部分执行/后台进程可能仍在跑」，不假设中断前操作都已成功） |
+| 运行中输入（steering） | running 时再输入三路径：引导插入（每次模型调用前的 hook 把排队消息追加进输入）、排队落回轮（轮次结束后到达的输入并入下一轮）、显式停止（取消运行上下文，循环在步间退出；已落事件不回滚，checkpoint 保留可续；停止即向历史注入打断注记——模型续聊时知晓“工具可能部分执行/后台进程可能仍在跑”，不假设中断前操作都已成功） |
 | HITL 审批 | `hitl.WrapTools` 按模式包装工具面：manual 逐写审批 / plan 计划卡（批准 = 任务期写授权）/ auto 直过；`ApprovalConfig` 定名单与 ArgsForce（参数级强制审批——**任何模式/任务期授权不豁免**）；无决议 fail-closed 一律拒绝 |
 | 跨会话记忆交接（写/拉） | `TurnEpilogue` 轮收尾钩子（自然收束触发，载荷与 session_end 同源——摘要+文件变更；应用落 owner 域记忆文件经 AgentsMD 注入即成读写环）+ `recall` 检索工具（见工具族表）；推通道 = AgentsMD 注入缝。三通道设计见 findings/2026-08-29-memory-three-channel-design.md（仓外设计笔记，不随仓分发） |
 | 收束质量门（FinalGate） | 三层约束（事前审批/事中 ErrFeed）的收束空位：自然收束后按 `Options.FinalGate`（SessionBrief 闭包——按模式/形态开门）强制验证，失败经 harness_note 门卡 + 反馈消息入史回灌重跑（有界——MaxRetries 负数=缺省 2、0=零回灌首验即报错，codex Guardian 普通/cyber 两档对位），耗尽 error 收束不静默放行；checker panic fail-closed；挂起/中断/错误轮不触发。**判据归应用**（`GateChecker`——build/test 命令或自包对抗审查），基座只持门循环机制 |
@@ -21,7 +21,7 @@
 
 | 域 | 事件 |
 |---|---|
-| 生成流 | `text_delta` / `thinking_delta` / `usage`（含整形后出站口径估算与「整形节省」注记） |
+| 生成流 | `text_delta` / `thinking_delta` / `usage`（含整形后出站口径估算与“整形节省”注记） |
 | 工具 | `tool_call`（参数摘要 + 行为标记）/ `tool_result`（Digest+Preview、文件变更信封 `+A -D`） |
 | 挂起交互 | `approval_request/decision/timeout`（**合并决议卡**：一轮并行写聚合一卡 N 项、逐项决议）/ `ask_user_request/decision/timeout/ignored` / `plan_request/decision/timeout` |
 | steering 与通知 | `steer_queued/updated/removed/reordered/injected` / `notify_queued/notify_injected`（后台子代理完成回传）/ `user_message` |
@@ -60,7 +60,7 @@
 | 动态工具装载（toolsearch） | `ToolSearchPolicy`：名单外常驻、名单内经 `tool_search` 检索后可见——大工具面的上下文瘦身 |
 | vision 包装 | `ImageResolve` 注入图片引用解析，工具结果图片在**模型调用边界**升级为携图 user part（tool 角色不收图；模型不支持时明确报错） |
 | 工具中间件链（mid） | `Validate`（入参 schema 子集校验——type/enum/数值边界/items/嵌套递归，违规带字段路径转信封回喂；不校验 required——反射 schema 把全部非指针字段标 required，与零值可接受的工具语义普遍不符）、`ErrFeed`（可恢复错误转结果回喂模型自纠——Go error 会终止整轮且模型不可见）、`Guard`（防死循环提醒 + 单工具执行硬上限）、`digest`（审批卡/事件流参数摘要，不倾倒原始 JSON） |
-| 幻觉工具兜底 | 模型调用不存在的工具名 → `{"ok":false}` 信封回喂自纠（不终止整轮）：toolsearch 名单内工具 miss 附「先 tool_search 检索」指引；名单外报可用名单 + 归一化拼写建议（唯一命中才提示、绝不代执行）。主面/拓扑子面/spawn 子面三处同挂 |
+| 幻觉工具兜底 | 模型调用不存在的工具名 → `{"ok":false}` 信封回喂自纠（不终止整轮）：toolsearch 名单内工具 miss 附“先 tool_search 检索”指引；名单外报可用名单 + 归一化拼写建议（唯一命中才提示、绝不代执行）。主面/拓扑子面/spawn 子面三处同挂 |
 | 工具 panic 隔离 | einoext 桥单点 recover：包装链任一层 panic 收敛为错误信封回喂（进程不崩、模型可换参自纠；Guard 死循环计数照常防 panic-重试循环） |
 | skill 机制 | `SkillsDir` 指向物化目录即挂 skill middleware（agentskills.io 标准发现）；物化归应用 |
 | AGENTS.md 注入 | `AgentsMD` 清单按序注入（eino agentsmd 中间件白拿）：transient 不入历史/检查点、@import 递归（深度 5）、字节预算超限即止（跳过留服务端日志，codex tracing::warn 同级——非用户弹窗）、挂 summarization 之后不被压缩。发现逻辑归应用清单（ZCode 双层形态 = 用户级文件先、工作区级文件后收窄覆盖） |
