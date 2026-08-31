@@ -16,10 +16,11 @@ package llm
 //   - 合并返回新切片，不改入参（读侧视图，绝不回写存储——settings 回显
 //     走原样盘，合并只发生在 resolve 视图）
 //
-// DeepSeek 官方两协议端点：openai 兼容（api.deepseek.com，主推格式，
-// dialect=deepseek 思考字段）+ anthropic 兼容（/anthropic，思考走协议原生
-// 预算档零方言）；模型三只（flash/pro/vision-exp，官方定价页：上下文均
-// 1M、最大输出 384K，vision-exp 定价与 flash 一致），1M 预开。
+// DeepSeek 官方推荐 openai 协议端点（api.deepseek.com，dialect=deepseek
+// 思考字段）；模型三只（flash/pro/vision-exp，官方定价页：上下文均 1M、
+// 最大输出 384K，vision-exp 定价与 flash 一致），1M 预开。/anthropic 兼容
+// 端点不预置（2026-09-01 裁撤内置条目，只留官方推荐接入口）——需要时
+// 自定义 Kind=anthropic 接，思考走协议原生预算档零方言。
 //
 // 智谱（BigModel）单条目：GLM-5.3（纯文本）+ GLM-5.3-Flash（原生多模态，
 // 图片经 image_url 传 URL/Base64），上下文 1M、最大输出 128K（两模型文档
@@ -51,15 +52,6 @@ func BuiltinProviders() []ProviderSpec {
 			ID: "deepseek", Name: "DeepSeek", Kind: "openai",
 			BaseURL: "https://api.deepseek.com", Dialect: "deepseek", Enabled: true,
 			Models: []ModelSpec{
-				m1m("deepseek-v4-flash", false, 100),
-				m1m("deepseek-v4-pro", false, 101),
-				m1m("deepseek-v4-flash-vision-exp", true, 102),
-			},
-		},
-		{
-			ID: "deepseek-anthropic", Name: "DeepSeek（Claude 协议）", Kind: "anthropic",
-			BaseURL: "https://api.deepseek.com/anthropic", Enabled: true,
-			Models: []ModelSpec{ // 思考走 anthropic 协议原生预算档（ThinkingConfig），零方言
 				m1m("deepseek-v4-flash", false, 100),
 				m1m("deepseek-v4-pro", false, 101),
 				m1m("deepseek-v4-flash-vision-exp", true, 102),

@@ -24,8 +24,9 @@ func TestMergeBuiltinSemantics(t *testing.T) {
 		{ // 命中内置：仅密钥+启用——参数全靠内置补全
 			ID: "deepseek", APIKey: "sk-x", Enabled: true,
 		},
-		{ // 命中内置：显式值优先（BaseURL 覆写走代理 + 自裁模型清单）
-			ID: "deepseek-anthropic", BaseURL: "https://proxy.internal/anthropic",
+		{ // 命中内置：显式值优先（BaseURL 覆写走代理 + 自裁模型清单——合并语义
+			// 单测按条目各自合并，与首条同 ID 不冲突；ID 唯一性归 ValidateProviders）
+			ID: "deepseek", BaseURL: "https://proxy.internal/deepseek",
 			APIKey: "sk-y", Enabled: true,
 			Models: []ModelSpec{{ID: "deepseek-v4-pro", Input: []string{"text"}}},
 		},
@@ -58,8 +59,11 @@ func TestMergeBuiltinSemantics(t *testing.T) {
 	}
 
 	a := got[1]
-	if a.BaseURL != "https://proxy.internal/anthropic" {
+	if a.BaseURL != "https://proxy.internal/deepseek" {
 		t.Fatalf("用户 BaseURL 显式值应优先：%s", a.BaseURL)
+	}
+	if a.Dialect != "deepseek" || a.Kind != "openai" {
+		t.Fatalf("显式清单条目的空位仍应内置补全：kind=%s dialect=%s", a.Kind, a.Dialect)
 	}
 	if len(a.Models) != 1 || a.Models[0].ID != "deepseek-v4-pro" {
 		t.Fatalf("用户显式模型清单应保留（自裁语义）：%+v", a.Models)
