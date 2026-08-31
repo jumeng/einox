@@ -72,7 +72,7 @@ type ProviderSpec struct {
 	Kind    string      `json:"kind"` // anthropic | openai | responses（responses 形式选项,组装未实现）
 	BaseURL string      `json:"base_url"`
 	APIKey  string      `json:"api_key"`           // write-only
-	Dialect string      `json:"dialect,omitempty"` // 思考方言("" 零发送走端点默认 | "deepseek" 私有块+档位直传 | "effort" 通用 reasoning_effort)——厂家私有格式只走 dialect,绝不写进通用分支
+	Dialect string      `json:"dialect,omitempty"` // 思考方言("" 零发送走端点默认 | "deepseek" 私有块+档位直传 | "glm" 智谱同形私有块 | "effort" 通用 reasoning_effort)——厂家私有格式只走 dialect,绝不写进通用分支
 	Enabled bool        `json:"enabled"`
 	Catalog []string    `json:"catalog,omitempty"` // 拉取到的端点模型清单（fetch-models 结果缓存,随保存持久化;UI 下拉数据源,不参与校验/路由）
 	Models  []ModelSpec `json:"models"`
@@ -212,8 +212,8 @@ func ValidateProviders(ps []ProviderSpec) error {
 		if p.Kind != "" && p.Kind != "anthropic" && p.Kind != "openai" && p.Kind != "responses" {
 			return fmt.Errorf("%s kind 取值应为 anthropic / openai / responses", p.ID)
 		}
-		if p.Dialect != "" && p.Dialect != "deepseek" && p.Dialect != "effort" {
-			return fmt.Errorf("%s dialect 取值应为空、deepseek 或 effort（通用思考方言）", p.ID)
+		if p.Dialect != "" && p.Dialect != "deepseek" && p.Dialect != "glm" && p.Dialect != "effort" {
+			return fmt.Errorf("%s dialect 取值应为空、deepseek、glm 或 effort（通用思考方言）", p.ID)
 		}
 		mids := map[string]bool{}
 		for j := range p.Models {

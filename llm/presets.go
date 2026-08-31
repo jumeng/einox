@@ -20,6 +20,15 @@ package llm
 // dialect=deepseek 思考字段）+ anthropic 兼容（/anthropic，思考走协议原生
 // 预算档零方言）；模型三只（flash/pro/vision-exp，官方定价页：上下文均
 // 1M、最大输出 384K，vision-exp 定价与 flash 一致），1M 预开。
+//
+// 智谱（BigModel）单条目：GLM-5.3（纯文本）+ GLM-5.3-Flash（原生多模态，
+// 图片经 image_url 传 URL/Base64），上下文 1M、最大输出 128K（两模型文档
+// 同口径）；Chat Completion 端点 + dialect=glm（思考恒开仅 enabled、
+// reasoning_effort 恰 low/high/max 三档直传——与 deepseek 方言线格式同形）。
+// 本预置面向智谱开放平台 API（API 密钥计费面），接入面即 openai 兼容
+// Chat Completion（paas/v4）；anthropic 兼容端点属 GLM Coding Plan 接入
+// 面、非本密钥可用，不预置。采样参数不设——GLM-5.x 端点默认值即文档
+// 推荐值（temperature 1.0 / top_p 0.95，且二选一）。
 
 // BuiltinProviders 预置供应商目录（纯数据、版本化随基座、不含密钥；模型页
 // 「厂家」下拉加载模板同源）。
@@ -52,6 +61,14 @@ func BuiltinProviders() []ProviderSpec {
 				m1m("deepseek-v4-flash", false, 100),
 				m1m("deepseek-v4-pro", false, 101),
 				m1m("deepseek-v4-flash-vision-exp", true, 102),
+			},
+		},
+		{
+			ID: "zhipu", Name: "智谱（GLM）", Kind: "openai",
+			BaseURL: "https://open.bigmodel.cn/api/paas/v4", Dialect: "glm", Enabled: true,
+			Models: []ModelSpec{
+				m1m("glm-5.3-flash", true, 103), // 原生多模态：图片输入
+				m1m("glm-5.3", false, 104),      // 纯文本
 			},
 		},
 	}

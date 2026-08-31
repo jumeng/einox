@@ -1,6 +1,7 @@
 package llm
 
 // 分类表回归（网络容错 ③）：DeepSeek 官方错误码面（400/401/402/422/429/5xx）
+// + 智谱业务码细化（classifyBizCode：429 族致命码/未命中透传/数值码不细化）
 // + anthropic 状态码面 + net 包裹链 + 哨兵 + 未知保守不重试。
 
 import (
@@ -35,6 +36,13 @@ func TestClassifyTable(t *testing.T) {
 		{"DS429 限速", &einoopenai.APIError{HTTPStatusCode: 429}, true, "RATE_LIMIT", "频率"},
 		{"DS500 服务端故障", &einoopenai.APIError{HTTPStatusCode: 500}, true, "SERVER", "故障"},
 		{"DS503 繁忙", &einoopenai.APIError{HTTPStatusCode: 503}, true, "SERVER", "503"},
+		// 智谱业务码细化（错误体 error.code；致命码均挂 429——状态码面会误报频率上限）
+		{"ZP429欠费1113", &einoopenai.APIError{HTTPStatusCode: 429, Code: "1113"}, false, "SERVER", "欠费"},
+		{"ZP429订阅过期1309", &einoopenai.APIError{Code: "1309"}, false, "SERVER", "续订"},
+		{"ZP429套餐不含模型1311", &einoopenai.APIError{Code: "1311"}, false, "SERVER", "套餐"},
+		{"ZP429限频1302不细化", &einoopenai.APIError{HTTPStatusCode: 429, Code: "1302"}, true, "RATE_LIMIT", "频率"},
+		{"ZP400模型不存在走状态码面", &einoopenai.APIError{HTTPStatusCode: 400, Code: "1211", Message: "model not exist"}, false, "SERVER", "model not exist"},
+		{"ZP数值码不细化", &einoopenai.APIError{HTTPStatusCode: 429, Code: 1113.0}, true, "RATE_LIMIT", "频率"},
 		// 包裹链（组件/fmt %w 包裹下 errors.As 穿透）
 		{"包裹链402", fmt.Errorf("调用失败: %w", &einoopenai.APIError{HTTPStatusCode: 402}), false, "SERVER", "余额不足"},
 		// anthropic 协议（状态码面；type 字符串不可手工构造，状态码路径覆盖）

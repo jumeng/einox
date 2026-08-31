@@ -34,10 +34,13 @@ func TestMergeBuiltinSemantics(t *testing.T) {
 			APIKey: "k", Enabled: true,
 			Models: []ModelSpec{{ID: "qwen3", Input: []string{"text"}}},
 		},
+		{ // 命中内置：智谱极简引用——参数全靠内置补全（glm 方言 + 多模态标记）
+			ID: "zhipu", APIKey: "zp-x", Enabled: true,
+		},
 	}
 	got := MergeBuiltin(user)
 
-	if len(got) != 3 {
+	if len(got) != 4 {
 		t.Fatalf("合并不得增删条目：%d", len(got))
 	}
 	d := got[0]
@@ -65,6 +68,17 @@ func TestMergeBuiltinSemantics(t *testing.T) {
 	v := got[2]
 	if v.BaseURL != "http://10.0.0.2:8000/v1" || len(v.Models) != 1 || v.Models[0].ID != "qwen3" {
 		t.Fatalf("未命中条目应原样：%+v", v)
+	}
+
+	z := got[3]
+	if z.Kind != "openai" || z.BaseURL != "https://open.bigmodel.cn/api/paas/v4" || z.Dialect != "glm" || z.Name != "智谱（GLM）" {
+		t.Fatalf("智谱内置参数应补全：kind=%s base=%s dialect=%s name=%s", z.Kind, z.BaseURL, z.Dialect, z.Name)
+	}
+	if len(z.Models) != 2 || z.Models[0].ID != "glm-5.3-flash" || !SupportsImage(z.Models[0]) {
+		t.Fatalf("flash 应为首模型且带图片输入能力：%+v", z.Models)
+	}
+	if z.Models[1].ID != "glm-5.3" || SupportsImage(z.Models[1]) {
+		t.Fatalf("glm-5.3 应为纯文本模型：%+v", z.Models[1])
 	}
 
 	// 入参不改写（读侧视图纪律）
@@ -111,6 +125,10 @@ func TestValidateDialectEffort(t *testing.T) {
 		Models: []ModelSpec{{ID: "m", Input: []string{"text"}}}}}
 	if err := ValidateProviders(ps); err != nil {
 		t.Fatalf("effort 方言应过校验：%v", err)
+	}
+	ps[0].Dialect = "glm"
+	if err := ValidateProviders(ps); err != nil {
+		t.Fatalf("glm 方言应过校验：%v", err)
 	}
 	ps[0].Dialect = "bogus"
 	if err := ValidateProviders(ps); err == nil || !strings.Contains(err.Error(), "dialect") {

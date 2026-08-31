@@ -8,8 +8,11 @@ package llm
 //     （低 8192 / 高 32768 / 最高 = limit.output，见 thinkingBudget）
 //   openai 协议 → 思考走方言字段（2026-08-28 泛化）：dialect=deepseek 发
 //     thinking:{type:enabled} + reasoning_effort:low|high|max（DeepSeek 私有
-//     格式+真实档位名直传）；dialect=effort 仅 reasoning_effort（通用方言，
-//     max→high 对齐 OpenAI 词表）；非方言端点零思考字段零污染（走端点默认）
+//     格式+真实档位名直传）；dialect=glm 同形（智谱官方文档：GLM-5.3/
+//     5.3-Flash 思考恒开仅 enabled、档位枚举恰 low/high/max 三值直传零降档；
+//     clear_thinking 只管跨轮历史回传、本仓出站本就剥离故不发送）；
+//     dialect=effort 仅 reasoning_effort（通用方言，max→high 对齐 OpenAI
+//     词表）；非方言端点零思考字段零污染（走端点默认）
 // 旧值归一（normalizeEffort）：升级前偏好/存量会话快照里的 on/max → max、
 // off/"" → 默认 low。
 // reasoning_content 回传：两协议组件均**原样透传**、无整形（eino-ext acl/openai
@@ -134,6 +137,8 @@ func samplingOf(m ModelSpec) (temp, topP *float32) {
 
 // deepseekThinkingFields DeepSeek 思考扩展字段（thinking 闸门恒开 +
 // reasoning_effort 三档直传）——提为独立函数供单测锚定 effort → 请求字段映射。
+// GLM 方言（dialect=glm）线格式同形共用：智谱两模型思考字段与档位词表和
+// DeepSeek 一致，分叉时再拆独立函数。
 func deepseekThinkingFields(effort string) map[string]any {
 	return map[string]any{
 		"thinking":         map[string]any{"type": "enabled"},
@@ -189,10 +194,11 @@ func newOpenAIModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort str
 	// 采样参数：显式声明才下发（nil = 不发字段走端点默认）
 	cfg.Temperature, cfg.TopP = samplingOf(m)
 	// 思考方言（厂家/通用知识只走 dialect，绝不写进通用分支——非方言端点
-	// 零思考字段，走端点默认）：deepseek = 私有块+档位直传；effort = 通用
-	// reasoning_effort（max→high 降档）；vLLM 等标准端点零污染不变。
+	// 零思考字段，走端点默认）：deepseek = 私有块+档位直传；glm = 智谱同形
+	// 方言（见 deepseekThinkingFields 注）；effort = 通用 reasoning_effort
+	// （max→high 降档）；vLLM 等标准端点零污染不变。
 	switch p.Dialect {
-	case "deepseek":
+	case "deepseek", "glm":
 		cfg.ExtraFields = deepseekThinkingFields(effort)
 	case "effort":
 		cfg.ExtraFields = effortThinkingFields(effort)

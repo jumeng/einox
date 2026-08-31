@@ -5,7 +5,8 @@ package llm
 // 消费方两处：engine 重试决策（ShouldRetry 取 Retryable）与错误卡装配
 // （Code/Message）。分类表对齐 DeepSeek 官方错误码（2026-08-28 用户给定
 // api-docs.deepseek.com/zh-cn/quick_start/error_codes）与 anthropic 协议
-// type 字符串；两协议的错误在组件边界已是导出类型（eino-ext openai 组件
+// type 字符串；openai 协议错误体的业务码细化（智谱 429 族致命码）走
+// classifyBizCode；两协议的错误在组件边界已是导出类型（eino-ext openai 组件
 // 把 fork APIError 转为组件自有 APIError；claude 组件透传 SDK *anthropic.Error），
 // errors.As 穿透包裹链（url.Error/fmt.Errorf %w）即得。
 //
@@ -45,9 +46,12 @@ func Classify(err error) Classified {
 	if errors.Is(err, ErrIdleTimeout) || errors.Is(err, context.DeadlineExceeded) {
 		return Classified{Retryable: true, Code: "TRANSPORT", Message: transportMsg(err)}
 	}
-	// openai 协议：组件 APIError（HTTP 状态码面）
+	// openai 协议：组件 APIError（业务码细化优先，未命中走 HTTP 状态码面）
 	var oe *einoopenai.APIError
 	if errors.As(err, &oe) {
+		if c, ok := classifyBizCode(oe.Code); ok {
+			return c
+		}
 		return classifyStatus(oe.HTTPStatusCode, detailOf(oe.Message, oe.Error()))
 	}
 	// anthropic 协议：SDK Error（状态码 + type 字符串双信号）
@@ -99,6 +103,33 @@ func classifyStatus(status int, detail string) Classified {
 	default: // 400 格式错 / 422 参数错 / 其余 4xx：修请求才有意义，重试无用
 		return Classified{Code: "SERVER", Message: "请求被拒绝（" + itoa(status) + "）" + detail + "——请检查后重试"}
 	}
+}
+
+// classifyBizCode openai 协议错误体业务码细化（机制厂家中立，码表是数据）：
+// 状态码 ≠ 处置语义的缺口只有一处——智谱（GLM）429 族里混着「等待救不活」
+// 的欠费/套餐类码（docs.bigmodel.cn 错误码表 1113/1309/1311/1314/1315，均
+// 429），状态码面会误报频率上限并空转重试。未命中码一律走状态码面——码表
+// 按厂家编号空间天然不冲突（DeepSeek/OpenAI 的 error.code 是语义字符串）。
+// 码仅取字符串形态（智谱文档示例形态；数值码不细化退状态码面）。
+func classifyBizCode(code any) (Classified, bool) {
+	s, _ := code.(string)
+	if s == "" {
+		return Classified{}, false
+	}
+	if msg, ok := fatalBizCodes[s]; ok {
+		return Classified{Code: "SERVER", Message: msg}, true
+	}
+	return Classified{}, false
+}
+
+// fatalBizCodes 业务码 → 致命处置文案（智谱错误码表，HTTP 均 429——处置
+// 对齐 DeepSeek 402 欠费先例：致命停机不降级，文案给可行动指引）。
+var fatalBizCodes = map[string]string{
+	"1113": "账户已欠费（429/1113）——请到模型服务商充值后重试",
+	"1309": "订阅已过期（429/1309）——请续订后重试",
+	"1311": "套餐不含该模型（429/1311）——请升级套餐或更换模型",
+	"1314": "企业套餐已过期（429/1314）——请联系企业管理员续费",
+	"1315": "API Key 类型受限（429/1315）——请更换 Key 类型",
 }
 
 // classifyAnthropicType anthropic 协议 type 字符串细化（状态码之外的带内信号；
