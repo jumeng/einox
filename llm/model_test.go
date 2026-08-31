@@ -2,13 +2,13 @@ package llm
 
 import "testing"
 
-// TestNormalizeEffort 档位归一表测：三档原样 + 旧值/空值/未知归一。
+// TestNormalizeEffort 档位归一表测：四档原样 + 旧值/空值/未知归一。
 // 旧值来自升级前用户偏好与存量会话快照（on/off 二值时代）。
 func TestNormalizeEffort(t *testing.T) {
 	cases := map[string]string{
-		"low": "low", "high": "high", "max": "max", // 三档原样
-		"on":  "max",                                             // 旧「开」= enabled+effort max
-		"off": "low", "": "low", "medium": "low", "xhigh": "low", // 旧「关」/缺省/未知 → 默认低档
+		"off": "off", "low": "low", "high": "high", "max": "max", // 四档原样（off 2026-08-31 回归）
+		"on":  "max",                                   // 旧「开」= enabled+effort max
+		"":    "low", "medium": "low", "xhigh": "low", // 缺省/未知 → 默认低档
 	}
 	for in, want := range cases {
 		if got := NormalizeEffort(in); got != want {
@@ -17,8 +17,9 @@ func TestNormalizeEffort(t *testing.T) {
 	}
 }
 
-// TestDeepseekThinkingFields 思考扩展字段映射：闸门恒开 + 三档直传档位名
-// （effort → HTTP 请求体的最后一跳，直赋值无分支——本测锚定防回归）。
+// TestDeepseekThinkingFields 思考扩展字段映射：开档闸门 enabled + 三档直传
+// 档位名；关档闸门 disabled 且不发 effort（effort → HTTP 请求体的最后一跳，
+// 本测锚定防回归）。
 func TestDeepseekThinkingFields(t *testing.T) {
 	for _, e := range []string{"low", "high", "max"} {
 		f := deepseekThinkingFields(e)
@@ -28,6 +29,30 @@ func TestDeepseekThinkingFields(t *testing.T) {
 		}
 		if f["reasoning_effort"] != e {
 			t.Errorf("%s 档 reasoning_effort 应直传档位名，实得 %v", e, f["reasoning_effort"])
+		}
+	}
+	off := deepseekThinkingFields("off")
+	think, ok := off["thinking"].(map[string]any)
+	if !ok || think["type"] != "disabled" {
+		t.Errorf("off 档 thinking 闸门应为 disabled，实得 %v", off["thinking"])
+	}
+	if _, has := off["reasoning_effort"]; has {
+		t.Errorf("off 档不应发 reasoning_effort（DeepSeek 文档 effort 属思考模式）：%v", off)
+	}
+}
+
+// TestThinkingConfigOf anthropic 协议关/开分支：off = nil（协议零思考字段
+// 即关），开档 = OfEnabled 预算档（预算数值由 TestThinkingBudget 锚定，此处
+// 只锚分支与预算联动）。
+func TestThinkingConfigOf(t *testing.T) {
+	m := ModelSpec{Limit: &Limit{Output: 128_000}}
+	if c := thinkingConfigOf("off", m); c != nil {
+		t.Fatalf("off 档应不发思考块（nil），实得 %+v", c)
+	}
+	for _, e := range []string{"low", "high", "max"} {
+		c := thinkingConfigOf(e, m)
+		if c == nil || c.OfEnabled == nil || c.OfEnabled.BudgetTokens != thinkingBudget(e, m) {
+			t.Errorf("%s 档应为 OfEnabled 预算档且与 thinkingBudget 同源，实得 %+v", e, c)
 		}
 	}
 }

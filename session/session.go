@@ -1471,7 +1471,7 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 	if json.Unmarshal(data, &rec) != nil || rec.Owner != owner {
 		return nil
 	}
-	rec.Model.Effort = llm.NormalizeEffort(rec.Model.Effort) // 存量快照旧值归一：进内存即三档值，detail/回发/引擎全链一致
+	rec.Model.Effort = llm.NormalizeEffort(rec.Model.Effort) // 存量快照旧值归一：进内存即四档值，detail/回发/引擎全链一致
 	st := rec.State
 	if st == StateRunning || (st == StatePendingApproval && rec.PendingAppID == "") {
 		st = StateEnded // 无执行体残留不可续

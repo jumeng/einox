@@ -11,7 +11,7 @@ const (
 // UserPrefs 用户模型偏好（会话模型快照与用户默认；字段语义见 einox/llm）。
 type UserPrefs struct {
 	Model  string `json:"model"`  // provider/model 复合键
-	Effort string `json:"effort"` // 思考档位 low | high | max（思考恒开；旧值 on/off 由 llm 工厂与 prefs 读侧归一）
+	Effort string `json:"effort"` // 思考档位 off | low | high | max（旧值 on 由读侧归一 max、未知归一 low；能否真关由端点定）
 	Mode   string `json:"mode"`   // 会话模式 manual | plan | auto
 }
 

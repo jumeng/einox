@@ -109,13 +109,13 @@ func TestResolveFileMerged(t *testing.T) {
 }
 
 func TestEffortThinkingFields(t *testing.T) {
-	for e, want := range map[string]string{"low": "low", "high": "high", "max": "high"} {
+	for e, want := range map[string]string{"off": "none", "low": "low", "high": "high", "max": "high"} {
 		f := effortThinkingFields(e)
 		if len(f) != 1 {
 			t.Fatalf("%s 档通用方言应仅 reasoning_effort 一个字段：%v", e, f)
 		}
 		if f["reasoning_effort"] != want {
-			t.Fatalf("%s 档应映射 %s（无 max 档端点宁降档不发错），实得 %v", e, want, f["reasoning_effort"])
+			t.Fatalf("%s 档应映射 %s（对齐 OpenAI 词表：off→none 官方关思考值、max→high 宁降档不发错），实得 %v", e, want, f["reasoning_effort"])
 		}
 	}
 }

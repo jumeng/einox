@@ -23,8 +23,10 @@ package llm
 //
 // 智谱（BigModel）单条目：GLM-5.3（纯文本）+ GLM-5.3-Flash（原生多模态，
 // 图片经 image_url 传 URL/Base64），上下文 1M、最大输出 128K（两模型文档
-// 同口径）；Chat Completion 端点 + dialect=glm（思考恒开仅 enabled、
-// reasoning_effort 恰 low/high/max 三档直传——与 deepseek 方言线格式同形）。
+// 同口径）；Chat Completion 端点 + dialect=glm（开档 thinking enabled +
+// reasoning_effort 恰 low/high/max 三值直传、关档 thinking disabled——与
+// deepseek 方言线格式同形；GLM-5.3/5.3-Flash 文档限制只能开启，关档线格式
+// 照发由端点表态）。
 // 本预置面向智谱开放平台 API（API 密钥计费面），接入面即 openai 兼容
 // Chat Completion（paas/v4）；anthropic 兼容端点属 GLM Coding Plan 接入
 // 面、非本密钥可用，不预置。采样参数不设——GLM-5.x 端点默认值即文档

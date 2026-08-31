@@ -2,19 +2,23 @@ package llm
 
 // ChatModel 构造（按 provider.kind 选 eino-ext 组件）+ 思考档位映射。
 //
-// 思考是用户级档位（effort ∈ {low, high, max}，默认 low；2026-08-28 三档化
-// 定案——思考恒开、关档取消，zcode 同形态；低/高/最高真实映射模型思考深度）：
-//   anthropic 协议 → ThinkingConfig 恒 OfEnabled{BudgetTokens}，预算分档
-//     （低 8192 / 高 32768 / 最高 = limit.output，见 thinkingBudget）
+// 思考是用户级档位（effort ∈ {off, low, high, max}，默认 low；2026-08-28
+// 三档化取消关档、2026-08-31 关档回归四档——机制层支持四档，具体模型能否
+// 真关是业务层的事：各方言只发各自文档的关法，接不接受由端点表态）：
+//   anthropic 协议 → 关档不发思考块（协议零思考字段即关）；其余档恒
+//     OfEnabled{BudgetTokens} 预算分档（低 8192 / 高 32768 / 最高 =
+//     limit.output，见 thinkingBudget）
 //   openai 协议 → 思考走方言字段（2026-08-28 泛化）：dialect=deepseek 发
-//     thinking:{type:enabled} + reasoning_effort:low|high|max（DeepSeek 私有
-//     格式+真实档位名直传）；dialect=glm 同形（智谱官方文档：GLM-5.3/
-//     5.3-Flash 思考恒开仅 enabled、档位枚举恰 low/high/max 三值直传零降档；
-//     clear_thinking 只管跨轮历史回传、本仓出站本就剥离故不发送）；
-//     dialect=effort 仅 reasoning_effort（通用方言，max→high 对齐 OpenAI
-//     词表）；非方言端点零思考字段零污染（走端点默认）
-// 旧值归一（normalizeEffort）：升级前偏好/存量会话快照里的 on/max → max、
-// off/"" → 默认 low。
+//     thinking:{type:enabled|disabled} + reasoning_effort:low|high|max（DeepSeek
+//     私有格式+真实档位名直传；关档 = disabled 且不发 effort，DeepSeek 文档
+//     effort 属思考模式）；dialect=glm 同形（智谱 API 的 thinking 枚举同有
+//     disabled；GLM-5.3/5.3-Flash 文档限制只能开启——模型层限制由端点报错
+//     表态；clear_thinking 只管跨轮历史回传、本仓出站本就剥离故不发送）；
+//     dialect=effort 仅 reasoning_effort（通用方言，max→high / off→none
+//     对齐 OpenAI 词表——none 为 gpt-5.1+ 官方关思考值）；非方言端点零思考
+//     字段零污染（走端点默认）
+// 旧值归一（NormalizeEffort）：升级前偏好/存量会话快照里的 on/max → max、
+// off 恢复关档本义、""/未知 → 默认 low。
 // reasoning_content 回传：两协议组件均**原样透传**、无整形（eino-ext acl/openai
 // 出站构造路径无条件拷贝——本仓 08-26 实核订正，旧注「自动处理」有误）；
 // 出站剥离归 NewHistoryShapeModel 请求边界包装（H1①，协议定案见
@@ -66,13 +70,16 @@ func NewChatModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort strin
 	return NewTimeoutModel(cm), nil
 }
 
-// NormalizeEffort 思考档归一：low | high | max（思考恒开，关档 2026-08-28
-// 取消；三档对齐 zcode 与 DeepSeek 真实档位）。旧值兼容——升级前用户偏好与
-// 存量会话快照存的是 on/off（旧「开」即 enabled+effort max）：on/max → max，
-// 其余（""/off/未知）→ 默认 low。全链路唯一权威：会话读侧（恢复/回显）、
-// API 校验、模型工厂统一走此函数，三档外的值任何一环都不外流。
+// NormalizeEffort 思考档归一：off | low | high | max（2026-08-31 关档回归
+// 四档——机制层能力，模型是否真支持关由端点定）。旧值兼容——升级前用户
+// 偏好与存量会话快照存的是 on/off（旧「开」即 enabled+effort max）：on/
+// max → max，off → off（关档回归后恢复本义），其余（""/未知）→ 默认 low。
+// 全链路唯一权威：会话读侧（恢复/回显）、API 校验、模型工厂统一走此函数，
+// 四档外的值任何一环都不外流。
 func NormalizeEffort(effort string) string {
 	switch effort {
+	case "off":
+		return "off"
 	case "high":
 		return "high"
 	case "on", "max":
@@ -135,11 +142,16 @@ func samplingOf(m ModelSpec) (temp, topP *float32) {
 	return
 }
 
-// deepseekThinkingFields DeepSeek 思考扩展字段（thinking 闸门恒开 +
-// reasoning_effort 三档直传）——提为独立函数供单测锚定 effort → 请求字段映射。
-// GLM 方言（dialect=glm）线格式同形共用：智谱两模型思考字段与档位词表和
-// DeepSeek 一致，分叉时再拆独立函数。
+// deepseekThinkingFields DeepSeek 思考扩展字段——提为独立函数供单测锚定
+// effort → 请求字段映射。开档：闸门 enabled + 三档直传档位名；关档：闸门
+// disabled 且不发 reasoning_effort（DeepSeek 文档 effort 属思考模式，关档
+// 无意义）。GLM 方言（dialect=glm）线格式同形共用：智谱 API 的 thinking
+// 枚举同有 disabled（GLM-5.3/5.3-Flash 文档限制只能开启——模型层限制由
+// 端点报错表态），分叉时再拆独立函数。
 func deepseekThinkingFields(effort string) map[string]any {
+	if effort == "off" {
+		return map[string]any{"thinking": map[string]any{"type": "disabled"}}
+	}
 	return map[string]any{
 		"thinking":         map[string]any{"type": "enabled"},
 		"reasoning_effort": effort,
@@ -149,18 +161,23 @@ func deepseekThinkingFields(effort string) map[string]any {
 // effortThinkingFields 通用思考方言（dialect="effort"，2026-08-28 供应商适配
 // 定案）：仅 reasoning_effort 一个标准字段、无厂家私有块——覆盖 OpenAI 官方
 // 及多数兼容端点的思考控制面。档位映射对齐 OpenAI 词表：low/high 直传、
-// max→high（无 max 档端点发未知值必 400，宁降档不发错）。
+// max→high（无 max 档端点发未知值必 400，宁降档不发错）、off→none（gpt-5.1+
+// 官方关思考值；更早端点不识自会报错——能力归机制、支持归业务）。
 func effortThinkingFields(effort string) map[string]any {
 	wire := effort
-	if wire == "max" {
+	switch effort {
+	case "max":
 		wire = "high"
+	case "off":
+		wire = "none"
 	}
 	return map[string]any{"reasoning_effort": wire}
 }
 
 // newClaudeModel anthropic 协议端点（DeepSeek /anthropic 或 Anthropic 兼容）。
-// 思考恒开（三档均显式 OfEnabled——档位即预算档）；MaxTokens 协议必填——
-// 显式 limit.output，未知兜自定义模板默认（见 defaultOutputTokens）。
+// 思考关档不发思考块（协议零思考字段即关）、其余档显式 OfEnabled（档位即
+// 预算档，见 thinkingConfigOf）；MaxTokens 协议必填——显式 limit.output，
+// 未知兜自定义模板默认（见 defaultOutputTokens）。
 func newClaudeModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort string) (model.BaseModel[*schema.Message], error) {
 	cfg := &claude.Config{
 		APIKey:  p.APIKey,
@@ -173,10 +190,20 @@ func newClaudeModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort str
 	}
 	cfg.MaxTokens = maxTokens
 	cfg.Temperature, cfg.TopP = samplingOf(m) // 显式声明才下发（nil = 不发字段走端点默认）
-	cfg.ThinkingConfig = &anthropic.ThinkingConfigParamUnion{
+	cfg.ThinkingConfig = thinkingConfigOf(effort, m)
+	return claude.NewChatModel(ctx, cfg)
+}
+
+// thinkingConfigOf anthropic 协议思考配置：关档 nil（协议零思考字段即关），
+// 其余档 OfEnabled 预算分档（见 thinkingBudget）——单点锚定供单测断言关/开
+// 分支（预算数值归 TestThinkingBudget）。
+func thinkingConfigOf(effort string, m ModelSpec) *anthropic.ThinkingConfigParamUnion {
+	if effort == "off" {
+		return nil
+	}
+	return &anthropic.ThinkingConfigParamUnion{
 		OfEnabled: &anthropic.ThinkingConfigEnabledParam{BudgetTokens: thinkingBudget(effort, m)},
 	}
-	return claude.NewChatModel(ctx, cfg)
 }
 
 // newOpenAIModel openai 协议端点（DeepSeek 官方 /chat/completions、内网 vLLM）。
@@ -194,9 +221,9 @@ func newOpenAIModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort str
 	// 采样参数：显式声明才下发（nil = 不发字段走端点默认）
 	cfg.Temperature, cfg.TopP = samplingOf(m)
 	// 思考方言（厂家/通用知识只走 dialect，绝不写进通用分支——非方言端点
-	// 零思考字段，走端点默认）：deepseek = 私有块+档位直传；glm = 智谱同形
-	// 方言（见 deepseekThinkingFields 注）；effort = 通用 reasoning_effort
-	// （max→high 降档）；vLLM 等标准端点零污染不变。
+	// 零思考字段，走端点默认）：deepseek = 私有块+档位直传（关档 disabled）；
+	// glm = 智谱同形方言（见 deepseekThinkingFields 注）；effort = 通用
+	// reasoning_effort（max→high 降档 / off→none）；vLLM 等标准端点零污染不变。
 	switch p.Dialect {
 	case "deepseek", "glm":
 		cfg.ExtraFields = deepseekThinkingFields(effort)

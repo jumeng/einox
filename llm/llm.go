@@ -424,9 +424,10 @@ func FindSpec(ps []ProviderSpec, key string) (ProviderSpec, ModelSpec, bool) {
 }
 
 // ResolveCurrent 用户 prefs 归一：模型无效 → 回退第一模型；effort 是用户级
-// 思考档（low | high | max，默认 low；2026-08-28 三档化——思考恒开关档取消，
-// 旧值 on/max 归一 max、off/未知归一默认），切模型不动 effort；mode 归一
-// manual | plan | auto（默认 plan），三项独立互不联动。
+// 思考档（off | low | high | max，默认 low；2026-08-28 三档化、2026-08-31
+// 关档回归四档——旧值 on/max 归一 max、off 恢复关档本义、未知归一默认），
+// 切模型不动 effort；mode 归一 manual | plan | auto（默认 plan），三项独立
+// 互不联动。
 func ResolveCurrent(models []ModelOpt, p UserPrefs) UserPrefs {
 	var cur UserPrefs
 	if len(models) == 0 {
@@ -440,6 +441,8 @@ func ResolveCurrent(models []ModelOpt, p UserPrefs) UserPrefs {
 		cur.Model = m.Key
 	}
 	switch p.Effort {
+	case "off":
+		cur.Effort = "off"
 	case "on", "max":
 		cur.Effort = "max"
 	case "high":
