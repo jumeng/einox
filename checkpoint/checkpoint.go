@@ -11,7 +11,7 @@ package checkpoint
 
 import (
 	"context"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -53,7 +53,7 @@ func safeKey(key string) string {
 
 // Get 读 checkpoint（不存在 = ok false）。
 func (s *FileCheckPointStore) Get(_ context.Context, key string) ([]byte, bool, error) {
-	data, ok := s.st.ReadUserTreeFile(s.operator, filepath.Join("sessions", s.sid, "checkpoints", safeKey(key)+".bin"))
+	data, ok := s.st.ReadUserTreeFile(s.operator, path.Join("sessions", s.sid, "checkpoints", safeKey(key)+".bin"))
 	if !ok {
 		return nil, false, nil
 	}
@@ -62,5 +62,5 @@ func (s *FileCheckPointStore) Get(_ context.Context, key string) ([]byte, bool, 
 
 // Set 写 checkpoint（走 store 唯一写入器串行队列 + 原子写）。
 func (s *FileCheckPointStore) Set(_ context.Context, key string, checkpoint []byte) error {
-	return s.st.WriteUserTreeFile(s.operator, filepath.Join("sessions", s.sid, "checkpoints", safeKey(key)+".bin"), checkpoint)
+	return s.st.WriteUserTreeFile(s.operator, path.Join("sessions", s.sid, "checkpoints", safeKey(key)+".bin"), checkpoint)
 }

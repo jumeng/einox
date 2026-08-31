@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -141,7 +142,7 @@ func (b spillBackend) spillRel(p string) (string, error) {
 	if !ok || rest == "" {
 		return "", fmt.Errorf("外置后端仅接受 spill/ 前缀路径：%s", p)
 	}
-	return filepath.Join("sessions", b.sid, "spill", filepath.FromSlash(rest)), nil
+	return path.Join("sessions", b.sid, "spill", rest), nil
 }
 
 func (b spillBackend) Write(_ context.Context, req *filesystem.WriteRequest) error {

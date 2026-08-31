@@ -22,7 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
@@ -267,7 +267,7 @@ func writeTranscript(st session.Store, owner, sid string, msgs []*schema.Message
 		}
 		b.WriteString(msgTextOf(m) + "\n\n")
 	}
-	_ = st.WriteUserTreeFile(owner, filepath.Join("sessions", sid, "spill", "transcript.txt"), []byte(b.String()))
+	_ = st.WriteUserTreeFile(owner, path.Join("sessions", sid, "spill", "transcript.txt"), []byte(b.String()))
 }
 
 // tailFromLastUser 自最后一条 user 起的尾段（无 user 退化保末两条）。

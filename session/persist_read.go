@@ -13,6 +13,7 @@ package session
 import (
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"time"
@@ -70,7 +71,7 @@ type PersistedDigest struct {
 // ReadPersisted 读单个持久会话的检索视图（不存在/损坏 = ok=false 不报错——
 // 检索面容忍缺页，调用方跳过即可）。
 func ReadPersisted(st Store, owner, sid string) (PersistedDigest, bool) {
-	data, ok := st.ReadUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"))
+	data, ok := st.ReadUserTreeFile(owner, path.Join("sessions", sid, "session.json"))
 	if !ok || len(data) == 0 {
 		return PersistedDigest{}, false
 	}

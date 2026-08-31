@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -882,7 +883,7 @@ func (r *Registry) Delete(owner, sid string) {
 	if inMem {
 		s.Stop()
 	}
-	_ = r.st.RemoveUserTree(owner, filepath.Join("sessions", sid))
+	_ = r.st.RemoveUserTree(owner, path.Join("sessions", sid))
 	// 会话工作区一并清理（用户域 workspaces/<sid>，含 repos/ 挂载 worktree——
 	// 目录整删后缓存仓残留 worktree 元数据，对全部缓存仓 prune 收口）
 	_ = os.RemoveAll(filepath.Join(r.st.UserTreeDir(owner), "workspaces", sid))
@@ -1018,7 +1019,7 @@ func pruneWorktrees(dataDir string) {
 // sessionEnded 读磁盘会话终态（session.json state == ended；读不出/解析失败
 // 按未结束保守保留——ended 会话的工作区随任务收尾已清，此处是漏网兜底）。
 func sessionEnded(st Store, owner, sid string) bool {
-	data, ok := st.ReadUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"))
+	data, ok := st.ReadUserTreeFile(owner, path.Join("sessions", sid, "session.json"))
 	if !ok {
 		return false
 	}
@@ -1129,12 +1130,12 @@ func (r *Registry) persist(s *Session) {
 	if err != nil {
 		return
 	}
-	_ = r.st.WriteUserTreeFile(s.Owner, filepath.Join("sessions", s.SID, "session.json"), data)
+	_ = r.st.WriteUserTreeFile(s.Owner, path.Join("sessions", s.SID, "session.json"), data)
 	// 删除竞态自愈：在途写（标题 goroutine）可能落在 Delete 的 RemoveUserTree
 	// 之后重建目录（stopped 即已删除——Stop 唯一调用方是 Registry.Delete），
 	// 写后复查已删即收回，窗口收口。
 	if s.Stopped() {
-		_ = r.st.RemoveUserTree(s.Owner, filepath.Join("sessions", s.SID))
+		_ = r.st.RemoveUserTree(s.Owner, path.Join("sessions", s.SID))
 	}
 }
 
@@ -1203,7 +1204,7 @@ func drainPending(ts []*Session) []*Session {
 // spill 目录复制与源 reduction 外置写并发无锁覆盖，撕裂拷贝风险；主场景
 // FinalGate 耗尽重跑/历史会话岔出均发生在源空闲态；源 running 快照分叉为
 // 升级位，须先给 spill 写入与复制立同步点）。分叉体 State=ended 占位
-//（Create 同款），Run 由应用发起。寻址同 Reattach 语义：内存优先，不在内存
+// （Create 同款），Run 由应用发起。寻址同 Reattach 语义：内存优先，不在内存
 // 则磁盘重建后再克隆（历史会话分叉是主场景——Pi 即从历史会话岔出）；归属
 // 不符/未知 sid/源 running 返回 nil（Reattach 同款纪律）。挂起域/taskGrant/
 // planSeq/排队消息不带（分叉体无执行体残留，与 Reattach 的不可续降级同裁
@@ -1221,7 +1222,7 @@ func (r *Registry) Fork(owner, sid string) *Session {
 		s.writeMu.Unlock()
 		return r.forkOf(&rec)
 	}
-	data, ok := r.st.ReadUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"))
+	data, ok := r.st.ReadUserTreeFile(owner, path.Join("sessions", sid, "session.json"))
 	if !ok {
 		return nil
 	}
@@ -1282,7 +1283,7 @@ func (r *Registry) copySpill(owner, srcSID, dstSID string) {
 			return
 		}
 		for _, e := range entries {
-			crel := filepath.Join(rel, e.Name())
+			crel := path.Join(rel, e.Name())
 			if e.IsDir() {
 				walk(filepath.Join(dir, e.Name()), crel)
 				continue
@@ -1291,7 +1292,7 @@ func (r *Registry) copySpill(owner, srcSID, dstSID string) {
 			if err != nil {
 				continue
 			}
-			_ = r.st.WriteUserTreeFile(owner, filepath.Join("sessions", dstSID, "spill", crel), data)
+			_ = r.st.WriteUserTreeFile(owner, path.Join("sessions", dstSID, "spill", crel), data)
 		}
 	}
 	walk(root, "")
@@ -1363,7 +1364,7 @@ func (r *Registry) listOwner(owner, ql string) []SessionListItem {
 		if seen[sid] {
 			continue
 		}
-		data, ok := r.st.ReadUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"))
+		data, ok := r.st.ReadUserTreeFile(owner, path.Join("sessions", sid, "session.json"))
 		if !ok {
 			continue
 		}
@@ -1463,7 +1464,7 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 	}
 	r.mu.Unlock()
 
-	data, ok := r.st.ReadUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"))
+	data, ok := r.st.ReadUserTreeFile(owner, path.Join("sessions", sid, "session.json"))
 	if !ok {
 		return nil
 	}
@@ -1502,7 +1503,7 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 
 // LoadHistory 磁盘恢复续聊历史（进程重启后 Run 前调用；无历史 no-op）。
 func (r *Registry) LoadHistory(s *Session) {
-	data, ok := r.st.ReadUserTreeFile(s.Owner, filepath.Join("sessions", s.SID, "session.json"))
+	data, ok := r.st.ReadUserTreeFile(s.Owner, path.Join("sessions", s.SID, "session.json"))
 	if !ok {
 		return
 	}
@@ -1519,7 +1520,7 @@ func (r *Registry) LoadHistory(s *Session) {
 
 // DetailDisk 磁盘历史会话详情（软恢复/回看：进程重启后；since 语义同 Detail）。
 func (r *Registry) DetailDisk(owner, sid string, since int) (SessionDetail, bool) {
-	data, ok := r.st.ReadUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"))
+	data, ok := r.st.ReadUserTreeFile(owner, path.Join("sessions", sid, "session.json"))
 	if !ok {
 		return SessionDetail{}, false
 	}
@@ -1706,7 +1707,7 @@ func (r *Registry) listAll(ql string) []SessionListItem {
 			if seen[sid] {
 				continue
 			}
-			data, ok := r.st.ReadUserTreeFile(op, filepath.Join("sessions", sid, "session.json"))
+			data, ok := r.st.ReadUserTreeFile(op, path.Join("sessions", sid, "session.json"))
 			if !ok {
 				continue
 			}
@@ -1756,7 +1757,7 @@ func (r *Registry) RecoverInterrupted() int {
 	now := time.Now()
 	for _, op := range r.st.ListUsers() {
 		for _, sid := range r.st.ListUserTreeSessions(op) {
-			rel := filepath.Join("sessions", sid, "session.json")
+			rel := path.Join("sessions", sid, "session.json")
 			data, ok := r.st.ReadUserTreeFile(op, rel)
 			if !ok {
 				continue

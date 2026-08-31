@@ -18,7 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 	"sync"
 
@@ -358,7 +358,7 @@ func (m *Manager) offloadConclusion(s *session.Session, id, text string) string 
 	if len(r) <= bgConclusionLimit {
 		return text
 	}
-	rel := filepath.Join("sessions", s.SID, "spill", "spawn", id)
+	rel := path.Join("sessions", s.SID, "spill", "spawn", id)
 	if err := m.reg.Store().WriteUserTreeFile(s.Owner, rel, []byte(text)); err != nil {
 		// 外置是增强非关键面：写失败保底纯截断（指引路径无文件会误导，不带）
 		return string(r[:bgConclusionLimit]) + "…（结论超长已截断——完整结论见会话事件流该子代理卡）"
