@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
@@ -46,6 +47,20 @@ type SubAgentsConfig struct {
 
 // spawnToolName 父模型见的工具名（= 子 agent Name）。
 const spawnToolName = "spawn"
+
+// spawnDesc spawn 工具描述（装配面与 estimateContext 的常驻面估算共用一处
+// 字面量——B1 口径补齐）。
+const spawnDesc = "派发子代理独立执行子任务（独立上下文，适合勘察/检索/读仓等并行工作），回传结论"
+
+// spawnSchemaTokens spawn 入参 schema 的 JSON 形估算（一次缓存——估算走静态
+// 面：构造 spawn 工具本体需建模板 agent，estimateContext 不重复构造）。
+var spawnSchemaTokens = sync.OnceValue(func() int {
+	b, err := json.Marshal(spawnParam)
+	if err != nil {
+		return 0
+	}
+	return estTokens(string(b))
+})
 
 // subEventsOn 全量转发档开启判定（装配态；pump 内事件过滤用）。
 func (m *Manager) subEventsOn() bool {
@@ -124,6 +139,9 @@ func (m *Manager) emitSubAgent(s *session.Session, fn emitFn, agent string, call
 				if chunk == nil {
 					continue
 				}
+				if chunk.ResponseMeta != nil && spawnID != "" { // B2：子面用量上卷——限后台派生（有 SpawnID 归组）；同步转发无调用标识，无标记 usage 会污染主面口径，不上卷
+					m.emitUsage(s, fn, chunk.ResponseMeta.Usage, ctxEstimates{}, spawnID)
+				}
 				text.WriteString(chunk.Content)
 				for _, tc := range chunk.ToolCalls {
 					emitCall(tc)
@@ -134,6 +152,9 @@ func (m *Manager) emitSubAgent(s *session.Session, fn emitFn, agent string, call
 		}
 		if v.Message == nil {
 			return
+		}
+		if v.Message.ResponseMeta != nil && spawnID != "" { // B2：非流式分支，同限后台派生
+			m.emitUsage(s, fn, v.Message.ResponseMeta.Usage, ctxEstimates{}, spawnID)
 		}
 		emitText(v.Message.Content)
 		for _, tc := range v.Message.ToolCalls {
@@ -251,7 +272,7 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 	buildSub := func(bctx context.Context, mode string) (*adk.ChatModelAgent, error) {
 		conf := &adk.ChatModelAgentConfig{
 			Name:             spawnToolName,
-			Description:      "派发子代理独立执行子任务（独立上下文，适合勘察/检索/读仓等并行工作），回传结论",
+			Description:      spawnDesc,
 			Instruction:      instruction,
 			Model:            subCM,
 			MaxIterations:    maxIterations,

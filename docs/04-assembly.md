@@ -19,6 +19,7 @@
 | `SkillsDir` | | skill 物化目录（`func(SessionBrief) string`——按租户物化不同 skill 包；nil/空 = 不挂 skill middleware） |
 | `AgentsMD` | | AGENTS.md 注入清单（`func(SessionBrief) []string` 绝对路径按序注入；nil/空 = 不挂零变化。发现逻辑归应用——ZCode 双层形态即用户级文件先、工作区级文件后进清单；注入纪律归 eino agentsmd 中间件：transient 不入历史、@import 递归、挂 summarization 之后不被压缩） |
 | `AgentsMDMaxBytes` | | 注入字节预算（0 = 缺省 32KiB；超限余下文件跳过——防提示词面失控） |
+| `ContextBudget` | | 常驻上下文预算告警线（token；0 = 缺省关，`EINO_CONTEXT_BUDGET` 可覆盖——nil 纪律零配置零变化。推荐值 **8192**：Instruction + 常驻工具面〔业务+进程件+会话域件+spawn，名+描述+参数 schema〕合计超线发一张 harness_note〔Kind: budget，含分类账本〕+ 日志、不阻断；会话内只发一次。toolsearch 名单内不计——只有常驻面计费） |
 | `Approval` | | 审批配置（写工具名单/动作名/ArgsForce——业务内容） |
 | `SubAgents` | | spawn 子代理装配（nil = 不装配 spawn） |
 | `Topology` | | 确定性多 agent 拓扑（nil = 单 agent react 主线） |
@@ -82,6 +83,9 @@ m.FlushQueue(sess)          // 排队消息落回轮
 | 沙箱开 workspace-write | 见下“沙箱装配”——`WritableRoots` + 缓存重定向 `Env` 是保命件 |
 | 大工具面瘦身 | `ToolSearchPolicy{DynamicTools: [...]}`——高频件与 ask_user/todo_write/submit_plan 留常驻 |
 | 极简装配（纯业务问答） | `SessionToolsOff: []string{engine.FamilyFS, engine.FamilyCmd, engine.FamilyPatch}`——物理移除文件/命令/补丁面；此时 Instruction 勿拼 `prompts.Coding()` 段，且超长工具结果只剩截断头尾（外置换指针经 read_file 取回，fs 族已裁） |
+| 常驻面预算告警 | `ContextBudget: 8192`（0 = 关；`EINO_CONTEXT_BUDGET` 可覆盖）——超线一张 harness_note + 日志不阻断，账本口径与瘦身手段见 [03-capabilities.md](03-capabilities.md) |
+| 模型不支持函数调用 | `ModelSpec.NoToolCalls: true`——工具面非空即 assemble 期 CONFIG 拒（fail fast，不等首轮端点报错）；不标记零变化 |
+| 优雅停机收尾 | `reg.Drain(15 * time.Second)`——取消全部 running 会话并等收尾（终态+检查点+中断注记全落）；应用停机序 = HTTP Shutdown → Drain → store Close |
 | 确定性场景多 agent | `Topology{Kind, SubAgents}`（supervisor/deep；默认单 agent） |
 | 子代理限权 | `SubAgentsConfig{Tools: 白名单, DenyTools: 硬拒名单}`——交集或含全量面未同名 = 装配期报错（白名单写漏即暴露，fail-fast） |
 | 基座件按需 | `ProcessTools` 只放你要的（时钟/网页抓取各自独立构造） |
@@ -105,6 +109,19 @@ Sandbox: &sandbox.Policy{
 容器形态：`SandboxProvider: &sandbox.DockerProvider{Image: "golang:1.26"}`——策略翻译进容器参数（三档挂载映射/断网/可写根/ro 子挂载回盖）。
 
 **出口治理**：`egress.New([]string{"10.0.0.0/8", ...})`——私网默认阻断（RFC1918 等）+ CIDR 白名单即工作面，`web_fetch` 前置与 `run_command` 命令串预检共用同一校验器。白名单缺失是否拒绝启动由应用装配层决定（防“开了开关忘了白名单”）——基座只在 CIDR 非法时返回 error。
+
+**极简编码装配**（profile 推荐——被验证过的装配姿态，Pi Terminal-Bench 2.0 同款模型极简 harness 打平的背书；与上行「极简装配（纯业务问答）」语义相反：**裁交互三件保执行三件**，勿混用）：
+
+```go
+// 编码形态的极简 profile：todo/ask/plan 是交互卡（单用户 CLI 形态常冗余），
+// fs/cmd/patch 是执行面（read/write/edit/bash 的 einox 对位）——保执行裁交互。
+SessionToolsOff: []string{engine.FamilyTodo, engine.FamilyAsk, engine.FamilyPlan},
+```
+
+- 大业务面配 `ToolSearchPolicy`（常驻只留高频件）——与 toolsearch 行「ask_user/todo_write/submit_plan 留常驻」的取舍：那是全量装配下的建议，本 profile 已裁三件不适用，非矛盾；
+- Instruction 用短形态（业务职责一段即可）——验证纪律靠 `FinalGate` 判据而非提示词堆叠，**极简不等于无门**；
+- `AgentsMDMaxBytes` 收紧（如 8192 字节）；
+- 描述纪律（对位观察）：工具描述 3–6 行讲清「何时用/语义边界」即可，**不写 few-shot 示例**（前沿模型训练时见过同形 schema）；审计方法 = 逐 `InferTool` 描述过 `estTokens`，>100 token 复核指引密度；`ContextBudget` 上线后超线账本自动可见。
 
 ## 扩展业务能力
 

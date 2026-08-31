@@ -12,20 +12,23 @@
 | HITL 审批 | `hitl.WrapTools` 按模式包装工具面：manual 逐写审批 / plan 计划卡（批准 = 任务期写授权）/ auto 直过；`ApprovalConfig` 定名单与 ArgsForce（参数级强制审批——**任何模式/任务期授权不豁免**）；无决议 fail-closed 一律拒绝 |
 | 跨会话记忆交接（写/拉） | `TurnEpilogue` 轮收尾钩子（自然收束触发，载荷与 session_end 同源——摘要+文件变更；应用落 owner 域记忆文件经 AgentsMD 注入即成读写环）+ `recall` 检索工具（见工具族表）；推通道 = AgentsMD 注入缝。三通道设计见 findings/2026-08-29-memory-three-channel-design.md（仓外设计笔记，不随仓分发） |
 | 收束质量门（FinalGate） | 三层约束（事前审批/事中 ErrFeed）的收束空位：自然收束后按 `Options.FinalGate`（SessionBrief 闭包——按模式/形态开门）强制验证，失败经 harness_note 门卡 + 反馈消息入史回灌重跑（有界——MaxRetries 负数=缺省 2、0=零回灌首验即报错，codex Guardian 普通/cyber 两档对位），耗尽 error 收束不静默放行；checker panic fail-closed；挂起/中断/错误轮不触发。**判据归应用**（`GateChecker`——build/test 命令或自包对抗审查），基座只持门循环机制 |
-| 挂起-续流通道 | `contract.Suspend` 哨兵 + 引擎 Interrupt×Resume：审批卡、结构化提问、计划卡共用同一机制 |
-| 检查点 | `engine.CheckPointStore`（Get/Set 两方法），中断/取消恢复与审批挂起续流的事实载体 |
+| 挂起-续流通道 | `contract.Suspend` 哨兵 + 引擎 Interrupt×Resume：审批卡、结构化提问、计划卡共用同一机制。`Resume` 入口整备：单锁原子查清挂起域 + 翻 running + 挂 runDone——重复/并发第二个 Resume 即拒（明确 error 事件而非脏重放：checkpoint 不随 Resume 消费，迟到放行 = 加载旧检查点重执行）；续流执行期状态可见为 running（FlushQueue/Drain 可寻址） |
+| 检查点 | `engine.CheckPointStore`（Get/Set 两方法），中断/取消恢复与审批挂起续流的事实载体；三卡 State 经 `schema.Register` gob 注册（hitl/askuser/plan 属主包 init），属主包各持 round-trip 兼容回归测试（字段重命名红——gob 按字段名编码，静默破坏存量检查点） |
+| 常驻上下文预算（ContextBudget） | `Options.ContextBudget`（0 = 缺省关；`EINO_CONTEXT_BUDGET` 可覆盖）：Instruction + 常驻工具面（业务面+进程件+**会话域件**+spawn/recall：名+描述+参数 schema JSON）合计的超限告警线——超限发一张 `harness_note`（Kind: budget，含分类账本与瘦身指引）+ 服务端日志，不阻断运行（大工具面配 toolsearch 就是合法超标）；会话内只发一次（判定扫事件流既有同 Kind note，跨重启天然不重发）。toolsearch 名单内工具不计（只有常驻面计费） |
+| 会话分叉（Fork） | `Registry.Fork(owner, sid)`：全量快照分叉——record JSON 往返深隔离（零共享指针）、事件 ID 接续、spill 外置域整目录复制、血缘 `harness_note`（Kind: fork，Detail 含源 sid）；挂起域/任务授权/排队消息不带（分叉体无执行体残留，与 Reattach 降级同裁决）。V1 限定源非 running（spill 复制与源外置写并发无锁覆盖）；内存优先、不在内存则磁盘重建（历史会话分叉主场景）；归属不符/未知 sid/源 running 返回 nil |
+| 优雅停机（Drain） | `Registry.Drain(deadline)`：取消全部 running 态会话并有界等执行体收尾（走中断链：终态事件+检查点+中断注记全落），到点未收尾的 SID 如实返回（调用方记日志不阻塞停机）；挂起态无执行体不在列（跨重启 RearmPendingTimer 续表）。应用停机序 = HTTP Shutdown → Drain → store Close（终态落盘依赖 store 存活） |
 
 ### 事件流（contract.Event）
 
-事件流是 **einox 自建的契约面**（eino 的流式原语经引擎消化，不外露）：`contract.Event{ID, Event, Data, Ts}`，传输无关（SSE/WebSocket/CLI 编码归应用）；`Run`/`Resume` 的回调实时扇出，同时落会话记录——**回放与 live 同源**（切回/回放时，审批卡/提问卡/计划卡的终态以事件流重建）。31 种事件按域分组：
+事件流是 **einox 自建的契约面**（eino 的流式原语经引擎消化，不外露）：`contract.Event{ID, Event, Data, Ts}`，传输无关（SSE/WebSocket/CLI 编码归应用）；`Run`/`Resume` 的回调实时扇出，同时落会话记录——**回放与 live 同源**（切回/回放时，审批卡/提问卡/计划卡的终态以事件流重建）。落盘节奏：`Record` 实时入会话 Events（内存），persist 在状态迁移点（用户消息入史/挂起/轮末收束/中断）+ **工具边界节流**（每个 tool_result 后补一次 persist——轮内崩溃不丢已完工具轮，频率有界 = 工具调用数）。31 种事件按域分组：
 
 | 域 | 事件 |
 |---|---|
-| 生成流 | `text_delta` / `thinking_delta` / `usage`（含整形后出站口径估算与“整形节省”注记） |
+| 生成流 | `text_delta` / `thinking_delta` / `usage`（含整形后出站口径估算与“整形节省”注记；`spawn_id` 非空 = 后台子代理面用量上卷〔估算四项为零〕；est_tools 口径 = 名+描述+参数 schema JSON、含会话域件，存量值较早期版本偏大属纠偏） |
 | 工具 | `tool_call`（参数摘要 + 行为标记）/ `tool_result`（Digest+Preview、文件变更信封 `+A -D`） |
 | 挂起交互 | `approval_request/decision/timeout`（**合并决议卡**：一轮并行写聚合一卡 N 项、逐项决议）/ `ask_user_request/decision/timeout/ignored` / `plan_request/decision/timeout` |
 | steering 与通知 | `steer_queued/updated/removed/reordered/injected` / `notify_queued/notify_injected`（后台子代理完成回传）/ `user_message` |
-| 过程 | `todo_update` / `harness_note`（reduction 外置、summarization 压缩的系统通知卡）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态）/ `model_change` / `transport_retry`（重连在途——前端回卷当前段半截显示） |
+| 过程 | `todo_update` / `harness_note`（系统通知卡，**Kind 取值封闭集**：`offload` 外置 / `compaction` 摘要压缩 / `gate` 质量门回灌 / `failover` 降级链装配失败留痕 / `budget` 常驻面超预算告警 / `fork` 会话分叉血缘——新 Kind 属前端可观察的软契约增长，增改须同步本表）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态）/ `model_change` / `transport_retry`（重连在途——前端回卷当前段半截显示） |
 | 收束 | `session_end`（摘要 + 文件变更清单）/ `error`（Code：CONFIG / SERVER / TRANSPORT / ABORTED / AUTH / RATE_LIMIT）/ `interrupted`（打断收尾，非故障形态） |
 
 ## 工具族（tools/）
@@ -48,6 +51,8 @@
 | `tools/egress` | （校验器，非工具） | 出口治理 `Validator`：私网默认阻断（RFC1918 等）+ CIDR 白名单 + 命令串 URL 预检 + DNS pinning |
 
 另有 `einoext` 桥：eino-ext 官方组件全量接入（含 `mcp_*` 远端件，`MCPSpec{URL, Cmd}` 配置）。
+
+**渐进披露守则**（业务工具面设计指引，零代码）：能力优先做成自足短描述的工具；说明文档按需读取（`web_fetch` / `read_file` 指向 README，不把文档常驻进描述）；大工具面走 `tool_search` 检索后可见——「按需读、用时付 token」。基座侧机制载体已备：`SkillsDir` 中间件（skill 物化、按需装载）即渐进披露的基建；与 `AgentsMDMaxBytes`（注入面预算）、`ContextBudget`（常驻面账本）构成常驻面治理三件套。
 
 ## harness（运行时脚手架）
 
@@ -109,6 +114,7 @@
 | 厂家预设 | `BuiltinProviders` 内置 DeepSeek 两端点（openai 协议主推 + anthropic 协议）；`Resolve` 原样 / `ResolveMerged` by-ID 参数补全（用户显式值优先，密钥/启用权不受内置影响） |
 | 网络容错 | ① 流式空闲哨兵（两 chunk 间静默默认 120s，非整请求超时——长思考流不误杀）+ Generate 总超时 300s；② 有界重连（默认 3 次，引擎在模型调用边界内重启，半截段不入史）；③ 错误分类（`Classify` 单一权威：429/5xx/网络类可重试，401/403/402/400/422 致命立即停机，未知保守不重试）；④ 主模型 Failover 降级链（`FallbackModels` 复合键清单——重试耗尽按序换备模型、每档各享完整重连预算，切换发 model_change 事件，致命类不降级）。env：`EINO_LLM_IDLE_TIMEOUT` / `EINO_LLM_GENERATE_TIMEOUT` / `EINO_LLM_RETRIES` |
 | 采样参数 | `ModelSpec.Temperature/TopP`（nil = 不发字段走端点默认——推理端点常拒绝显式 temperature；随会话模型快照粘住，会话内不变即前缀缓存友好） |
+| 能力门控（NoToolCalls） | `ModelSpec.NoToolCalls` 明示模型不支持函数调用（人工维护元数据；能力是模型属性故在 ModelSpec——同 provider 各模型可不同）：置位且工具面非空（含会话域件/spawn）→ assemble 期 CONFIG 错误，不等首轮运行期报端点方言各异的错 |
 | thinking 双协议映射 | effort 三档（low/high/max）：anthropic 协议 = 预算分档（BudgetTokens），openai 协议 = 思考方言（`dialect=deepseek` 发扩展字段 / `dialect=effort` 通用 reasoning_effort / 空方言零思考字段） |
 | 出站整形 | `NewHistoryShapeModel`：在途带 tool_calls 轮的思维链保留、其余剥离（DeepSeek 等端点的协议要求）；会话存储保真不动 |
 | `NormalizeEffort` | 档位归一唯一权威（旧值 on/max→max、off→low，未知→low） |

@@ -254,12 +254,15 @@ type ErrorOut struct {
 // est_messages 已是整形后出站口径（H8-1：reasoning 剥离/空壳剔除后的真实
 // 发送面）；est_saved = 原始口径差额（「整形节省」注记）。usage 真值注意
 // DeepSeek prompt_tokens 含缓存命中（= hit+miss，双口径展示归应用）。
+// SpawnID 非空 = 子代理面用量上卷（B2：子面无估算口径、四项为零；消费侧
+// 按 SpawnID 归组聚合，空 = 主面）。
 type UsageOut struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	EstInstruction   int `json:"est_instruction"`
-	EstTools         int `json:"est_tools"`
-	EstMessages      int `json:"est_messages"`
-	EstSaved         int `json:"est_saved,omitempty"` // 整形节省（原始-整形；0/负值省略）
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+	SpawnID          string `json:"spawn_id,omitempty"` // 子代理来源（空 = 主面）
+	EstInstruction   int    `json:"est_instruction"`
+	EstTools         int    `json:"est_tools"`
+	EstMessages      int    `json:"est_messages"`
+	EstSaved         int    `json:"est_saved,omitempty"` // 整形节省（原始-整形；0/负值省略）
 }

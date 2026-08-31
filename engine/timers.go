@@ -7,6 +7,7 @@ package engine
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"sync"
 	"time"
 
@@ -66,6 +67,20 @@ func (m *Manager) startApprovalTimer(s *session.Session, appID string, timeoutAt
 		approvalMu.Lock()
 		delete(approvalTimers, s.SID)
 		approvalMu.Unlock()
+		// A2：游离 goroutine 护栏——回调 panic 即进程崩，且挂在「无人值守等
+		// 超时」这类最晚暴露的路径上（coze safego.Go 同纪律）。收敛为日志 +
+		// 尽力落超时终态（简单字段操作；此处再 panic 属进程级日志已留痕的终
+		// 局，不再嵌套防御）。
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("einox: 会话 %s 审批超时器回调 panic（已收敛，兜底翻终态）：%v", s.SID, r)
+				if !s.Stopped() && s.PendingAppID() == appID {
+					s.SetPendingApproval("")
+					s.SetState(session.StateEnded)
+					m.reg.Persist(s)
+				}
+			}
+		}()
 		m.expirePending(s, appID, kind)
 	})
 	approvalMu.Unlock()

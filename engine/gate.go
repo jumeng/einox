@@ -54,7 +54,9 @@ func gateRetries(g *GateConfig) int {
 // est 每轮重算（回灌后上下文已变）。
 func (m *Manager) drive(runCtx context.Context, s *session.Session, fn emitFn,
 	iter *adk.AsyncIterator[*adk.AgentEvent], behaviors map[string]string) (*runAccum, string) {
-	acc, endState := m.pump(s, iter, fn, m.estimateContext(s), behaviors)
+	est := m.estimateContext(s)
+	m.checkContextBudget(s, fn, est) // B1 常驻面超限告警（会话内只发一次，不阻断）
+	acc, endState := m.pump(s, iter, fn, est, behaviors)
 	var gate *GateConfig
 	if m.Opt.FinalGate != nil {
 		gate = m.Opt.FinalGate(m.briefOf(s))

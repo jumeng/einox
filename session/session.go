@@ -457,6 +457,29 @@ func (s *Session) setModeLocked(mode string) {
 	s.taskGrant = false
 }
 
+// BeginResume 决议续流执行体抢占（单锁原子：查挂起 + 清挂起域 + 翻 running +
+// 挂 runDone——BeginRun 同型三步）。判据用 curAppID 而非 State：挂起后 State
+// 仍为 pending_approval，态检查挡不住并发双 Resume；curAppID 的查清在同一
+// 锁段完成即闭合 check→Resume 的 TOCTOU 窗口。翻 running 同时修复续流执行
+// 期的可见性（此前恒显 pending：FlushQueue 误报不可打断、Drain 枚举漏执行
+// 体）。返回 false = 无挂起（重复/迟到 Resume 在此即拒——checkpoint 不随
+// Resume 消费，迟到调用放行是脏重放）。
+func (s *Session) BeginResume() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.curAppID == "" {
+		return false
+	}
+	s.curAppID = ""
+	s.pendingKind = ""
+	s.pendingDue = time.Time{}
+	s.pendingItems = nil
+	s.State = StateRunning
+	s.runDone = make(chan struct{})
+	s.UpdatedAt = time.Now()
+	return true
+}
+
 // SetRunModel 会话内切换模型/effort（BeginRun 抢占成功后由 API 层调用——
 // 运行边界生效：当前执行体不被打断，新值从本轮起用；空值保持现值。
 // 换模型不作废任务期授权——授权跟任务不跟模型）。模型实际变更时落
@@ -1067,6 +1090,23 @@ func historyForRecord(msgs []*schema.Message) []*schema.Message {
 	return out
 }
 
+// recordOf 会话快照 DTO（调用方持 writeMu+mu——与 persist 同锁序同锁段；
+// Fork 复用同一构造面）。
+func recordOf(s *Session) sessionRecord {
+	return sessionRecord{
+		SID: s.SID, Owner: s.Owner, Scope: s.Scope, Task: s.Task, Title: s.Title,
+		State: s.State, Mode: s.Mode, Model: s.Model, StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
+		Events:       append([]Event(nil), s.Events...),
+		Summary:      s.summary,
+		FileChanges:  fileChangesCopy(s),
+		Messages:     historyForRecord(s.history),
+		Pending:      append([]QueuedMsg(nil), s.pendingMsgs...),
+		PendingAppID: s.curAppID, PendingKind: s.pendingKind, PendingDue: s.pendingDue,
+		PendingItems: append([]string(nil), s.pendingItems...),
+		TaskGranted:  s.taskGrant, PlanSeq: s.planSeq,
+	}
+}
+
 // persist 落盘 session.json（状态迁移点调用；坏数据容错忽略）。
 func (r *Registry) persist(s *Session) {
 	if s.Stopped() {
@@ -1080,17 +1120,7 @@ func (r *Registry) persist(s *Session) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
-	rec := sessionRecord{
-		SID: s.SID, Owner: s.Owner, Scope: s.Scope, Task: s.Task, Title: s.Title,
-		State: s.State, Mode: s.Mode, Model: s.Model, StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
-		Events: append([]Event(nil), s.Events...), Summary: s.summary,
-		FileChanges:  fileChangesCopy(s),
-		Messages:     historyForRecord(s.history),
-		Pending:      append([]QueuedMsg(nil), s.pendingMsgs...),
-		PendingAppID: s.curAppID, PendingKind: s.pendingKind, PendingDue: s.pendingDue,
-		PendingItems: append([]string(nil), s.pendingItems...),
-		TaskGranted:  s.taskGrant, PlanSeq: s.planSeq,
-	}
+	rec := recordOf(s)
 	// 序列化须持锁完成：Messages 是共享消息对象的浅拷贝切片，锁外 marshal
 	// 会与下一轮 Run 的 sanitizeHistory 原地改写同批消息并发读写（-race 实报
 	// 的存量竞态，2026-08-24 移植测试时捕获）。
@@ -1110,6 +1140,162 @@ func (r *Registry) persist(s *Session) {
 
 // Persist 导出落盘口（Run 状态迁移调用）。
 func (r *Registry) Persist(s *Session) { r.persist(s) }
+
+// Drain 优雅停机收尾（A6）：对全部 running 态会话发取消 → 有界等执行体收尾
+// （取消走引擎 interruptUnlessStopped 既有链：终态事件 + 检查点 + 中断注记
+// 全落）。到点仍未收尾的会话 SID 如实返回（调用方记日志，不阻塞停机——
+// 与强制退出同，但多数场景已收干净）。挂起态（pending_approval）无执行体
+// 不在列——跨重启由 RearmPendingTimer 续表；执行体必在内存（Get 语义）。
+func (r *Registry) Drain(deadline time.Duration) []string {
+	r.mu.Lock()
+	var targets []*Session
+	for _, s := range r.sessions {
+		if s.StateOf() == StateRunning {
+			targets = append(targets, s)
+		}
+	}
+	r.mu.Unlock()
+	if len(targets) == 0 {
+		return nil
+	}
+	for _, s := range targets {
+		s.CancelRun()
+	}
+	limit := time.Now().Add(deadline)
+	for {
+		still := drainPending(targets)
+		if len(still) == 0 {
+			return nil
+		}
+		if time.Now().After(limit) {
+			left := make([]string, 0, len(still))
+			for _, s := range still {
+				left = append(left, s.SID)
+			}
+			return left
+		}
+		for _, s := range still {
+			s.CancelRun() // 重发取消（执行体起跑竞态兜底，FlushQueue 同款）
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// drainPending 仍挂执行体的会话（runDone 在场且未关闭）。
+func drainPending(ts []*Session) []*Session {
+	var out []*Session
+	for _, s := range ts {
+		done := s.RunDone()
+		if done == nil {
+			continue
+		}
+		select {
+		case <-done:
+		default:
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Fork 全量快照分叉（B8）：从既有会话复制当前完整态（事件流+历史+摘要+外置
+// 域），生成新 SID 的新会话。V1 限定源非 running（源 running 即返回 nil——
+// spill 目录复制与源 reduction 外置写并发无锁覆盖，撕裂拷贝风险；主场景
+// FinalGate 耗尽重跑/历史会话岔出均发生在源空闲态；源 running 快照分叉为
+// 升级位，须先给 spill 写入与复制立同步点）。分叉体 State=ended 占位
+//（Create 同款），Run 由应用发起。寻址同 Reattach 语义：内存优先，不在内存
+// 则磁盘重建后再克隆（历史会话分叉是主场景——Pi 即从历史会话岔出）；归属
+// 不符/未知 sid/源 running 返回 nil（Reattach 同款纪律）。挂起域/taskGrant/
+// planSeq/排队消息不带（分叉体无执行体残留，与 Reattach 的不可续降级同裁
+// 决；任务期写授权回审批流是安全侧）；spill 外置域整目录复制（history 含
+// 外置指针，不复制即 read_file 取回落空）。
+func (r *Registry) Fork(owner, sid string) *Session {
+	if s, ok := r.Get(sid); ok {
+		if s.Owner != owner || s.StateOf() == StateRunning {
+			return nil
+		}
+		s.writeMu.Lock()
+		s.mu.Lock()
+		rec := recordOf(s)
+		s.mu.Unlock()
+		s.writeMu.Unlock()
+		return r.forkOf(&rec)
+	}
+	data, ok := r.st.ReadUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"))
+	if !ok {
+		return nil
+	}
+	var rec sessionRecord
+	if json.Unmarshal(data, &rec) != nil || rec.Owner != owner || rec.State == StateRunning {
+		return nil
+	}
+	return r.forkOf(&rec)
+}
+
+// forkOf 分叉体构造：record JSON 往返深拷贝（Event.Data/消息对象全量拷贝、
+// 零共享指针——与 Reattach 的盘面重建同语义，Event.Data 降为 map 形态亦同）
+// → 新 SID 装配（Reattach 构造路径同款，挂起域不装载）→ 血缘 note（分叉体
+// 自身首个事件——回放可见血缘）→ spill 复制 → 注册 → 落盘（Reattach 可恢
+// 复的完整态）。源会话零增量。
+func (r *Registry) forkOf(rec *sessionRecord) *Session {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return nil
+	}
+	var cp sessionRecord
+	if json.Unmarshal(data, &cp) != nil {
+		return nil
+	}
+	ns := &Session{
+		SID: newSID(), Owner: cp.Owner, Scope: cp.Scope, Task: cp.Task, Title: cp.Title,
+		State: StateEnded, Mode: cp.Mode, Model: cp.Model,
+		StartedAt: time.Now(), UpdatedAt: time.Now(),
+		Events:  append([]Event(nil), cp.Events...),
+		summary: cp.Summary, fileChanges: cp.FileChanges, stoppedCh: make(chan struct{}),
+	}
+	if n := len(ns.Events); n > 0 {
+		ns.seq = ns.Events[n-1].ID // 接续末位事件 ID——不接续则新事件撞号
+	}
+	ns.history = cp.Messages
+	ns.Record(contract.EvHarnessNote, contract.HarnessNote{
+		Kind: "fork", Title: "会话分叉",
+		Detail: "全量快照分叉自会话 " + cp.SID + "（分叉点即源会话当时完整态；工作区不随行，文件成果携带归应用决策）",
+	})
+	r.copySpill(cp.Owner, cp.SID, ns.SID)
+	r.mu.Lock()
+	r.sessions[ns.SID] = ns
+	r.mu.Unlock()
+	r.persist(ns)
+	return ns
+}
+
+// copySpill 外置域整目录复制（sessions/<src>/spill/** → sessions/<dst>/
+// spill/**）。读走 os 直扫（Store 无子树枚举面——Sweeper/recall 检索同先
+// 例，文件保存是本基座唯一支持的存储形态），写走 Store 唯一写入器（与
+// persist 同串行化点）。
+func (r *Registry) copySpill(owner, srcSID, dstSID string) {
+	root := filepath.Join(r.st.UserTreeDir(owner), "sessions", srcSID, "spill")
+	var walk func(dir, rel string)
+	walk = func(dir, rel string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			crel := filepath.Join(rel, e.Name())
+			if e.IsDir() {
+				walk(filepath.Join(dir, e.Name()), crel)
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			_ = r.st.WriteUserTreeFile(owner, filepath.Join("sessions", dstSID, "spill", crel), data)
+		}
+	}
+	walk(root, "")
+}
 
 // SessionListItem 列表条目（活动时间倒序；字段契约 = M3-2 桩 + 2026-08-23 增 updated_at）。
 type SessionListItem struct {

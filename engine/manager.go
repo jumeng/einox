@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -110,6 +111,15 @@ type Options struct {
 	// AgentsMDMaxBytes 注入字节预算（0 = 缺省 32KiB；上游按序装载超限即跳过
 	// 余下文件——预算显式化，防提示词面失控）。
 	AgentsMDMaxBytes int
+	// ContextBudget 常驻上下文预算（token，口径 = estTokens 启发式）：Instruction
+	// + 常驻工具面（业务面+进程件+会话域件+spawn：名+描述+参数 schema JSON）
+	// 合计的超限告警线。0 = 缺省关（nil 纪律：零配置零变化；推荐值 8192 与
+	// 调法见 docs/04）。超限动作 = harness_note（Kind: budget）+ 服务端日志、
+	// 不阻断运行（大工具面配 toolsearch 就是合法超标场景）；会话内只发一次
+	// （判定扫 Events 既有同 Kind note，跨重启天然不重发）。env
+	// EINO_CONTEXT_BUDGET 可覆盖（对齐 EINO_MAX_ITERATIONS 惯例）。toolsearch
+	// 名单内工具不进核算——动态装载正是瘦身手段，只有常驻面计费。
+	ContextBudget int
 	// Approval 审批配置（写工具名单/动作名/参数豁免——业务内容）。
 	Approval hitl.ApprovalConfig
 	// WorkspaceRoot 会话工作区根（用户域 workspaces/<sid>——repos/ 挂载
@@ -370,14 +380,23 @@ func estTokens(s string) int {
 }
 
 // estimateContext 上下文分类估算（Run 在泵前已把本轮用户消息入史——中断保险，
-// CloneHistory 天然含本轮，无须另计）。
+// CloneHistory 天然含本轮，无须另计）。工具面口径（B1 补齐）：业务面 + 进程件
+// + 会话域件 + recall + spawn，名+描述+参数 schema JSON 均计——会话域件恒
+// 常驻故须计入（此前全漏）；toolsearch 名单内工具不计（动态装载正是瘦身
+// 手段，只有常驻面计费；分流与 assemble 同源名单）。
 func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
 	brief := m.briefOf(s)
 	est := ctxEstimates{instruction: estTokens(m.Opt.Instruction(brief))}
+	dyn := map[string]bool{}
+	if pol := m.Opt.ToolSearchPolicy; pol != nil {
+		for _, n := range pol.DynamicTools {
+			dyn[n] = true
+		}
+	}
 	addFace := func(ts []contract.Tool) {
 		for _, t := range ts {
-			if info := t.Info(); info != nil {
-				est.tools += estTokens(info.Name) + estTokens(info.Desc)
+			if info := t.Info(); info != nil && !dyn[info.Name] {
+				est.tools += estTokens(info.Name) + estTokens(info.Desc) + schemaTokens(info.Params)
 			}
 		}
 	}
@@ -386,6 +405,17 @@ func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
 	}
 	if m.Opt.ProcessTools != nil {
 		addFace(m.Opt.ProcessTools())
+	}
+	if sts, err := m.sessionTools(s); err == nil { // 会话域件实际面（族裁剪后）；构造失败随 assemble 报，此处不计
+		addFace(sts)
+	}
+	if m.Opt.Recall {
+		if rt, err := newRecallTool(m.reg, s); err == nil {
+			addFace([]contract.Tool{rt})
+		}
+	}
+	if m.Opt.SubAgents != nil { // spawn 面走静态估算（构造工具本体需建模板 agent——重）
+		est.tools += estTokens(spawnToolName) + estTokens(spawnDesc) + spawnSchemaTokens()
 	}
 	// H8-1 口径：est_messages = 整形后出站视图（真实发送面——与 H1 TokenCounter
 	// 同规则函数 llm.ShapeMessages）；saved = 原始口径差额（「整形节省」注记）。
@@ -407,18 +437,83 @@ func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
 	return est
 }
 
+// schemaTokens 参数 schema 的 JSON 形估算（nil = 0；marshal 失败容错 0——
+// 估算是治理信号不是精确账）。
+func schemaTokens(sc *contract.Schema) int {
+	if sc == nil {
+		return 0
+	}
+	if b, err := json.Marshal(sc); err == nil {
+		return estTokens(string(b))
+	}
+	return 0
+}
+
 // emitUsage 流末 usage chunk 到达即发（每轮模型调用一次，react 多轮后值
 // 覆盖——最后一条 = 最终上下文规模）。Record 落事件流 → 刷新回放可恢复。
-func (m *Manager) emitUsage(s *session.Session, fn emitFn, u *schema.TokenUsage, est ctxEstimates) {
+// spawnID 非空 = 子代理面用量上卷（B2：估算四项传零——子面无 estimateContext；
+// 消费侧按 SpawnID 归组聚合）。
+func (m *Manager) emitUsage(s *session.Session, fn emitFn, u *schema.TokenUsage, est ctxEstimates, spawnID string) {
 	if u == nil || u.PromptTokens <= 0 {
 		return
 	}
 	m.emit(s, fn, contract.EvUsage, contract.UsageOut{
 		PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens,
-		TotalTokens:    u.TotalTokens,
+		TotalTokens:   u.TotalTokens,
+		SpawnID:       spawnID,
 		EstInstruction: est.instruction, EstTools: est.tools, EstMessages: est.messages,
 		EstSaved: est.saved, // 整形节省注记（H8-1；原始-整形差额，>0 才有意义）
 	})
+}
+
+// envContextBudget env 覆盖的常驻上下文预算（0 = 未设；显式 Options 值优先）。
+var envContextBudget int
+
+// contextBudgetOf 生效预算（显式 Options 值优先，次 env；0 = 关）。
+func (m *Manager) contextBudgetOf() int {
+	if m.Opt.ContextBudget > 0 {
+		return m.Opt.ContextBudget
+	}
+	return envContextBudget
+}
+
+// checkContextBudget 常驻面超限告警（B1）：Instruction+常驻工具面合计超线即发
+// harness_note（Kind: budget）+ 日志，不阻断运行（大工具面配 toolsearch 就是
+// 合法超标场景）；会话内只发一次——判定扫 Events 既有同 Kind note（免持久化
+// 标记位：Reattach 后 Events 恢复即含旧告警，跨重启天然不重发；盘面重建的
+// Data 是 map 形态，两形态同判）。
+func (m *Manager) checkContextBudget(s *session.Session, fn emitFn, est ctxEstimates) {
+	budget := m.contextBudgetOf()
+	if budget <= 0 {
+		return
+	}
+	resident := est.instruction + est.tools
+	if resident <= budget {
+		return
+	}
+	for _, ev := range s.SnapshotEvents() {
+		if ev.Event != contract.EvHarnessNote {
+			continue
+		}
+		switch d := ev.Data.(type) {
+		case contract.HarnessNote:
+			if d.Kind == "budget" {
+				return
+			}
+		case map[string]any:
+			if d["kind"] == "budget" {
+				return
+			}
+		}
+	}
+	m.emit(s, fn, contract.EvHarnessNote, contract.HarnessNote{
+		Kind:  "budget",
+		Title: "常驻上下文超预算",
+		Detail: fmt.Sprintf("Instruction ≈%d + 常驻工具面 ≈%d = ≈%d token，超预算线 %d（estTokens 启发式口径；瘦身：精简工具描述 / SessionToolsOff 裁族 / ToolSearchPolicy 动态装载）",
+			est.instruction, est.tools, resident, budget),
+	})
+	log.Printf("einox: 会话 %s 常驻上下文 ≈%d token 超预算 %d（instruction %d + tools %d）",
+		s.SID, resident, budget, est.instruction, est.tools)
 }
 
 // msgTextOf 消息文本（多模态消息 Content 为空——文本只进 text part，估算回退
@@ -577,9 +672,17 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 }
 
 // Resume 审批决议后续流（hitl 配套；决议已由应用端点 SetDecision）。
+// 入口整备（A1）：BeginResume 单锁原子查清挂起域 + 翻 running + 挂 runDone
+// ——重复/并发第二个 Resume 即拒（checkpoint 不随 Resume 消费，迟到调用放行
+// 是脏重放：旧检查点被加载重执行、决议已被消费回喂 fail-closed 信封）；执行
+// 期状态可见为 running（FlushQueue/Drain 可寻址，此前恒显 pending）。
 func (m *Manager) Resume(ctx context.Context, s *session.Session, fn emitFn) {
 	stopApprovalTimer(s.SID)
-	s.SetPendingApproval("")
+	if !s.BeginResume() {
+		m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: "SERVER",
+			Message: "会话无挂起可恢复（可能已被并发恢复或超时翻转）"})
+		return
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	runCtx = contract.WithOperator(runCtx, s.Owner)
@@ -740,6 +843,11 @@ func init() {
 			maxIterations = n
 		}
 	}
+	if v := os.Getenv("EINO_CONTEXT_BUDGET"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			envContextBudget = n
+		}
+	}
 }
 
 // assemble 模型解析 + agent 组装 + runner 构造（Run/Resume 共用）。
@@ -783,6 +891,9 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 			return nil, nil, nil, err
 		}
 		ts = append(ts, rt)
+	}
+	if spec.NoToolCalls && (len(ts) > 0 || m.Opt.SubAgents != nil) { // A4 能力门控（组装期 fail fast）
+		return nil, nil, nil, &configError{"模型 " + s.Model.Model + " 不支持函数调用（NoToolCalls 置位），不能装配工具面（含会话域件/spawn）"}
 	}
 	behaviors := make(map[string]string, len(ts)) // UI-B2：行为标记快照（tool_call 事件携带——前端分组数据源；值由工具自declare，引擎不判别）
 	for _, t := range ts {
@@ -1232,6 +1343,7 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 		_ = json.Unmarshal([]byte(content), &cr) // B4 信封提取（无键的工具零值省略）
 		m.emit(s, fn, contract.EvToolResult, contract.ToolResult{CallID: callID, OK: ok, Digest: digest, Preview: preview, Counts: cr.Counts, Verb: cr.Verb})
 		acc.addToolResult(callID, content) // 入史：assistant(tool_calls) 须紧跟 tool 结果，缺失回传即 400
+		m.reg.Persist(s)                   // 工具边界节流落盘（C2）：轮内崩溃不丢已完工具轮——频率有界（工具调用数）、单文件全量格式不变
 		return outContinue
 
 	case schema.Assistant:
@@ -1263,7 +1375,7 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 					continue
 				}
 				if chunk.ResponseMeta != nil {
-					m.emitUsage(s, fn, chunk.ResponseMeta.Usage, est)
+					m.emitUsage(s, fn, chunk.ResponseMeta.Usage, est, "")
 				}
 				if chunk.ReasoningContent != "" {
 					acc.addThinking(chunk.ReasoningContent)
@@ -1294,7 +1406,7 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 			return outContinue
 		}
 		if msg.ResponseMeta != nil {
-			m.emitUsage(s, fn, msg.ResponseMeta.Usage, est)
+			m.emitUsage(s, fn, msg.ResponseMeta.Usage, est, "")
 		}
 		if msg.ReasoningContent != "" {
 			acc.addThinking(msg.ReasoningContent)

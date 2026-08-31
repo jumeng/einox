@@ -52,6 +52,12 @@ type ModelSpec struct {
 	Limit     *Limit     `json:"limit,omitempty"`
 	Input     []string   `json:"input"` // ⊆ text/image（空 = text）
 	Priority  int        `json:"priority"`
+	// NoToolCalls 明示该模型不支持函数调用（A4：人工维护元数据，可能过时——
+	// fail fast 价值大于标记维护成本）。置位时 assemble 期工具面非空（含会话
+	// 域件与 spawn）即 CONFIG 错误，不等首轮运行期报端点方言各异的错；能力
+	// 是模型属性故放 ModelSpec 而非 ProviderSpec（同 provider 各模型可不同，
+	// Input 能力面同先例）。
+	NoToolCalls bool `json:"no_tool_calls,omitempty"`
 	// Temperature / TopP 采样参数（nil = 不发字段走端点默认——多数推理端点
 	// 拒绝显式 temperature，只在用户显式设置时下发；随会话模型快照粘住，
 	// 会话内不变即前缀缓存友好）。建议二选一，不同时设。
