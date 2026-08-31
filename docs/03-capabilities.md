@@ -108,7 +108,17 @@
 
 ## 模型面（llm/）
 
-| 能力                | 说明                                                                                                                                                                                                                                                                                                                                                                                                 |
+**接入与适配（铁律）**：baseurl + key + 协议组件只买到方言交集面（messages+tools → 文本+tool_calls+usage，同步/流式）——「接入」零适配成立，且仅此成立。交集之外的一切差异都是「适配」的义务：**多供应商 + 产品级功能 ⇒ 必须适配，没有第三条路**（零适配、多供应商、产品级三者最多取二——零适配+多供应商=交集面 demo；零适配+产品级=锁死单家用原生 API）。差异只经三口收编，各归其位：
+
+| 差异性质 | 收编口 | 例 |
+|---|---|---|
+| 转形——能力各家都有，编码不同 | `Dialect` 思考方言 / vision 路由 / `Classify` 错误归约 / `NewHistoryShapeModel` 出站整形 | BudgetTokens ↔ reasoning_effort ↔ 私有 thinking 块；anthropic type 字符串 ↔ DeepSeek 错误码表 ↔ 智谱业务码 |
+| 能力对账——这家有那家没有，适配不能无中生有 | `ModelSpec` 元数据 + 组装期 fail fast / 降档 | `NoToolCalls`、`Input` 视觉位、effort 方言 max→high / off→none（词表对齐宁降不发 400）、GLM 关档线格式照发由端点表态 |
+| 越界面——方言词汇表里没有该能力 | 退出统一面，厂商专属代码归应用 | Files API、Batch 异步、服务端会话状态（`responses` 占位） |
+
+纪律：厂家私有知识绝不写进通用分支，只走上述三口；"OpenAI-compatible" 是营销承诺不是合同，兼容偏差以实测为准（thinking 回传行为即实探测订正的先例）。
+
+| 能力                | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 模型工厂              | `llm.NewChatModel(ctx, provider, model, effort)`：kind=anthropic → Anthropic Messages 组件，kind=openai → Chat Completions 组件                                                                                                                                                                                                                                                                          |
 | 厂家预设              | `BuiltinProviders` 内置 DeepSeek 两端点（openai 协议主推 + anthropic 协议）与智谱 GLM 端点（openai 协议 Chat Completion：GLM-5.3 纯文本 + GLM-5.3-Flash 多模态）；`Resolve` 原样 / `ResolveMerged` by-ID 参数补全（用户显式值优先，密钥/启用权不受内置影响）                                                                                                                                                                                                |
@@ -117,7 +127,7 @@
 | 能力门控（NoToolCalls） | `ModelSpec.NoToolCalls` 明示模型不支持函数调用（人工维护元数据；能力是模型属性故在 ModelSpec——同 provider 各模型可不同）：置位且工具面非空（含会话域件/spawn）→ assemble 期 CONFIG 错误，不等首轮运行期报端点方言各异的错                                                                                                                                                                                                                                                   |
 | thinking 双协议映射    | effort 四档（off/low/high/max，关档 2026-08-31 回归——能力归机制，模型能否真关由端点定）：anthropic 协议 = 关档不发思考块、其余档预算分档（BudgetTokens），openai 协议 = 思考方言（`dialect=deepseek` / `dialect=glm` 关档 thinking disabled、开档发扩展字段+档位直传 / `dialect=effort` 通用 reasoning_effort〔off→none、max→high 对齐 OpenAI 词表〕/ 空方言零思考字段）                                                                                                                                                                                                                     |
 | 出站整形              | `NewHistoryShapeModel`：在途带 tool_calls 轮的思维链保留、其余剥离（DeepSeek 等端点的协议要求）；会话存储保真不动                                                                                                                                                                                                                                                                                                                     |
-| `NormalizeEffort` | 档位归一唯一权威（四档原样；旧值 on/max→max、off 恢复关档本义，未知→默认 low）                                                                                                                                                                                                                                                                                                                                                             |
+| `NormalizeEffort` | 档位归一唯一权威（四档原样；旧值 on/max→max、off 恢复关档本义，未知→默认 low） |
 
 ## eino 地基面
 

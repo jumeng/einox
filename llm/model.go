@@ -24,6 +24,12 @@ package llm
 // 出站剥离归 NewHistoryShapeModel 请求边界包装（H1①，协议定案见
 // findings/2026-08-26-h1-probe-reasoning-passback.md），本层不补。
 // 图片输入模型（input 含 image）的路由包装归 M3-8，本层先按主模型直连。
+//
+// 适配铁律（定案见 docs/03 模型面）：「接入」零适配只覆盖方言交集面；
+// 多供应商 + 产品级 ⇒ 适配强制（零适配/多供应商/产品级三角最多取二）。
+// 差异只经三口收编——Dialect（转形：私有参数）、ModelSpec 元数据（能力
+// 对账：有无与档位，适配不无中生有）、Classify（错误归约）；方言词汇表
+// 外的能力（Files/Batch/服务端状态）不进统一面。
 
 import (
 	"context"
