@@ -33,6 +33,7 @@ var approvedModules = []string{
 	"github.com/cloudwego/eino-ext/components/tool/sequentialthinking",
 	"github.com/cloudwego/eino-ext/components/tool/wikipedia",
 	"github.com/eino-contrib/jsonschema",
+	"github.com/larksuite/oapi-sdk-go/v3", // channels/feishu 渠道适配（MIT）——应用不 import 该包则不进构建
 	"github.com/mark3labs/mcp-go",
 	"golang.org/x/net",
 	"golang.org/x/sys",

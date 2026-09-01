@@ -179,6 +179,14 @@ type Options struct {
 	// 归应用——build/test 命令或自包的对抗审查；基座只持门循环机制）。
 	// 挂起/中断/错误轮不触发；重试预算随 Run/Resume 执行体。
 	FinalGate func(sess SessionBrief) *GateConfig
+	// Channels 消息渠道装配（nil/空 = 不装配零变化）：每条目一个渠道实例
+	// （ID 进程内唯一、Sink 出站投递——渲染归适配器）。渠道编排面
+	// Manager.Channels() 懒建总可用：入站 Handle 分流（空闲起轮/运行中
+	// 排队）、常驻事件订阅出站（覆盖挂起期）、Approve/Answer 决议续流、
+	// Cancel/Push。渠道协议归适配器（官方通用件 channels/ 子包；业务
+	// 自定义渠道长在业务仓）——同 llm 供应商「内置目录 + 自定义」两层
+	// 模式，见 docs/04。
+	Channels []ChannelConfig
 }
 
 // TurnEndSummary 轮收尾交接载荷（session_end 事件同源 + 会话身份）。
@@ -196,6 +204,10 @@ type TurnEndSummary struct {
 type Manager struct {
 	reg *session.Registry
 	Opt Options
+
+	// 渠道编排域（懒建——Channels() 首触即建，见 channel.go）。
+	chanMu sync.Mutex
+	chanGW *ChannelGateway
 
 	// 后台派生域（W-2）：会话域注册表+信号量（同步/后台同一池）。bgMu 保护
 	// map 懒建/回收；条目竞态归 bgRegistry 自锁。
@@ -237,6 +249,19 @@ func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
 	}
 	if opt.NewModel == nil {
 		opt.NewModel = llm.NewChatModel
+	}
+	chanIDs := make(map[string]bool, len(opt.Channels))
+	for _, c := range opt.Channels {
+		if c.ID == "" {
+			return nil, fmt.Errorf("engine: Options.Channels 条目 ID 不可为空")
+		}
+		if c.Sink == nil {
+			return nil, fmt.Errorf("engine: 渠道 %q 缺 Sink（出站投递面）", c.ID)
+		}
+		if chanIDs[c.ID] {
+			return nil, fmt.Errorf("engine: 渠道 ID %q 重复（消息路由键须唯一）", c.ID)
+		}
+		chanIDs[c.ID] = true
 	}
 	if opt.Sandbox != nil && !off[FamilyCmd] {
 		// 装配期探测（C1）：未挂钩/内核不可用即启动日志告警（cmd 族被裁即

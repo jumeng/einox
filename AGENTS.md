@@ -18,6 +18,7 @@ einox 是通用 agent 基座库——三层栈 eino（LLM 框架）→ einox（a
 - 一次运行的通路：`Manager.Run` 驱动 adk ReAct 循环（eino 模型组件调 LLM）→ 引擎把流翻译为 `contract.Event` → `Session.Record` 落会话记录 + emit 回调实时扇出；自然收束可经 `FinalGate` 门循环回灌重跑（可选——判据归应用，见 docs/03）；挂起交互（`Suspend`）转引擎 Interrupt，经 `Resume` 续流
 - 工具装配链（组装期逐层包装，由内向外）：业务工具 → mid validate / errFeed / guard → hitl 审批包装 → `ToolWrap`（应用包装缝，nil 不挂——只能收紧不能放宽）→ einoext 桥（eino ParamsOneOf；幻觉工具名兜底信封回喂 + panic 单点收敛）；会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch，未知名构造期即拒）
 - 会话态归 `session`（Registry / Session / 快照 / 排队消息）；检查点经 `engine.CheckPointStore`；工具面路径圈进会话工作区
+- 消息渠道三层（对标 llm 供应商「内置目录 + 自定义」）：编排机制核在 `engine/channel.go`（`Manager.Channels()`——入站 Handle 分流/常驻订阅出站/决议续流/Cancel/Push，渠道无关，引擎只见「文本轮次进、事件流出」）；官方通用件在 `channels/`（feishu 实装、voice 占位——引 SDK 依赖，应用不 import 则不进构建）；渠道协议与渲染归适配器，业务自定义渠道长在业务仓
 - 测试：`boundary_test.go` 守两道依赖边界；`engine` 各测试用 `llmtest` 假模型验证行为，不碰真实端点
 
 ## 常用命令

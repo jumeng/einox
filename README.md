@@ -25,6 +25,7 @@ agent 的价值来自嵌入领域系统后获得的数据、权限与流程；�
 - **网络容错**：流式空闲哨兵、错误分类（致命停机/可重试）、有界重连
 - **harness**：出站上下文经济（超长结果外置换指针）、长会话摘要、子代理编排（同步/后台派生）、动态工具装载
 - **通用工具族**：apply_patch / 文件面 / 命令执行 / 代码仓 worktree / 网页提取 / docx·xlsx 等
+- **消息渠道**：渠道编排机制核（入站分流/常驻事件订阅/决议续流/主动推送——传输无关）+ 官方飞书件（长连接+卡片）+ 语音供应商口占位；自定义渠道长在业务仓
 - **测试假模型**：`llmtest` 无需真实端点即可跑通引擎与工具循环
 
 全量清单见 [docs/03-capabilities.md](docs/03-capabilities.md)。
@@ -84,6 +85,7 @@ m.Run(ctx, sess, userMsg, attachments, func(ev session.Event) { /* 编码转发 
 | `sandbox/` | 命令执行沙箱（OS 级后端） |
 | `prompts/` | 内置提示词 |
 | `einoext/` | eino 双向桥 |
+| `channels/` | 官方渠道件（feishu 飞书 / voice 语音占位）——机制核在 engine |
 | `llmtest/` | 测试假模型 |
 
 ## 状态

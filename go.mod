@@ -19,6 +19,7 @@ require (
 	github.com/cloudwego/eino-ext/components/tool/sequentialthinking v0.0.0-20260820123736-6752ff8da9b1
 	github.com/cloudwego/eino-ext/components/tool/wikipedia v0.0.0-20260820123736-6752ff8da9b1
 	github.com/eino-contrib/jsonschema v1.0.3
+	github.com/larksuite/oapi-sdk-go/v3 v3.11.0
 	github.com/mark3labs/mcp-go v0.58.0
 	golang.org/x/net v0.41.0
 	golang.org/x/sys v0.35.0
@@ -66,6 +67,7 @@ require (
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/s2a-go v0.1.8 // indirect
@@ -73,6 +75,7 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/googleapis/gax-go/v2 v2.13.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect

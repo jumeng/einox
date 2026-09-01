@@ -80,3 +80,9 @@
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
+
+## 依赖声明（未移植代码，仅模块依赖）
+
+- `github.com/larksuite/oapi-sdk-go/v3`（MIT）：`channels/feishu` 的飞书开放
+  平台协议客户端（长连接事件与消息卡片 API）。本仓库未修改其源码；应用不
+  import `channels/feishu` 时该依赖不进构建产物

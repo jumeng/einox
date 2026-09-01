@@ -34,6 +34,7 @@
 | `Recall` | | 跨会话检索工具 `recall`（记忆拉通道，opt-in——模型可读本 owner 历史会话摘要，新能力面装配即知情决策；false = 不装配零变化） |
 | `TurnEpilogue` | | 轮收尾交接钩子（记忆写通道；自然收束每轮触发、载荷与 session_end 同源。应用把摘要追加进 owner 域记忆 markdown、经 `AgentsMD` 清单注入即成读写环——文件格式/脱敏/追加式并发约定见 findings 记忆设计文档，仓外笔记不随仓分发） |
 | `FinalGate` | | 收束质量门（`func(SessionBrief) *GateConfig`——按模式/任务形态开门；nil/返回 nil = 零变化。Checkers 为确定性判据（**归应用**——build/test 命令或自包对抗审查），失败回灌重跑（MaxRetries 负数=缺省 2、0=零回灌首验即报错——codex Guardian 普通/cyber 两档对位）、耗尽诚实报错；纯问答会话也会过门，闭包应按形态开门） |
+| `Channels` | | 消息渠道装配（nil/空 = 不装配零变化；条目 = `{ID, Model, Sink}`，ID 进程内唯一、Sink 非 nil 构造期校验）。编排面 `Manager.Channels()` 懒建总可用：入站 `Handle` 分流、常驻事件订阅出站、`Approve`/`Answer` 决议续流、`Cancel`/`Push`。渠道协议归适配器——三层结构与接入蓝图见下「渠道接入」 |
 
 ## 最小装配
 
@@ -165,6 +166,34 @@ func (t *createOrder) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 ### 5. 子代理白名单
 
 `SubAgents.Tools` 只列读面与工作区探索/验证件；数据域写、repo 写、采集类进 `DenyTools`——子代理只读勘察，数据变更以建议清单回传、父用自有写工具代执行走既有审批。并发上限 `MaxConcurrent` 照看 LLM 端点压力（超限信号量排队不失败）。
+
+### 6. 渠道接入（消息渠道三层）
+
+三层结构（对标 llm 供应商「内置目录 + 自定义」，详见 [03](03-capabilities.md) 渠道三层）：**① 机制核** `engine/channel.go`（`Manager.Channels()` 编排泵——渠道无关）；**② 官方通用件** `channels/feishu`（飞书）、`channels/voice`（语音占位）；**③ 业务自定义渠道**（长在业务仓）。
+
+**飞书开箱装配**（`channels/feishu`，长连接模式——免公网回调与签名验证）：
+
+```go
+bot := feishu.New(feishu.Config{AppID: appID, AppSecret: secret, Model: "deepseek/deepseek-chat"})
+
+m, err := engine.NewManager(reg, engine.Options{
+    // …四项必填照常…
+    Channels: []engine.ChannelConfig{{ID: bot.ID(), Model: "deepseek/deepseek-chat", Sink: bot}},
+})
+if err := bot.Start(m); err != nil { /* 凭证/构造错误启动期即拒 */ }
+defer bot.Close() // 停机序：HTTP Shutdown → bot.Close → Channels().Close → Drain → store Close
+```
+
+用户在飞书里 @机器人（或单聊）即成会话（chat_id ↔ 会话绑定，重启找回）；审批/提问卡带交互按钮，决议回写续流；文本增量聚合节流更新卡片。
+
+**自定义渠道指南**（③ 层——实现两个面即成）：
+
+| 面 | 实现 |
+|---|---|
+| 出站 | `engine.ChannelSink`：`Deliver(b ChannelBrief, ev session.Event)`——事件 → 渠道消息渲染发送（单会话串行投递；慢消费自行节流，基座侧水位+间隙/静默双路补投兜底） |
+| 入站 | 持有协议收发循环，用户到达时调 `gw.Handle(engine.InboundMsg{Channel, Chat, Owner, Text, …})`（空闲起轮/运行中排队自动分流）；挂起答复调 `gw.Approve(sid, itemID, decision)` / `gw.Answer(sid, decision)`；打断/停止调 `gw.Cancel(channel, chat)`；主动通知 `gw.Push(channel, chat, text)` |
+
+**实时语音渠道蓝图**（流型——媒体处理全在适配器，引擎只见文本轮次）：音频流 → 转写分段 → `Handle`（每段一轮）；`text_delta` 增量 → 流式合成 → 音频出站；用户开口打断 → `Cancel`；提问挂起 → 问题经合成念出 → 口头回答转写 → `Answer`；挂断 → 会话终态。转写/合成供应商口已占位（`channels/voice` 的 `Transcriber`/`Synthesizer`——零实现，格式与分段策略待首个实现定稿）。
 
 ## 业务侧边界守卫
 

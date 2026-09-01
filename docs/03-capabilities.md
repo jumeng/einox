@@ -16,7 +16,20 @@
 | 检查点 | `engine.CheckPointStore`（Get/Set 两方法），中断/取消恢复与审批挂起续流的事实载体；三卡 State 经 `schema.Register` gob 注册（hitl/askuser/plan 属主包 init），属主包各持 round-trip 兼容回归测试（字段重命名红——gob 按字段名编码，静默破坏存量检查点） |
 | 常驻上下文预算（ContextBudget） | `Options.ContextBudget`（0 = 缺省关；`EINO_CONTEXT_BUDGET` 可覆盖）：Instruction + 常驻工具面（业务面+进程件+**会话域件**+spawn/recall：名+描述+参数 schema JSON）合计的超限告警线——超限发一张 `harness_note`（Kind: budget，含分类账本与瘦身指引）+ 服务端日志，不阻断运行（大工具面配 toolsearch 就是合法超标）；会话内只发一次（判定扫事件流既有同 Kind note，跨重启天然不重发）。toolsearch 名单内工具不计（只有常驻面计费） |
 | 会话分叉（Fork） | `Registry.Fork(owner, sid)`：全量快照分叉——record JSON 往返深隔离（零共享指针）、事件 ID 接续、spill 外置域整目录复制、血缘 `harness_note`（Kind: fork，Detail 含源 sid）；挂起域/任务授权/排队消息不带（分叉体无执行体残留，与 Reattach 降级同裁决）。V1 限定源非 running（spill 复制与源外置写并发无锁覆盖）；内存优先、不在内存则磁盘重建（历史会话分叉主场景）；归属不符/未知 sid/源 running 返回 nil |
-| 优雅停机（Drain） | `Registry.Drain(deadline)`：取消全部 running 态会话并有界等执行体收尾（走中断链：终态事件+检查点+中断注记全落），到点未收尾的 SID 如实返回（调用方记日志不阻塞停机）；挂起态无执行体不在列（跨重启 RearmPendingTimer 续表）。应用停机序 = HTTP Shutdown → Drain → store Close（终态落盘依赖 store 存活） |
+| 消息渠道（channel） | `Options.Channels` + `Manager.Channels()`（`engine/channel.go`）：渠道编排机制核——入站 `Handle` 分流（空闲起轮/运行中 Steer 排队/挂起接决议续流）、常驻事件订阅出站（`ChannelSink.Deliver`，覆盖挂起期与后台通知——补齐 live 回调绑定 Run 生命周期只覆盖执行期的缺口；水位 + 间隙/静默双路补投）、`Approve`/`Answer` 决议回写（合并卡空 itemID = 全批/全拒逐项登记）、`Cancel` 停轮、`Push` 主动通知、`(channel, chat)→sid` 绑定表（UserTree 落盘，重启经 Reattach 找回，删除自愈）。渠道协议与渲染归适配器（三层结构见下节） |
+| 优雅停机（Drain） | `Registry.Drain(deadline)`：取消全部 running 态会话并有界等执行体收尾（走中断链：终态事件+检查点+中断注记全落），到点未收尾的 SID 如实返回（调用方记日志不阻塞停机）；挂起态无执行体不在列（跨重启 RearmPendingTimer 续表）。应用停机序 = HTTP Shutdown → Channels().Close → Drain → store Close（先停渠道事件投递面，再收执行体；终态落盘依赖 store 存活） |
+
+### 渠道三层（channels/）
+
+消息渠道按「llm 供应商内置目录 + 自定义」同款模式分三层——**通道编排机制归基座，渠道协议实现与消息形态归装配**：
+
+| 层 | 载体 | 职责 |
+|---|---|---|
+| ① 机制核 | `engine/channel.go` | 渠道无关的编排泵（绑定/分流/常驻订阅/决议回写/停/推）——引擎只见「文本轮次进、事件流出」 |
+| ② 官方通用件 | `channels/feishu`（飞书长连接 + 卡片渲染）、`channels/voice`（流型语音供应商口，**占位零实现**——转写/合成接口待首个实现定稿） | 开箱即用；不 import 则 SDK 依赖不进构建 |
+| ③ 业务自定义渠道 | 业务仓 | 实现 `engine.ChannelSink`（出站渲染）+ 持有协议收发调 `Handle/Approve/Answer` 即成——小众渠道的家不在基座 |
+
+**渠道形态谱系**（同一端口，差异全在适配器）：**消息型**（飞书/SMS 等——离散文本轮次，全特性）；**流型**（实时语音——适配器做媒体处理与转写分段，`text_delta` 增量喂流式合成、打断→`Cancel`、口头决议→`Answer`）；**主动型**（`Push` 推系统通知 + 后台完成注入自续的引擎既有语义，触发源归应用）。多 agent 共用渠道 = 应用层多 Manager/多 Gateway 组合，基座不建路由器。
 
 ### 事件流（contract.Event）
 
@@ -28,7 +41,7 @@
 | 工具 | `tool_call`（参数摘要 + 行为标记）/ `tool_result`（Digest+Preview、文件变更信封 `+A -D`） |
 | 挂起交互 | `approval_request/decision/timeout`（**合并决议卡**：一轮并行写聚合一卡 N 项、逐项决议）/ `ask_user_request/decision/timeout/ignored` / `plan_request/decision/timeout` |
 | steering 与通知 | `steer_queued/updated/removed/reordered/injected` / `notify_queued/notify_injected`（后台子代理完成回传）/ `user_message` |
-| 过程 | `todo_update` / `harness_note`（系统通知卡，**Kind 取值封闭集**：`offload` 外置 / `compaction` 摘要压缩 / `gate` 质量门回灌 / `failover` 降级链装配失败留痕 / `budget` 常驻面超预算告警 / `fork` 会话分叉血缘——新 Kind 属前端可观察的软契约增长，增改须同步本表）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态）/ `model_change` / `transport_retry`（重连在途——前端回卷当前段半截显示） |
+| 过程 | `todo_update` / `harness_note`（系统通知卡，**Kind 取值封闭集**：`offload` 外置 / `compaction` 摘要压缩 / `gate` 质量门回灌 / `failover` 降级链装配失败留痕 / `budget` 常驻面超预算告警 / `fork` 会话分叉血缘 / `channel_push` 渠道主动推送——新 Kind 属前端可观察的软契约增长，增改须同步本表）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态）/ `model_change` / `transport_retry`（重连在途——前端回卷当前段半截显示） |
 | 收束 | `session_end`（摘要 + 文件变更清单）/ `error`（Code：CONFIG / SERVER / TRANSPORT / ABORTED / AUTH / RATE_LIMIT）/ `interrupted`（打断收尾，非故障形态） |
 
 ## 工具族（tools/）
