@@ -76,6 +76,17 @@ func NewChatModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort strin
 	return NewTimeoutModel(cm), nil
 }
 
+// RewriteSpec 规格改写工厂缝（能力件，2026-09-02 应用层适配定案配套）：
+// 应用层供应商特有适配——改写出站模型名/限额/采样等——经 rewrite 在
+// 构造前改写 ModelSpec 完成，基座只按改写后规格走 NewChatModel 构造
+// 协议客户端（含超时包装），零厂家知识。缺省（不设置 Options.NewModel）
+// 不经改写直连。
+func RewriteSpec(rewrite func(p ProviderSpec, m ModelSpec, effort string) ModelSpec) ModelFactory {
+	return func(ctx context.Context, p ProviderSpec, m ModelSpec, effort string) (model.BaseModel[*schema.Message], error) {
+		return NewChatModel(ctx, p, rewrite(p, m, effort), effort)
+	}
+}
+
 // NormalizeEffort 思考档归一：off | low | high | max（2026-08-31 关档回归
 // 四档——机制层能力，模型是否真支持关由端点定）。旧值兼容——升级前用户
 // 偏好与存量会话快照存的是 on/off（旧「开」即 enabled+effort max）：on/

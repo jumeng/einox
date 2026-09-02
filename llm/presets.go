@@ -5,7 +5,12 @@ package llm
 // 定位演进：2026-08-21 定案 BuiltinProviders 仅作模型页「厂家」下拉模板、
 // 不参与运行时；2026-08-28 供应商适配架构定案升格为**引用策略**——业务层
 // 选择引用方式（自定义 = Resolve/ResolveFile 原样；都引用 = ResolveMerged/
-// ResolveFileMerged，本产品取都引用档）。
+// ResolveFileMerged，本产品取都引用档）；2026-09-02 应用层预置定案——
+// 业务特有厂家不进基座目录，住应用仓经注入面与内置同构参与合并，且
+// **应用对基座标准目录有挑选权**（呈现 = 应用挑选的基座子集 + 应用私有
+// 全集，经 ResolveFileCatalog/ResolveCatalog 自备完整目录落地；基座只有
+// 能力套件：目录合并管道与规格改写工厂缝〔model.go RewriteSpec〕；厂家
+// 特有协议与参数适配一律归应用层）。
 //
 // 合并语义（MergeBuiltin，by-ID 参数补全）：
 //   - 用户条目按 ID 匹配内置条目，**缺省字段补全**：Kind/BaseURL/Name/
@@ -68,17 +73,18 @@ func BuiltinProviders() []ProviderSpec {
 	}
 }
 
-// MergeBuiltin 引用策略「都引用」合并原语：用户条目 by-ID 匹配内置预设，
-// 缺省参数补全（见包注释语义）。返回新切片；无匹配条目原样透传。
-func MergeBuiltin(ps []ProviderSpec) []ProviderSpec {
+// MergeProviders 任意预置目录的 by-ID 合并原语（2026-09-02 应用层预置
+// 定案配套能力：内置目录 + 应用仓扩展目录同构参与——provider 级补全
+// 语义同 MergeBuiltin：缺省字段填充、用户显式值优先、无匹配条目原样
+// 透传、不独立注入）。
+func MergeProviders(catalog, ps []ProviderSpec) []ProviderSpec {
 	builtin := map[string]ProviderSpec{}
-	for _, b := range BuiltinProviders() {
+	for _, b := range catalog {
 		builtin[b.ID] = b
 	}
 	out := make([]ProviderSpec, 0, len(ps))
 	for _, p := range ps {
-		b, ok := builtin[p.ID]
-		if ok {
+		if b, ok := builtin[p.ID]; ok {
 			if p.Kind == "" {
 				p.Kind = b.Kind
 			}
@@ -100,10 +106,37 @@ func MergeBuiltin(ps []ProviderSpec) []ProviderSpec {
 	return out
 }
 
+// MergeBuiltin 引用策略「都引用」合并原语：用户条目 by-ID 匹配内置预设，
+// 缺省参数补全（见包注释语义）。返回新切片；无匹配条目原样透传。
+func MergeBuiltin(ps []ProviderSpec) []ProviderSpec {
+	return MergeProviders(BuiltinProviders(), ps)
+}
+
 // ResolveFileMerged 文件层 + 内置合并（选择器/校验/引擎同世界观的读侧视图；
 // 合并在归一前——Kind 空位须留给内置补全，先归一会误填 anthropic）。
 func ResolveFileMerged(st Store) []ProviderSpec {
 	return NormalizeProviders(MergeBuiltin(resolveFileRaw(st)))
+}
+
+// ResolveFileCatalog 文件层 + 应用自备目录合并（2026-09-02 应用挑选权
+// 定案配套能力：目录 = 应用挑选的基座标准供应商子集 + 应用私有全集，由
+// 应用层全权决定、展示与运行时同源；不在目录内的条目即使内置有预设也
+// 不被补全——排除语义在此落地。文件层读盘〔含 v1 识别迁移〕与合并次序
+// 〔归一前，Kind 空位留给目录补全〕同 ResolveFileMerged）。
+func ResolveFileCatalog(st Store, catalog []ProviderSpec) []ProviderSpec {
+	return NormalizeProviders(MergeProviders(catalog, resolveFileRaw(st)))
+}
+
+// ResolveFileMergedWith 文件层 + 内置 + 应用层扩展预置合并（应用预置注入
+// 面的便捷档——目录 = 全量内置 + extra；要挑选基座子集用 ResolveFileCatalog
+// 自备完整目录）。extra 条目与内置同构：by-ID 匹配已配置条目做补全，
+// 不独立注入。
+func ResolveFileMergedWith(st Store, extra []ProviderSpec) []ProviderSpec {
+	catalog := BuiltinProviders()
+	if len(extra) > 0 {
+		catalog = append(catalog, extra...)
+	}
+	return ResolveFileCatalog(st, catalog)
 }
 
 // ResolveMerged 运行时 resolve 都引用档（env > 文件层合并 > yaml 手动层；
@@ -113,6 +146,30 @@ func ResolveMerged(st Store) []ProviderSpec {
 		return []ProviderSpec{p}
 	}
 	if ps := ResolveFileMerged(st); len(ps) > 0 {
+		return ps
+	}
+	return resolveYAML()
+}
+
+// ResolveCatalog 运行时 resolve 的应用自备目录版（语义同 ResolveMerged，
+// 文件层换 ResolveFileCatalog）。
+func ResolveCatalog(st Store, catalog []ProviderSpec) []ProviderSpec {
+	if p, ok := envProvider(); ok {
+		return []ProviderSpec{p}
+	}
+	if ps := ResolveFileCatalog(st, catalog); len(ps) > 0 {
+		return ps
+	}
+	return resolveYAML()
+}
+
+// ResolveMergedWith 运行时 resolve 都引用档的应用预置扩展版（语义同
+// ResolveMerged，文件层换 ResolveFileMergedWith）。
+func ResolveMergedWith(st Store, extra []ProviderSpec) []ProviderSpec {
+	if p, ok := envProvider(); ok {
+		return []ProviderSpec{p}
+	}
+	if ps := ResolveFileMergedWith(st, extra); len(ps) > 0 {
 		return ps
 	}
 	return resolveYAML()
