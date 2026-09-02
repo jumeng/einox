@@ -171,6 +171,8 @@ func (t *createOrder) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 
 三层结构（对标 llm 供应商「内置目录 + 自定义」，详见 [03](03-capabilities.md) 渠道三层）：**① 机制核** `engine/channel.go`（`Manager.Channels()` 编排泵——渠道无关）；**② 官方通用件** `channels/feishu`（飞书）、`channels/voice`（语音占位）；**③ 业务自定义渠道**（长在业务仓）。
 
+名词对照：渠道件以国内品牌 feishu 命名；Lark 为同一产品的海外品牌，`larksuite` 是其 GitHub org 与依赖溯源主体名（SDK import path 由此而来）。当前实现走国内域，接海外域属端点配置扩展，不产生第二个渠道件。
+
 **飞书开箱装配**（`channels/feishu`，长连接模式——免公网回调与签名验证）：
 
 ```go
