@@ -5,9 +5,10 @@ package engine
 // 实时收到 todo_update，回放完整可见）；ask_user 与 submit_plan 的挂起/续流
 // 复用审批通道（Suspend → pump 转事件卡 → answer/approve 端点 Resume；
 // 计划文档落用户域 plans/<sid>/）。工作区件（fsutil/runcommand/applypatch）
-// root = 会话工作区（WorkspaceRoot 注入，用户域 workspaces/<sid>——repos/
-// 挂载持久、其余一轮一清；生命周期主锚点 = 任务正常收尾即清，挂起/异常态
-// 保留待续）。
+// root = 会话工作区（WorkspaceRoot 注入，用户域 workspaces/<sid>）：
+// WorkspaceProtect 注入 fsutil/applypatch 写面（写保护区），WorkspaceKeep
+// 声明持久子区（收尾清理豁免）。生命周期主锚点 = 任务正常收尾即清，挂起/
+// 异常态保留待续。
 
 import (
 	"github.com/jumeng/einox/contract"
@@ -16,7 +17,6 @@ import (
 	"github.com/jumeng/einox/tools/askuser"
 	"github.com/jumeng/einox/tools/fsutil"
 	"github.com/jumeng/einox/tools/plan"
-	"github.com/jumeng/einox/tools/repo"
 	"github.com/jumeng/einox/tools/runcommand"
 	"github.com/jumeng/einox/tools/todo"
 	"github.com/jumeng/einox/workspace"
@@ -102,7 +102,7 @@ func (m *Manager) sessionTools(s *session.Session) ([]contract.Tool, error) {
 		out = append(out, ts...)
 	}
 	if !familyOff(off, FamilyFS) {
-		ts, err := fsutil.NewTools(fsutil.Config{Root: ws, Spill: m.spillDirOf(s)})
+		ts, err := fsutil.NewTools(fsutil.Config{Root: ws, Spill: m.spillDirOf(s), ProtectDirs: m.Opt.WorkspaceProtect})
 		if err != nil {
 			return nil, &configError{"文件面工具族构造失败：" + err.Error()}
 		}
@@ -116,22 +116,9 @@ func (m *Manager) sessionTools(s *session.Session) ([]contract.Tool, error) {
 		out = append(out, ts...)
 	}
 	if !familyOff(off, FamilyPatch) {
-		ts, err := applypatch.NewTools(applypatch.Config{Root: ws})
+		ts, err := applypatch.NewTools(applypatch.Config{Root: ws, ProtectDirs: m.Opt.WorkspaceProtect})
 		if err != nil {
 			return nil, &configError{"apply_patch 工具族构造失败：" + err.Error()}
-		}
-		out = append(out, ts...)
-	}
-	if m.Opt.RepoMounts != nil {
-		ts, err := repo.NewTools(repo.Config{
-			Resolver:    m.Opt.RepoMounts,
-			Root:        ws,
-			Owner:       s.Owner,
-			SID:         s.SID,
-			PatchWriter: m.Opt.RepoPatchWriter,
-		})
-		if err != nil {
-			return nil, &configError{"repo 工具族构造失败：" + err.Error()}
 		}
 		out = append(out, ts...)
 	}
@@ -144,8 +131,8 @@ func (m *Manager) workspaceOf(s *session.Session) string {
 	return workspace.Of(m.Opt.WorkspaceRoot(s.Owner, s.SID))
 }
 
-// wipeWorkspace 任务正常收尾即清会话工作区（一轮任务一清；repos/ 挂载
-// 持久区除外，随会话删除整清）。
+// wipeWorkspace 任务正常收尾即清会话工作区（一轮任务一清；WorkspaceKeep
+// 声明的持久子区豁免，随会话删除/过期/孤儿清扫整清）。
 func (m *Manager) wipeWorkspace(s *session.Session) {
-	workspace.Wipe(m.Opt.WorkspaceRoot(s.Owner, s.SID))
+	workspace.Wipe(m.Opt.WorkspaceRoot(s.Owner, s.SID), m.Opt.WorkspaceKeep...)
 }

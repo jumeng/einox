@@ -7,6 +7,10 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -391,5 +395,110 @@ func TestSandboxProviderPlumbing(t *testing.T) {
 	joined := strings.Join(outputs, "\n")
 	if !strings.Contains(joined, "SANDBOX_PROVIDER_OK") {
 		t.Fatalf("执行面应为注入后端的 argv（echo SANDBOX_PROVIDER_OK）：%q", joined)
+	}
+}
+
+// TestWorkspaceGuardSeams 工作区持久/写保护区装配缝：① 非法条目（嵌套
+// 路径/绝对路径/../分隔符/空串）NewManager 即拒——对齐 SessionToolsOff
+// fail-fast 纪律；② 合法 WorkspaceProtect 注入 fsutil/applypatch 写面——
+// delete_file 与补丁目标（含混单的非保护区目标）命中即拒信封、整单不部分
+// 应用，保护区外照常、读面不受波及。
+func TestWorkspaceGuardSeams(t *testing.T) {
+	// ① 构造期校验
+	for _, tc := range []struct {
+		field string
+		mut   func(*Options)
+	}{
+		{"WorkspaceKeep", func(o *Options) { o.WorkspaceKeep = []string{"repos/x"} }},
+		{"WorkspaceKeep", func(o *Options) { o.WorkspaceKeep = []string{".."} }},
+		{"WorkspaceProtect", func(o *Options) { o.WorkspaceProtect = []string{"/abs"} }},
+		{"WorkspaceProtect", func(o *Options) { o.WorkspaceProtect = []string{`a\b`} }},
+		{"WorkspaceProtect", func(o *Options) { o.WorkspaceProtect = []string{""} }},
+	} {
+		opt := Options{
+			Providers:   func() []llm.ProviderSpec { return nil },
+			Instruction: func(SessionBrief) string { return "test" },
+			CheckPoints: func(operator, sid string) CheckPointStore { return nil },
+			WorkspaceRoot: func(owner, sid string) string {
+				return t.TempDir() + "/ws/" + owner + "/" + sid
+			},
+		}
+		tc.mut(&opt)
+		_, err := NewManager(session.NewRegistry(tstore.New(t.TempDir())), opt)
+		if err == nil || !strings.Contains(err.Error(), tc.field) {
+			t.Fatalf("%s 非法条目应构造期报错（含字段名）：%v", tc.field, err)
+		}
+	}
+
+	// ② 注入链：WorkspaceProtect → fsutil/applypatch 写面
+	m := newSeamManager(t, func(o *Options) { o.WorkspaceProtect = []string{"repos"} })
+	s := m.Registry().Create("张三", "勘察", "manual", contract.UserPrefs{})
+	var del, rd, ap contract.Tool
+	for _, x := range func() []contract.Tool {
+		ts, err := m.sessionTools(s)
+		if err != nil {
+			t.Fatalf("sessionTools: %v", err)
+		}
+		return ts
+	}() {
+		switch x.Info().Name {
+		case "delete_file":
+			del = x
+		case "read_file":
+			rd = x
+		case "apply_patch":
+			ap = x
+		}
+	}
+	if del == nil || rd == nil || ap == nil {
+		t.Fatal("会话域面应含 delete_file/read_file/apply_patch")
+	}
+
+	// 工作区铺：保护区内文件 + 保护区外文件
+	ws := m.Opt.WorkspaceRoot("张三", s.SID)
+	if err := os.MkdirAll(filepath.Join(ws, "repos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(ws, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "repos", "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "notes", "b.txt"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	invoke := func(t *testing.T, tool contract.Tool, args string) string {
+		t.Helper()
+		out, err := tool.Invoke(context.Background(), json.RawMessage(args))
+		if err != nil {
+			t.Fatalf("%s Invoke 不应返回 Go error：%v", tool.Info().Name, err)
+		}
+		return string(out)
+	}
+
+	// apply_patch 混单整拒：含保护区目标（Add repos/new.txt）即整体不应用，
+	// 非保护区目标（Update notes/b.txt）不部分落盘
+	mixed := "*** Begin Patch\n*** Update File: notes/b.txt\n@@\n-y\n+z\n*** Add File: repos/new.txt\n+n\n*** End Patch"
+	if out := invoke(t, ap, fmt.Sprintf(`{"patch":%q}`, mixed)); !strings.Contains(out, "写保护区") {
+		t.Fatalf("补丁含保护区目标应整单拒绝：%s", out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(ws, "notes", "b.txt")); string(b) != "y" {
+		t.Fatalf("混单拒绝应事务性（notes/b.txt 不得部分应用）：%q", b)
+	}
+
+	// delete_file 命中即拒：直接命中、./ 前缀变体、平台分隔符变体
+	for _, p := range []string{"repos/a.txt", "./repos/a.txt", filepath.Join("repos", "a.txt")} {
+		if out := invoke(t, del, fmt.Sprintf(`{"path":%q}`, p)); !strings.Contains(out, "写保护区") {
+			t.Fatalf("delete_file(%s) 应拒（写保护区）：%s", p, out)
+		}
+	}
+
+	// 读面不受波及；保护区外照常
+	if out := invoke(t, rd, `{"path":"repos/a.txt"}`); !strings.Contains(out, `"ok":true`) {
+		t.Fatalf("read_file 不受写保护区影响：%s", out)
+	}
+	if out := invoke(t, del, `{"path":"notes/b.txt"}`); !strings.Contains(out, `"ok":true`) {
+		t.Fatalf("保护区外 delete_file 应照常：%s", out)
 	}
 }

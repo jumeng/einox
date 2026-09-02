@@ -19,9 +19,12 @@ import (
 	"github.com/jumeng/einox/tools"
 )
 
-// Config 构造配置。Root = 工作区根（空 = 拒绝构造，P0 纪律）。
+// Config 构造配置。Root = 工作区根（空 = 拒绝构造，P0 纪律）。ProtectDirs =
+// 写保护区顶层子目录名——补丁任一目标（含 Move to 改名目标）命中即整单
+// 拒绝（判定在 Apply 前，事务性自然成立）；nil/空 = 不设区零变化。
 type Config struct {
-	Root string
+	Root        string
+	ProtectDirs []string
 }
 
 // ---- 补丁模型（parser 产物） ----
@@ -562,6 +565,9 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 	if cfg.Root == "" {
 		return nil, fmt.Errorf("applypatch 需要工作区根（拒绝全盘默认）")
 	}
+	if err := tools.CheckTopDirs("ProtectDirs", cfg.ProtectDirs); err != nil {
+		return nil, err
+	}
 	root, err := filepath.Abs(cfg.Root)
 	if err != nil {
 		return nil, err
@@ -572,6 +578,9 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 			ops, err := Parse(in.Patch)
 			if err != nil {
 				return map[string]any{"ok": false, "error": "补丁解析失败：" + err.Error()}, nil
+			}
+			if p, dir := protectedTarget(ops, cfg.ProtectDirs); dir != "" {
+				return map[string]any{"ok": false, "error": "补丁未应用（整体回退）：" + p + " 位于写保护区 " + dir + " 内，禁止增改删——请在保护区外工作"}, nil
 			}
 			results, err := Apply(root, ops)
 			if err != nil {
@@ -598,6 +607,24 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 	}
 	t = tools.DiffToolOf(t, applyCardDiff) // 审批卡 diff 载荷（hitl 组卡时探测 ApprovalDiff）
 	return []contract.Tool{tools.WithBehavior(t, contract.BehaviorWrite)}, nil
+}
+
+// protectedTarget 首个落入写保护区的补丁目标（Add/Delete/Update 路径与
+// Move to 改名目标逐一查；matched = "" 表示无命中）。
+func protectedTarget(ops []FileOp, dirs []string) (path, matched string) {
+	for _, op := range ops {
+		for _, p := range []string{op.Path, op.MoveTo} {
+			if p == "" {
+				continue
+			}
+			for _, d := range dirs {
+				if tools.PathBlocked(p, []string{d}) {
+					return p, d
+				}
+			}
+		}
+	}
+	return "", ""
 }
 
 // applyCardDiff 审批卡 diff 载荷：透传补丁原文（补丁本身即逐行 diff）。

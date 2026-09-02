@@ -34,7 +34,7 @@ func TestOfLazyAndWipe(t *testing.T) {
 	}
 }
 
-func TestWipeKeepsRepoMounts(t *testing.T) {
+func TestWipeKeepsDeclared(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "workspaces", "张三", "s1")
 	_ = os.MkdirAll(filepath.Join(root, "repos", "base-app"), 0o755)
@@ -43,21 +43,35 @@ func TestWipeKeepsRepoMounts(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(root, "spill"), 0o755)
 	_ = os.WriteFile(filepath.Join(root, "spill", "01.md"), []byte("x"), 0o644)
 
-	Wipe(root)
+	// 声明 repos 为持久子区：挂载保留、其余照清（v0.4.0 起豁免须显式声明，
+	// 基座不再预设名字）
+	Wipe(root, "repos")
 
-	// repos/ 挂载保留（会话级持久：worktree 所在）
 	if _, err := os.Stat(filepath.Join(root, "repos", "base-app", "a.go")); err != nil {
-		t.Fatal("repos/ 挂载应跨任务保留：", err)
+		t.Fatal("声明的持久子区应跨任务保留：", err)
 	}
-	// 其余临时产物照清
 	if _, err := os.Stat(filepath.Join(root, "tmp.sh")); err == nil {
 		t.Fatal("临时文件应清除")
 	}
 	if _, err := os.Stat(filepath.Join(root, "spill")); err == nil {
 		t.Fatal("spill 应清除")
 	}
-	// repos/ 尚存时根与祖先不回收（Remove 非空自败，无损害）
+	// 持久子区尚存时根不回收（Remove 非空自败，无损害）
 	if _, err := os.Stat(root); err != nil {
-		t.Fatal("根应保留（repos/ 尚存）")
+		t.Fatal("根应保留（持久子区尚存）")
+	}
+}
+
+func TestWipeAllWithoutKeep(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "workspaces", "张三", "s1")
+	_ = os.MkdirAll(filepath.Join(root, "repos", "base-app"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "repos", "base-app", "a.go"), []byte("x"), 0o644)
+
+	Wipe(root)
+
+	// 无声明 = 全清（此前 repos/ 的隐式豁免已移除）
+	if _, err := os.Stat(root); err == nil {
+		t.Fatal("无 keep 声明时应整清（含 repos/）")
 	}
 }

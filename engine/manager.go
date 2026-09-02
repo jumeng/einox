@@ -34,8 +34,8 @@ import (
 	"github.com/jumeng/einox/sandbox"
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/skills"
+	"github.com/jumeng/einox/tools"
 	"github.com/jumeng/einox/tools/egress"
-	"github.com/jumeng/einox/tools/repo"
 )
 
 // CheckPointStore 会话检查点存储面（adk Get/Set 同构——结构直配 Runner）。
@@ -69,9 +69,8 @@ type Options struct {
 	// ProcessTools 进程级通用件（时间/网络等——应用选择加入的基座件）。
 	ProcessTools func() []contract.Tool
 	// SessionToolsOff 排除的会话域工具族（族名见 sessiontools.go 的族常量；
-	// nil/空 = 全挂（零变化——族构造失败照常上抛 CONFIG，不静默吞错），未知
-	// 名 NewManager 即拒——对齐 DenyTools 的 fail-fast 纪律）。repo 族不经此
-	// 缝，仍由 RepoMounts 条件装配。
+	// nil/空 = 全挂零行为变化——族构造失败照常上抛 CONFIG，不静默吞错），未知
+	// 名 NewManager 即拒——对齐 DenyTools 的 fail-fast 纪律）。
 	// 裁 fs 族 = 放弃 reduction 外置换指针取回（外置指针经 read_file 虚拟
 	// 路径取回，工具不在场则超长结果只剩截断头尾）——留装配者知情决策，
 	// 引擎不联动（上游截断与外置在同一 handler 内一体，禁外置须复制其逻辑）。
@@ -122,9 +121,19 @@ type Options struct {
 	ContextBudget int
 	// Approval 审批配置（写工具名单/动作名/参数豁免——业务内容）。
 	Approval hitl.ApprovalConfig
-	// WorkspaceRoot 会话工作区根（用户域 workspaces/<sid>——repos/ 挂载
-	// 持久、其余一轮一清；惰性创建）。
+	// WorkspaceRoot 会话工作区根（用户域 workspaces/<sid>——WorkspaceKeep
+	// 声明的持久子区跨任务保留、其余一轮一清；惰性创建）。
 	WorkspaceRoot func(owner, sid string) string
+	// WorkspaceKeep 任务收尾清理保留的工作区子目录（顶层目录名——挂载区、
+	// 参考资料区等由装配层声明，基座不预设名字；nil/空 = 无持久区全清）。
+	// 持久子区随会话删除/过期/孤儿清扫整清（Registry.Delete/Sweep 整目录
+	// 移除，不看此栏）。
+	WorkspaceKeep []string
+	// WorkspaceProtect 工作区写保护区（顶层目录名；注入 fsutil/applypatch
+	// 写面——delete_file 与补丁目标〔含 Move to 改名目标〕命中即整单拒绝、
+	// 读面不受影响；nil/空 = 不设区零变化。命令面 run_command 不在此栏——
+	// 命令内容不可静态可靠解析，写的硬约束归 Sandbox 档位）。
+	WorkspaceProtect []string
 	// SubAgents spawn 子代理装配（H2；nil = 不装配 spawn）。
 	SubAgents *SubAgentsConfig
 	// Topology 确定性场景多 agent 拓扑（H5：supervisor/deep 官方 prebuilt 接线；
@@ -134,10 +143,6 @@ type Options struct {
 	// 检索后可见；nil = 全量常驻零变化。审批包装在分流上游——ArgsForce 与
 	// 模式审批对动态工具不豁免）。
 	ToolSearchPolicy *ToolSearchPolicy
-	// RepoMounts 代码仓定位（repo 工具族解析器；nil = 不装配该族）。
-	RepoMounts repo.Resolver
-	// RepoPatchWriter 补丁导出落盘（export_patch 用；nil = 导出面报未配置）。
-	RepoPatchWriter func(name string, content []byte, operator string) error
 	// Sandbox run_command 沙箱策略（nil = 不沙箱——产品默认关 opt-in；
 	// 机制 = einox/sandbox re-exec 哨兵协议，产品 main 需挂 RunHelper 钩子）。
 	Sandbox *sandbox.Policy
@@ -164,7 +169,7 @@ type Options struct {
 	// Recall 跨会话检索工具（记忆拉通道，opt-in）：模型可读本 owner 历史会话
 	// 的摘要与消息投影（三模式 sid 深读/query 检索/最近列表；恒排除当前会话、
 	// 有界、摘要级——授权五律见 recall.go）。是新能力面：装配即知情决策，
-	// false = 不装配零变化。条件装配先例 = repo 族之于 RepoMounts。
+	// false = 不装配零变化。条件装配先例 = channels 之于 Options.Channels。
 	Recall bool
 	// TurnEpilogue 轮收尾交接钩子（记忆写通道，nil = 零变化）：自然收束
 	// （StateEnded）每轮触发，载荷与 session_end 事件同源（摘要+文件变更）。
@@ -246,6 +251,12 @@ func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
 			return nil, fmt.Errorf("engine: 未知的会话域工具族 %q（可用 %s/%s/%s/%s/%s/%s）",
 				f, FamilyTodo, FamilyAsk, FamilyPlan, FamilyFS, FamilyCmd, FamilyPatch)
 		}
+	}
+	if err := tools.CheckTopDirs("WorkspaceKeep", opt.WorkspaceKeep); err != nil {
+		return nil, fmt.Errorf("engine: %w", err)
+	}
+	if err := tools.CheckTopDirs("WorkspaceProtect", opt.WorkspaceProtect); err != nil {
+		return nil, fmt.Errorf("engine: %w", err)
 	}
 	if opt.NewModel == nil {
 		opt.NewModel = llm.NewChatModel

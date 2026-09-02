@@ -46,14 +46,13 @@
 
 ## 工具族（tools/）
 
-工具按装配方分三类：**会话域件**（引擎随会话装配，root 自动圈进会话工作区：todo / 提问 / 计划 / 文件面 / 命令 / 补丁 / repo）、**工作区件**（`office`——需工作区根，由应用在 `Tools` 内构造）、**进程级件**（无会话态，应用经 `ProcessTools` 选择加入：时钟 / 网页抓取）。会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch；极简装配物理移除执行/写面，repo 族仍由 `RepoMounts` 条件装配，`recall` 由 `Options.Recall` 选择装配——见下行；裁 fs 族即放弃 reduction 外置换指针取回——超长工具结果只剩截断头尾，见 [04-assembly.md](04-assembly.md) 裁剪表）。
+工具按装配方分三类：**会话域件**（引擎随会话装配，root 自动圈进会话工作区：todo / 提问 / 计划 / 文件面 / 命令 / 补丁）、**工作区件**（`office`——需工作区根，由应用在 `Tools` 内构造）、**进程级件**（无会话态，应用经 `ProcessTools` 选择加入：时钟 / 网页抓取）。会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch；极简装配物理移除执行/写面，`recall` 由 `Options.Recall` 选择装配——见下行；裁 fs 族即放弃 reduction 外置换指针取回——超长工具结果只剩截断头尾，见 [04-assembly.md](04-assembly.md) 裁剪表）。仓挂载类定制工具族（worktree 挂载/git 面）归应用层——应用在 `Tools` 内自装配，工作区持久/写保护经 `WorkspaceKeep`/`WorkspaceProtect` 声明（见 [04-assembly.md](04-assembly.md)）。
 
 | 包 | 工具 | 说明 |
 |---|---|---|
-| `tools/applypatch` | `apply_patch` | `*** Begin Patch` 格式补丁改文件：多文件增/改/删/改名、四档模糊匹配、多块锚点、事务性（任一失败全部不落盘） |
-| `tools/fsutil` | `read_file` / `list_dir` / `search_files` / `delete_file` | 工作区文件面：行号区间读（超宽行截断可放宽）、目录清单、glob+正则内容搜；路径圈进工作区根，穿越显式拒绝 |
+| `tools/applypatch` | `apply_patch` | `*** Begin Patch` 格式补丁改文件：多文件增/改/删/改名、四档模糊匹配、多块锚点、事务性（任一失败全部不落盘）；`ProtectDirs` 写保护区——任一目标（含 Move to 改名目标）命中即整单拒绝 |
+| `tools/fsutil` | `read_file` / `list_dir` / `search_files` / `delete_file` | 工作区文件面：行号区间读（超宽行截断可放宽）、目录清单、glob+正则内容搜；路径圈进工作区根，穿越显式拒绝；`ProtectDirs` 写保护区——delete_file 命中即拒（读面不受影响） |
 | `tools/runcommand` | `run_command` / `task_output` / `task_stop` | 工作区内 shell：超时、输出头尾截断（中间省略）、后台任务制；`IsSafeReadCommand` 白名单供审批豁免 |
-| `tools/repo` | `open_repo` / `repo_status` / `repo_diff` / `repo_commit` / `export_patch` | 代码仓 worktree 挂载进工作区 `repos/<短名>/`；任务分支 `agent/<sid>-<n>`；push 硬禁（pushurl 指向不可用协议）；commit 走 ArgsForce；成果出仓 = format-patch 导出 |
 | `tools/todo` | `todo_write` | 任务清单全量覆盖写（模型不易漂移），事件化实时扇出 + 回放可见 |
 | `tools/askuser` | `ask_user` | 结构化提问（单选/多选/自由输入），挂起-续流通道，超时 fail-closed |
 | `tools/plan` | `submit_plan` | 计划卡：plan 档批准 = 授权任务期全部写；manual 档仅确认方向；auto 档落档即走 |
@@ -160,5 +159,5 @@
 | 能力 | 说明 |
 |---|---|
 | `llmtest` | 测试假模型：注入 `Options.NewModel` 即可零真实端点跑引擎/工具循环测试，支持注错（`Turn.Err`） |
-| `workspace` | 会话工作区布局（用户域 `workspaces/<sid>`；repos/ 挂载持久、其余任务收尾清理） |
+| `workspace` | 会话工作区布局（用户域 `workspaces/<sid>`；`Wipe(root, keep…)` 持久子区经声明豁免、其余任务收尾清理） |
 | `contract` | 最小契约面：`Tool` / `ToolInfo` / `Schema` / 事件 / `Suspend` / 行为标记（BehaviorRead/Write/Exec）——业务只见此包 |

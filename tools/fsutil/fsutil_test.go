@@ -3,6 +3,7 @@ package fsutil
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,5 +200,51 @@ func TestReadFileLineWidth(t *testing.T) {
 	c = m["content"].(string)
 	if !strings.Contains(c, "单行截断：本行共 50001 字符") || strings.Count(c, "乙") != 50000 {
 		t.Fatalf("line_width 应钳到 50000：%d", strings.Count(c, "乙"))
+	}
+}
+
+// TestDeleteFileProtectDirs 写保护区：delete_file 命中即拒（目录本身/子
+// 路径/./ 变体/平台分隔符变体），读面与保护区外不受影响；非法条目构造期即拒。
+func TestDeleteFileProtectDirs(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "repos"), 0o755)
+	os.MkdirAll(filepath.Join(root, "notes"), 0o755)
+	os.WriteFile(filepath.Join(root, "repos", "a.txt"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(root, "notes", "b.txt"), []byte("y"), 0o644)
+	ts, err := NewTools(Config{Root: root, ProtectDirs: []string{"repos"}})
+	if err != nil {
+		t.Fatalf("构造失败：%v", err)
+	}
+
+	// 命中即拒（信封回喂，错误文案指明写保护区）
+	for _, p := range []string{"repos", "repos/a.txt", "./repos/a.txt", filepath.Join("repos", "a.txt")} {
+		m := invoke(t, ts, "delete_file", fmt.Sprintf(`{"path":%q}`, p))
+		if m["ok"] != false || !strings.Contains(m["error"].(string), "写保护区") {
+			t.Fatalf("delete_file(%s) 应拒（写保护区）：%v", p, m)
+		}
+	}
+
+	// 读面不受波及；保护区外照常
+	if m := invoke(t, ts, "read_file", `{"path":"repos/a.txt"}`); m["ok"] != true {
+		t.Fatalf("read_file 不受写保护区影响：%v", m)
+	}
+	if m := invoke(t, ts, "delete_file", `{"path":"notes/b.txt"}`); m["ok"] != true {
+		t.Fatalf("保护区外 delete_file 应照常：%v", m)
+	}
+
+	// 空清单零变化（保护区路径可删——装配未设栏）
+	ts2, err := NewTools(Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := invoke(t, ts2, "delete_file", `{"path":"repos/a.txt","recursive":true}`); m["ok"] != true {
+		t.Fatalf("空 ProtectDirs 应零变化：%v", m)
+	}
+
+	// 非法条目构造期即拒
+	for _, bad := range []string{"/abs", "..", "a/b", `a\b`, ""} {
+		if _, err := NewTools(Config{Root: root, ProtectDirs: []string{bad}}); err == nil {
+			t.Fatalf("非法条目 %q 应构造期报错", bad)
+		}
 	}
 }

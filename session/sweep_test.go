@@ -121,7 +121,7 @@ func TestSweepRemovesOldTmpTree(t *testing.T) {
 	}
 }
 
-// TestDeleteCascadesWorkspaces 删除级联清会话工作区（含 repos/ 挂载——
+// TestDeleteCascadesWorkspaces 删除级联清会话工作区（含持久子区——
 // 会话级持久随会话删除整清）。
 func TestDeleteCascadesWorkspaces(t *testing.T) {
 	st := tstore.New(t.TempDir())
@@ -132,6 +132,6 @@ func TestDeleteCascadesWorkspaces(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(ws, "repos", "base-app", "a"), []byte("x"), 0o644)
 	reg.Delete("张三", s.SID)
 	if _, err := os.Stat(ws); err == nil {
-		t.Fatal("会话删除应级联清工作区（含 repos/ 挂载）")
+		t.Fatal("会话删除应级联清工作区（含持久子区）")
 	}
 }

@@ -6,16 +6,9 @@ package engine
 // reduction_test.go（2026-08-26 newSpiller 退役，截断面统一移交 reduction）。
 
 import (
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/schema"
-
-	"github.com/jumeng/einox/contract"
-	"github.com/jumeng/einox/internal/tstore"
-	"github.com/jumeng/einox/llm"
-	"github.com/jumeng/einox/session"
 )
 
 func TestSanitizeHistoryRepairsEmptyArgs(t *testing.T) {
@@ -65,67 +58,3 @@ func TestSanitizeHistoryRepairsEmptyArgs(t *testing.T) {
 		t.Fatalf("孤儿 tool 消息应剔除：%d", len(out))
 	}
 }
-
-// TestSessionToolsRepoFamily repo 工具族装配可见性：注入 RepoMounts 即装配
-// 五件，nil 不装配（engine.Options 注入面契约）。
-func TestSessionToolsRepoFamily(t *testing.T) {
-	st := tstore.New(t.TempDir())
-	reg := session.NewRegistry(st)
-	m, err := NewManager(reg, Options{
-		RepoMounts: stubMounts{},
-		Providers:  func() []llm.ProviderSpec { return nil },
-		Instruction: func(SessionBrief) string {
-			return "test"
-		},
-		CheckPoints: func(operator, sid string) CheckPointStore { return nil },
-		// WorkspaceRoot 必填（sessionTools 组装即取工作区根，nil 会 panic）
-		WorkspaceRoot: func(owner, sid string) string {
-			return filepath.Join(st.TmpDir(), "workspaces", owner, sid)
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	s := m.Registry().Create("张三", "编码", "manual", contract.UserPrefs{})
-	ts, err := m.sessionTools(s)
-	if err != nil {
-		t.Fatalf("sessionTools: %v", err)
-	}
-	var names []string
-	for _, x := range ts {
-		if info := x.Info(); info != nil {
-			names = append(names, info.Name)
-		}
-	}
-	for _, want := range []string{"open_repo", "repo_status", "repo_diff", "repo_commit", "export_patch"} {
-		if !contains(names, want) {
-			t.Fatalf("repo 族缺 %s：%v", want, names)
-		}
-	}
-	// nil RepoMounts = 不装配
-	m2, err := NewManager(session.NewRegistry(tstore.New(t.TempDir())), Options{
-		Providers:   func() []llm.ProviderSpec { return nil },
-		Instruction: func(SessionBrief) string { return "test" },
-		CheckPoints: func(operator, sid string) CheckPointStore { return nil },
-		WorkspaceRoot: func(owner, sid string) string {
-			return filepath.Join(t.TempDir(), "workspaces", owner, sid)
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	ts2, err := m2.sessionTools(m2.Registry().Create("张三", "x", "manual", contract.UserPrefs{}))
-	if err != nil {
-		t.Fatalf("sessionTools: %v", err)
-	}
-	for _, x := range ts2 {
-		if n := x.Info().Name; strings.HasPrefix(n, "repo_") || n == "open_repo" || n == "export_patch" {
-			t.Fatal("未注入 RepoMounts 不应装配 repo 族：" + n)
-		}
-	}
-}
-
-// stubMounts 仓定位桩（Resolve 恒未登记——只验装配可见性，不触挂载路径）。
-type stubMounts struct{}
-
-func (stubMounts) Resolve(string) (string, string, bool) { return "", "", false }

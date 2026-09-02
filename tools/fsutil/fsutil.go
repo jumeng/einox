@@ -25,10 +25,12 @@ import (
 // Config 构造配置。Root = 会话工作区根——空值拒绝构造（不给全盘默认，
 // P0 纪律）。Spill = 可选的 reduction 外置域（会话持久 sessions/<sid>/spill，
 // 与历史同寿命——「spill/」前缀路径路由至此根取回，跨轮不失效；其余路径
-// 仍圈工作区，穿越显式拒绝 fail-closed）。
+// 仍圈工作区，穿越显式拒绝 fail-closed）。ProtectDirs = 写保护区顶层子目录
+// 名——delete_file 命中即拒（读面不受影响）；nil/空 = 不设区零变化。
 type Config struct {
-	Root  string
-	Spill string
+	Root        string
+	Spill       string
+	ProtectDirs []string
 }
 
 // NewTools 构造三件（读面：直过审批）。
@@ -36,11 +38,14 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 	if cfg.Root == "" {
 		return nil, fmt.Errorf("fsutil 需要工作区根（拒绝全盘默认）")
 	}
+	if err := tools.CheckTopDirs("ProtectDirs", cfg.ProtectDirs); err != nil {
+		return nil, err
+	}
 	root, err := filepath.Abs(cfg.Root)
 	if err != nil {
 		return nil, err
 	}
-	h := &helper{root: root}
+	h := &helper{root: root, protect: cfg.ProtectDirs}
 	if cfg.Spill != "" {
 		if h.spill, err = filepath.Abs(cfg.Spill); err != nil {
 			return nil, err
@@ -75,8 +80,9 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 
 // helper 工作区路径与实现（闭包共享 root）。
 type helper struct {
-	root  string
-	spill string // reduction 外置域（空 = spill/ 前缀同样走工作区解析）
+	root    string
+	spill   string   // reduction 外置域（空 = spill/ 前缀同样走工作区解析）
+	protect []string // 写保护区顶层目录名（空 = delete_file 不设栏）
 }
 
 // resolveUnder 指定根内路径解析（防穿越：Join 清洗 .. 后逃出 root 必须显式拒绝）。
@@ -362,6 +368,11 @@ type deleteIn struct {
 }
 
 func (h *helper) deleteFile(_ context.Context, in deleteIn) (map[string]any, error) {
+	for _, d := range h.protect {
+		if tools.PathBlocked(in.Path, []string{d}) {
+			return fail("路径位于写保护区 " + d + " 内，拒绝删除：" + in.Path)
+		}
+	}
 	full, err := h.resolve(in.Path)
 	if err != nil {
 		return fail(err.Error())

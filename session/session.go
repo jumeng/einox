@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -863,7 +862,7 @@ func (r *Registry) Get(sid string) (*Session, bool) {
 }
 
 // Delete 删除契约：停执行 → 内存摘除 → users/<op>/sessions/<sid>/ 与会话
-// 工作区（用户域 workspaces/<sid>，含 repos/ 挂载）整目录移除（停执行在
+// 工作区（用户域 workspaces/<sid>，含持久子区）整目录移除（停执行在
 // 前——运行中的 Run 步间检查即中止；磁盘零残留）。返回 owner 供
 // api 层发起人校验（校验失败时调用方不得触达本方法——先 Detail 校验再删）。
 func (r *Registry) Delete(owner, sid string) {
@@ -884,11 +883,10 @@ func (r *Registry) Delete(owner, sid string) {
 		s.Stop()
 	}
 	_ = r.st.RemoveUserTree(owner, path.Join("sessions", sid))
-	// 会话工作区一并清理（用户域 workspaces/<sid>，含 repos/ 挂载 worktree——
-	// 目录整删后缓存仓残留 worktree 元数据，对全部缓存仓 prune 收口）
+	// 会话工作区一并清理（用户域 workspaces/<sid>，含持久子区整删；工作区
+	// 外的挂载收口〔如缓存仓 worktree 元数据〕归应用自理）
 	_ = os.RemoveAll(filepath.Join(r.st.UserTreeDir(owner), "workspaces", sid))
 	_ = os.RemoveAll(filepath.Join(r.st.TmpDir(), "workspaces", owner, sid)) // 旧布局兜底
-	pruneWorktrees(r.st.Dir())
 }
 
 // SweepTmpWorkspaces 启动清扫会话工作区（用户域 workspaces/<sid>）：对照
@@ -950,7 +948,6 @@ func (r *Registry) SweepTmpWorkspaces() int {
 		_ = os.Remove(root)                 // 空壳回收（非空自败——活工作区仍在）
 		_ = os.Remove(r.st.UserTreeDir(op)) // 同上（sessions/ 等仍在则不动）
 	}
-	pruneWorktrees(r.st.Dir())
 	return n
 }
 
@@ -995,25 +992,6 @@ func (r *Registry) migrateLegacyOwner(owner string) int {
 		n++
 	}
 	return n
-}
-
-// pruneWorktrees 对 DATA_DIR/repos 下全部缓存仓执行 git worktree prune
-// （清理已删除 worktree 的残留元数据；无 git/非仓目录静默跳过）。
-func pruneWorktrees(dataDir string) {
-	entries, err := os.ReadDir(filepath.Join(dataDir, "repos"))
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		dir := filepath.Join(dataDir, "repos", e.Name())
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
-			continue
-		}
-		_ = exec.Command("git", "-C", dir, "worktree", "prune").Run()
-	}
 }
 
 // sessionEnded 读磁盘会话终态（session.json state == ended；读不出/解析失败

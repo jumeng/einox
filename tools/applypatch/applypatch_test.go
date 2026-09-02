@@ -6,6 +6,7 @@ package applypatch
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,5 +271,85 @@ func TestCRLFPreserve(t *testing.T) {
 	b, _ = os.ReadFile(filepath.Join(root, "n.txt"))
 	if string(b) != "x\nY\n" {
 		t.Fatalf("无尾换行更新应补齐：%q", string(b))
+	}
+}
+
+// TestProtectDirs 写保护区：补丁任一目标（Add/Delete/Update 路径与 Move to
+// 改名目标）命中即整单拒绝——事务性（混单中非保护区目标不部分应用）；归一
+// 覆盖 ./ 前缀与平台分隔符；空清单零变化；非法条目构造期即拒。
+func TestProtectDirs(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "repos"), 0o755)
+	os.MkdirAll(filepath.Join(root, "notes"), 0o755)
+	os.WriteFile(filepath.Join(root, "repos", "a.txt"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(root, "notes", "b.txt"), []byte("y"), 0o644)
+	os.WriteFile(filepath.Join(root, "notes", "c.txt"), []byte("c\n"), 0o644)
+	ts, err := NewTools(Config{Root: root, ProtectDirs: []string{"repos"}})
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("构造失败：%v", err)
+	}
+	inv := func(t *testing.T, patch string) map[string]any {
+		t.Helper()
+		out, err := ts[0].Invoke(context.Background(), json.RawMessage(fmt.Sprintf(`{"patch":%q}`, patch)))
+		if err != nil {
+			t.Fatalf("Invoke 不应返回 Go error：%v", err)
+		}
+		var m map[string]any
+		if json.Unmarshal(out, &m) != nil {
+			t.Fatalf("非 JSON 信封：%s", out)
+		}
+		return m
+	}
+
+	// 混单整拒：Add repos/new.txt 命中 → Update notes/b.txt 不部分应用
+	mixed := "*** Begin Patch\n*** Update File: notes/b.txt\n@@\n-y\n+z\n*** Add File: repos/new.txt\n+n\n*** End Patch"
+	if m := inv(t, mixed); m["ok"] != false || !strings.Contains(m["error"].(string), "写保护区") {
+		t.Fatalf("混单含保护区目标应整单拒：%v", m)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "notes", "b.txt")); string(b) != "y" {
+		t.Fatalf("混单拒绝应事务性（notes/b.txt 不得部分应用）：%q", b)
+	}
+
+	// Delete 命中、Move to 改名目标命中
+	del := "*** Begin Patch\n*** Delete File: repos/a.txt\n*** End Patch"
+	if m := inv(t, del); m["ok"] != false {
+		t.Fatalf("Delete 保护区目标应拒：%v", m)
+	}
+	mv := "*** Begin Patch\n*** Update File: notes/c.txt\n*** Move to: repos/c.txt\n@@\n-c\n+z\n*** End Patch"
+	if m := inv(t, mv); m["ok"] != false {
+		t.Fatalf("Move to 保护区目标应拒：%v", m)
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes", "c.txt")); err != nil {
+		t.Fatal("被拒改名不得移动原文件")
+	}
+
+	// 归一变体：./ 前缀、平台分隔符、与保护区同名的根下文件
+	for _, p := range []string{"./repos/x.txt", filepath.Join("repos", "x.txt"), "repos"} {
+		patch := fmt.Sprintf("*** Begin Patch\n*** Add File: %s\n+n\n*** End Patch", p)
+		if m := inv(t, patch); m["ok"] != false {
+			t.Fatalf("Add %s 应拒（写保护区变体）：%v", p, m)
+		}
+	}
+
+	// 保护区外照常；空清单零变化
+	if m := inv(t, "*** Begin Patch\n*** Add File: notes/ok.txt\n+n\n*** End Patch"); m["ok"] != true {
+		t.Fatalf("保护区外应照常：%v", m)
+	}
+	ts2, err := NewTools(Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := ts2[0].Invoke(context.Background(), json.RawMessage(`{"patch":"*** Begin Patch\n*** Add File: repos/free.txt\n+n\n*** End Patch\n"}`))
+	var m2 map[string]any
+	_ = json.Unmarshal(out, &m2)
+	if m2["ok"] != true {
+		t.Fatalf("空 ProtectDirs 应零变化：%v", m2)
+	}
+
+	// 非法条目构造期即拒
+	for _, bad := range []string{"/abs", "..", "a/b", `a\b`, ""} {
+		if _, err := NewTools(Config{Root: root, ProtectDirs: []string{bad}}); err == nil {
+			t.Fatalf("非法条目 %q 应构造期报错", bad)
+		}
 	}
 }

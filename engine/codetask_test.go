@@ -2,16 +2,15 @@ package engine
 
 // 编码闭环引擎级链路用例（2026-08-25 设计验收硬性要求）：驱动真实 Run 循环
 // 而非直调工具——
-// ① 任务收尾 wipe：非 repos/ 临时产物照清、repos/ 挂载保留（应用层「工作区
-//    临时脚本」用法零回归——StateEnded → settleTurn → wipeWorkspace 链路）；
-// ② repo_commit ArgsForce 挂起：auto 档不豁免、审批卡携带逐行 diff
+// ① 任务收尾 wipe：WorkspaceKeep 声明的持久子区保留、其余临时产物照清
+//    （StateEnded → settleTurn → wipeWorkspace 链路）；
+// ② apply_patch ArgsForce 挂起：auto 档不豁免、审批卡携带补丁原文
 //   （DiffToolOf → hitl 探测 ApprovalDiff → pump 透传 ApprovalReq.Diff 全链）。
 
 import (
-	"bytes"
 	"context"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,21 +26,17 @@ import (
 	"github.com/jumeng/einox/session"
 )
 
-// TestTaskEndWipeKeepsRepoMounts 任务收尾 wipe：非 repos 临时产物照清、
-// repos/ 挂载保留（scriptedModel 一轮纯文本收尾 → StateEnded → wipeWorkspace）。
-func TestTaskEndWipeKeepsRepoMounts(t *testing.T) {
-	// onStream 缺省 = 每轮纯文本「已处理。」——首轮即收尾（StateEnded）
-	fm := &scriptedModel{}
-	st := tstore.New(t.TempDir())
-	m := newRunManagerOn(t, nil, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
-		return fm, nil
-	}, st)
+// TestTaskEndWipeKeepsDeclaredDirs 任务收尾 wipe：WorkspaceKeep 声明的持久
+// 子区保留、其余照清（scriptedModel 一轮纯文本收尾 → StateEnded →
+// wipeWorkspace——v0.4.0 起豁免须显式声明，基座不预设目录名）。
+func TestTaskEndWipeKeepsDeclaredDirs(t *testing.T) {
+	m := newSeamManager(t, func(o *Options) { o.WorkspaceKeep = []string{"repos"} })
 	s := m.Registry().Create("张三", "编码", "manual", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
 
-	// Run 前手工铺工作区（路径与 Options.WorkspaceRoot 同源拼接）：repos 挂载
-	// 占位 + 临时脚本 + spill 溢出产物
-	ws := st.TmpDir() + "/ws/张三/" + s.SID
+	// Run 前手工铺工作区（路径与 Options.WorkspaceRoot 同源拼接）：声明持久
+	// 区占位 + 临时脚本 + spill 溢出产物
+	ws := m.Opt.WorkspaceRoot("张三", s.SID)
 	if err := os.MkdirAll(filepath.Join(ws, "repos", "base-app"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -71,34 +66,20 @@ func TestTaskEndWipeKeepsRepoMounts(t *testing.T) {
 		t.Fatal("spill 应随任务收尾清除")
 	}
 	if _, err := os.Stat(filepath.Join(ws, "repos", "base-app", "a.go")); err != nil {
-		t.Fatal("repos/ 挂载应跨任务保留：", err)
+		t.Fatal("声明的持久子区应跨任务保留：", err)
 	}
 }
 
-// TestRepoCommitApprovalCardDiff repo_commit ArgsForce 端到端：auto 档挂载
-// 直落后提交挂起，审批卡携带逐行 diff（挂起即收线，无需 Resume）。
-func TestRepoCommitApprovalCardDiff(t *testing.T) {
-	base, cache := newGitFixture(t)
-
-	// mountFile 会话创建后回填（挂载点随 SID 定位）；onStream 第 2 轮前手工
-	// 落盘改动——react 轮次间隙 = 上轮工具已执行、下轮调用未发的窗口
-	var mountFile string
+// TestApplyPatchApprovalCardDiff apply_patch ArgsForce 端到端：auto 档写面
+// 命中 ArgsForce 即挂起，审批卡携带补丁原文（applyCardDiff 透传——
+// DiffToolOf → hitl 探测 → pump 透传链；挂起即收线，无需 Resume）。
+func TestApplyPatchApprovalCardDiff(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: out/demo.txt\n+demo line\n*** End Patch"
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		if n == 1 {
 			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{
-				ID: "c-repo-1", Type: "function",
-				Function: schema.FunctionCall{Name: "open_repo", Arguments: `{"name":"base-app"}`},
-			}}})
-			return
-		}
-		if n == 2 {
-			// open_repo 已挂载完毕（结果回喂本轮流）——改挂载内文件制造待提交 diff
-			if err := os.WriteFile(mountFile, []byte("hello v2\n"), 0o644); err != nil {
-				t.Errorf("改挂载文件失败：%v", err)
-			}
-			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{
-				ID: "c-repo-2", Type: "function",
-				Function: schema.FunctionCall{Name: "repo_commit", Arguments: `{"name":"base-app","message":"t"}`},
+				ID: "c-patch-1", Type: "function",
+				Function: schema.FunctionCall{Name: "apply_patch", Arguments: fmt.Sprintf(`{"patch":%q}`, patch)},
 			}}})
 			return
 		}
@@ -120,26 +101,24 @@ func TestRepoCommitApprovalCardDiff(t *testing.T) {
 		CheckPoints: func(operator, sid string) CheckPointStore {
 			return checkpoint.NewCheckPointStore(st, operator, sid)
 		},
-		// auto 档：open_repo（写名单内）直落挂载；repo_commit 命中 ArgsForce
-		// 无视模式豁免一律挂起——对齐产品「commit 属人工确认」红线装配形态
+		// auto 档：apply_patch（写名单内）本可直落，ArgsForce 无视模式豁免
+		// 一律挂起——对齐「整补丁人工确认」装配形态
 		Approval: hitl.ApprovalConfig{
-			WriteTools: map[string]bool{"open_repo": true, "repo_commit": true},
-			ArgsForce:  map[string]func(args string) bool{"repo_commit": func(string) bool { return true }},
+			WriteTools: map[string]bool{"apply_patch": true},
+			ArgsForce:  map[string]func(args string) bool{"apply_patch": func(string) bool { return true }},
 		},
-		WorkspaceRoot: func(owner, sid string) string { return filepath.Join(base, "ws", owner, sid) },
-		RepoMounts:    dirMounts{dir: cache},
+		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
 
 	s := m.Registry().Create("张三", "提交", "auto", contract.UserPrefs{Model: "p/m"})
-	mountFile = filepath.Join(base, "ws", "张三", s.SID, "repos", "base-app", "a.txt")
 	s.SetState(session.StateRunning)
 
 	var names []string
 	var card *contract.ApprovalReq
-	m.Run(context.Background(), s, "提交改动", nil, func(ev session.Event) {
+	m.Run(context.Background(), s, "落一个文件", nil, func(ev session.Event) {
 		names = append(names, ev.Event)
 		if ev.Event == contract.EvApprovalRequest {
 			req, ok := ev.Data.(contract.ApprovalReq)
@@ -152,55 +131,16 @@ func TestRepoCommitApprovalCardDiff(t *testing.T) {
 	t.Cleanup(func() { stopApprovalTimer(s.SID) }) // 挂起超时器不跨用例残留
 
 	if !contains(names, contract.EvApprovalRequest) {
-		t.Fatalf("repo_commit ArgsForce 应挂起（auto 档不豁免）：%v", names)
+		t.Fatalf("apply_patch ArgsForce 应挂起（auto 档不豁免）：%v", names)
 	}
-	if card == nil || card.Tool != "repo_commit" {
-		t.Fatalf("应捕获 repo_commit 审批卡：%+v", card)
+	if card == nil || card.Tool != "apply_patch" {
+		t.Fatalf("应捕获 apply_patch 审批卡：%+v", card)
 	}
-	// 断言面在 ApprovalReq.Diff 本体——DiffProvider → hitl 探测 → pump 透传链
-	if !strings.Contains(card.Diff, "+hello v2") {
-		t.Fatalf("审批卡应携带逐行 diff（含 + 新行）：%q", card.Diff)
+	// 断言面在 ApprovalReq.Diff 本体——applyCardDiff 透传补丁原文（含 + 行）
+	if !strings.Contains(card.Diff, "+demo line") {
+		t.Fatalf("审批卡应携带补丁原文（含 + 新行）：%q", card.Diff)
 	}
 	if s.StateOf() != session.StatePendingApproval {
 		t.Fatalf("挂起即收线，应为 pending_approval：%s", s.StateOf())
 	}
 }
-
-// newGitFixture 建 非 bare 缓存仓 fixture（init + user 配置 + 1 个提交），
-// 形态照 einox/tools/repo/repo_test.go 的 newFixture 本地小复刻（该包私有
-// 不可引）。返回 (base 临时根, cache 仓目录)。
-func newGitFixture(t *testing.T) (base, cache string) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git 不可用")
-	}
-	base = t.TempDir()
-	cache = filepath.Join(base, "repos-cache", "base-app-x1")
-	fixtureGit(t, "", "init", "-q", "-b", "main", cache)
-	fixtureGit(t, cache, "config", "user.name", "t")
-	fixtureGit(t, cache, "config", "user.email", "t@t")
-	if err := os.WriteFile(filepath.Join(cache, "a.txt"), []byte("hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fixtureGit(t, cache, "add", "-A")
-	fixtureGit(t, cache, "commit", "-q", "-m", "init")
-	return base, cache
-}
-
-// fixtureGit fixture 专用 git exec（stderr 并入报错信息）。
-func fixtureGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("fixture git %v 失败：%v: %s", args, err, buf.String())
-	}
-}
-
-// dirMounts 指向 fixture 缓存仓的桩 resolver（短名恒命中，基线 main）。
-type dirMounts struct{ dir string }
-
-func (d dirMounts) Resolve(string) (string, string, bool) { return d.dir, "main", true }

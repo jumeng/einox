@@ -9,7 +9,9 @@
 | `Providers` | ✅ | 模型解析（`func() []llm.ProviderSpec`；空清单 = 未配置模型错误面） |
 | `Instruction` | ✅ | 系统提示词（`func(SessionBrief) string`——入参含 mode/model/effort/owner/sid，每轮实时注入） |
 | `CheckPoints` | ✅ | 检查点存储构造（operator+sid 定位；接口仅 Get/Set） |
-| `WorkspaceRoot` | ✅ | 会话工作区根（owner+sid 定位；repos/ 挂载持久、其余任务收尾清理） |
+| `WorkspaceRoot` | ✅ | 会话工作区根（owner+sid 定位；`WorkspaceKeep` 声明的持久子区保留、其余任务收尾清理） |
+| `WorkspaceKeep` | | 任务收尾清理保留的工作区子目录（顶层目录名；空 = 全清。仓挂载类工具族归应用层〔`Tools` 内自装配，v0.3.x 历史实现可取〕，其挂载区经此栏声明持久） |
+| `WorkspaceProtect` | | 工作区写保护区（顶层目录名；注入 fsutil/applypatch 写面——delete_file 与补丁目标〔含 Move to〕命中即拒、读面不受影响，非法条目构造期即拒。命令面不在此栏——写的硬约束归 `Sandbox`） |
 | `Tools` | | 业务工具面（`func(SessionBrief) []contract.Tool`——入参含会话身份，多租户按 owner 裁剪工具面；nil = 无业务工具。闭包每轮求值、跨会话并发，应快速返回） |
 | `ProcessTools` | | 进程级通用件——应用**选择加入**的基座件（时钟/网页抓取等） |
 | `SessionToolsOff` | | 排除的会话域工具族（todo/ask/plan/fs/cmd/patch；nil = 全挂零变化，未知名构造期即拒——fail-fast。裁 fs 族 = 放弃 reduction 外置换指针取回——超长工具结果只剩截断头尾） |
@@ -24,8 +26,6 @@
 | `SubAgents` | | spawn 子代理装配（nil = 不装配 spawn） |
 | `Topology` | | 确定性多 agent 拓扑（nil = 单 agent react 主线） |
 | `ToolSearchPolicy` | | 动态工具装载（nil = 全量常驻零变化） |
-| `RepoMounts` | | 代码仓定位 Resolver（nil = 不装配 repo 族） |
-| `RepoPatchWriter` | | 补丁导出落盘（nil = 导出面报未配置） |
 | `Sandbox` | | run_command 沙箱策略（nil = 不沙箱） |
 | `SandboxProvider` | | 沙箱后端（nil = OSProvider 平台内建；容器形态注入 `&sandbox.DockerProvider{Image: …}`） |
 | `Egress` | | 网络出口校验器（nil = 不预检零变化） |
@@ -165,7 +165,7 @@ func (t *createOrder) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 
 ### 5. 子代理白名单
 
-`SubAgents.Tools` 只列读面与工作区探索/验证件；数据域写、repo 写、采集类进 `DenyTools`——子代理只读勘察，数据变更以建议清单回传、父用自有写工具代执行走既有审批。并发上限 `MaxConcurrent` 照看 LLM 端点压力（超限信号量排队不失败）。
+`SubAgents.Tools` 只列读面与工作区探索/验证件；数据域写、挂载/采集类业务件进 `DenyTools`——子代理只读探查，数据变更以建议清单回传、父用自有写工具代执行走既有审批。并发上限 `MaxConcurrent` 照看 LLM 端点压力（超限信号量排队不失败）。
 
 ### 6. 渠道接入（消息渠道三层）
 
