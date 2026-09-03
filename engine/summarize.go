@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"path"
 	"strings"
 
@@ -267,7 +268,11 @@ func writeTranscript(st session.Store, owner, sid string, msgs []*schema.Message
 		}
 		b.WriteString(msgTextOf(m) + "\n\n")
 	}
-	_ = st.WriteUserTreeFile(owner, path.Join("sessions", sid, "spill", "transcript.txt"), []byte(b.String()))
+	// 落盘失败记日志：通知卡已向模型承诺「transcript.txt 可 read_file 溯源」——
+	// 静默吞错会让指路落空且无从排障。
+	if err := st.WriteUserTreeFile(owner, path.Join("sessions", sid, "spill", "transcript.txt"), []byte(b.String())); err != nil {
+		log.Printf("summarize: transcript 落盘失败（%s/%s）：%v", owner, sid, err)
+	}
 }
 
 // tailFromLastUser 自最后一条 user 起的尾段（无 user 退化保末两条）。

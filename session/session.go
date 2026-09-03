@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -57,12 +58,12 @@ type Session struct {
 	mu        sync.Mutex
 	SID       string             `json:"sid"`
 	Owner     string             `json:"owner"`
-	Scope     string             `json:"scope"` // 关联 scope 展示（默认需求池；M4 采集场景细化）
 	Task      string             `json:"task"`  // 会话列表任务摘要（首条用户消息截断）
 	State     string             `json:"state"`
 	Mode      string             `json:"mode"`
 	Title     string             `json:"title"` // LLM 总结标题（首轮收尾异步生成；空 = 回退 Task 截断）
 	Model     contract.UserPrefs `json:"model"` // {model 复合键, effort} 快照（会话粘住）
+	lastUsedModel string         // 上次实际参与模型调用的模型复合键（NoteModelCall 维护，不导出）
 	StartedAt time.Time          `json:"started_at"`
 	UpdatedAt time.Time          `json:"updated_at"`
 	Events    []Event            `json:"events"`
@@ -235,6 +236,33 @@ func (s *Session) PendingAppID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.curAppID
+}
+
+// ClearPendingIf 条件原子清挂起（超时路径专用）：锁内校验「仍挂起该 appID 且
+// 无决议到达」才清并返回项清单——闭合守卫检查与清挂起之间的 TOCTOU（用户
+// approve 与超时并发时抢到锁者赢，另一方让位）。项清单随清返回（清域后不可
+// 再取——合并卡逐项落拒用）。askDecision 归提问路径（kind=ask 超时同样经此）。
+func (s *Session) ClearPendingIf(appID string) ([]string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.curAppID == "" || s.curAppID != appID || s.askDecision != nil || len(s.decisions) > 0 {
+		return nil, false
+	}
+	items := append([]string(nil), s.pendingItems...)
+	s.curAppID = ""
+	s.pendingKind = ""
+	s.pendingDue = time.Time{}
+	s.pendingItems = nil
+	s.UpdatedAt = time.Now()
+	return items, true
+}
+
+// ModelSnapshot 模型复合键持锁快照（PUT settings 类随时写路径与引擎读并发，
+// 裸读 s.Model.Model 构成 data race）。
+func (s *Session) ModelSnapshot() contract.UserPrefs {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Model
 }
 
 // SetPendingDue 挂起计时元数据登记（startApprovalTimer 挂表时同步调用——
@@ -482,13 +510,12 @@ func (s *Session) BeginResume() bool {
 
 // SetRunModel 会话内切换模型/effort（BeginRun 抢占成功后由 API 层调用——
 // 运行边界生效：当前执行体不被打断，新值从本轮起用；空值保持现值。
-// 换模型不作废任务期授权——授权跟任务不跟模型）。模型实际变更时落
-// model_change 注记事件（UI-B5：前端居中分隔条；effort 变更不发）。
+// 换模型不作废任务期授权——授权跟任务不跟模型）。切换只记录不落事件——
+// 切换标志注记在调用边界（NoteModelCall：本次调用与上次实际调用比对，
+// 2026-09-03 用户定调——选择器切换与显示标志是两回事）。
 func (s *Session) SetRunModel(model, effort string) {
 	s.mu.Lock()
-	var from string
 	if model != "" && model != s.Model.Model {
-		from = s.Model.Model
 		s.Model.Model = model
 	}
 	if effort != "" && effort != s.Model.Effort {
@@ -496,8 +523,18 @@ func (s *Session) SetRunModel(model, effort string) {
 	}
 	s.UpdatedAt = time.Now()
 	s.mu.Unlock()
-	if from != "" { // Record 自取锁（不可重入，锁外发）
-		s.Record(contract.EvModelChange, contract.ModelChange{From: from, To: model})
+}
+
+// NoteModelCall 模型调用边界登记（engine.assemble 每次模型调用前调）：本次
+// 将用模型与上次实际调用不同 → 落 model_change 注记（UI 切换标志）。首调/
+// 跨重启无前序只登记不落。lastUsedModel 随记录持久化（跨重启比对不断）。
+func (s *Session) NoteModelCall(model string) {
+	s.mu.Lock()
+	last := s.lastUsedModel
+	s.lastUsedModel = model
+	s.mu.Unlock()
+	if last != "" && last != model {
+		s.Record(contract.EvModelChange, contract.ModelChange{From: last, To: model})
 	}
 }
 
@@ -842,7 +879,7 @@ func newSID() string {
 // 会话只在有人用时累积，新建时机天然自限；全量扫盘轻量）。
 func (r *Registry) Create(owner, task, mode string, model contract.UserPrefs) *Session {
 	s := &Session{
-		SID: newSID(), Owner: owner, Scope: "需求池", Task: truncateRunes(task, 16),
+		SID: newSID(), Owner: owner, Task: truncateRunes(task, 16),
 		State: StateEnded, Mode: mode, Model: model,
 		StartedAt: time.Now(), UpdatedAt: time.Now(), stoppedCh: make(chan struct{}),
 	}
@@ -1011,12 +1048,12 @@ func sessionEnded(st Store, owner, sid string) bool {
 type sessionRecord struct {
 	SID          string                `json:"sid"`
 	Owner        string                `json:"owner"`
-	Scope        string                `json:"scope"`
 	Task         string                `json:"task"`
 	Title        string                `json:"title"`
 	State        string                `json:"state"`
 	Mode         string                `json:"mode"`
 	Model        contract.UserPrefs    `json:"model"`
+	LastUsedModel string               `json:"last_used_model,omitempty"`
 	StartedAt    time.Time             `json:"started_at"`
 	UpdatedAt    time.Time             `json:"updated_at"`
 	Events       []Event               `json:"events"`
@@ -1073,8 +1110,9 @@ func historyForRecord(msgs []*schema.Message) []*schema.Message {
 // Fork 复用同一构造面）。
 func recordOf(s *Session) sessionRecord {
 	return sessionRecord{
-		SID: s.SID, Owner: s.Owner, Scope: s.Scope, Task: s.Task, Title: s.Title,
-		State: s.State, Mode: s.Mode, Model: s.Model, StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
+		SID: s.SID, Owner: s.Owner, Task: s.Task, Title: s.Title,
+		State: s.State, Mode: s.Mode, Model: s.Model, LastUsedModel: s.lastUsedModel,
+		StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
 		Events:       append([]Event(nil), s.Events...),
 		Summary:      s.summary,
 		FileChanges:  fileChangesCopy(s),
@@ -1108,7 +1146,10 @@ func (r *Registry) persist(s *Session) {
 	if err != nil {
 		return
 	}
-	_ = r.st.WriteUserTreeFile(s.Owner, path.Join("sessions", s.SID, "session.json"), data)
+	// 落盘失败不留静默黑洞（会话真源唯一持久化写——磁盘满/权限错时排障锚点）
+	if err := r.st.WriteUserTreeFile(s.Owner, path.Join("sessions", s.SID, "session.json"), data); err != nil {
+		log.Printf("session: 会话 %s 落盘失败：%v", s.SID, err)
+	}
 	// 删除竞态自愈：在途写（标题 goroutine）可能落在 Delete 的 RemoveUserTree
 	// 之后重建目录（stopped 即已删除——Stop 唯一调用方是 Registry.Delete），
 	// 写后复查已删即收回，窗口收口。
@@ -1226,11 +1267,12 @@ func (r *Registry) forkOf(rec *sessionRecord) *Session {
 		return nil
 	}
 	ns := &Session{
-		SID: newSID(), Owner: cp.Owner, Scope: cp.Scope, Task: cp.Task, Title: cp.Title,
+		SID: newSID(), Owner: cp.Owner, Task: cp.Task, Title: cp.Title,
 		State: StateEnded, Mode: cp.Mode, Model: cp.Model,
 		StartedAt: time.Now(), UpdatedAt: time.Now(),
 		Events:  append([]Event(nil), cp.Events...),
 		summary: cp.Summary, fileChanges: cp.FileChanges, stoppedCh: make(chan struct{}),
+		lastUsedModel: cp.LastUsedModel,
 	}
 	if n := len(ns.Events); n > 0 {
 		ns.seq = ns.Events[n-1].ID // 接续末位事件 ID——不接续则新事件撞号
@@ -1279,7 +1321,6 @@ func (r *Registry) copySpill(owner, srcSID, dstSID string) {
 // SessionListItem 列表条目（活动时间倒序；字段契约 = M3-2 桩 + 2026-08-23 增 updated_at）。
 type SessionListItem struct {
 	SID       string `json:"sid"`
-	Scope     string `json:"scope"`
 	Owner     string `json:"owner"`
 	State     string `json:"state"`
 	Title     string `json:"title"` // Title || Task（存量兼容回退）
@@ -1328,7 +1369,7 @@ func (r *Registry) listOwner(owner, ql string) []SessionListItem {
 		}
 		ts := activityTs(s.UpdatedAt, s.StartedAt)
 		out = append(out, entry{SessionListItem{
-			SID: s.SID, Scope: s.Scope, Owner: s.Owner, State: s.State,
+			SID: s.SID, Owner: s.Owner, State: s.State,
 			Title:     titleOrTaskLocked(s),
 			StartedAt: s.StartedAt.UTC().Format(time.RFC3339),
 			UpdatedAt: ts.UTC().Format(time.RFC3339), Summary: s.summary,
@@ -1361,7 +1402,7 @@ func (r *Registry) listOwner(owner, ql string) []SessionListItem {
 		}
 		ts := activityTs(rec.UpdatedAt, rec.StartedAt)
 		out = append(out, entry{SessionListItem{
-			SID: rec.SID, Scope: rec.Scope, Owner: rec.Owner, State: rec.State,
+			SID: rec.SID, Owner: rec.Owner, State: rec.State,
 			Title:     titleOrTaskStr(rec.Title, rec.Task),
 			StartedAt: rec.StartedAt.UTC().Format(time.RFC3339),
 			UpdatedAt: ts.UTC().Format(time.RFC3339), Summary: rec.Summary,
@@ -1380,7 +1421,6 @@ func (r *Registry) listOwner(owner, ql string) []SessionListItem {
 type SessionDetail struct {
 	SID       string             `json:"sid"`
 	Owner     string             `json:"owner"`
-	Scope     string             `json:"scope"`
 	State     string             `json:"state"`
 	Title     string             `json:"title"`
 	Mode      string             `json:"mode"`  // 会话当前档位（前端切回恢复 composer 显示）
@@ -1400,7 +1440,7 @@ func (r *Registry) Detail(sid string, since int) (SessionDetail, bool) {
 	if inMem {
 		s.mu.Lock()
 		d := SessionDetail{
-			SID: s.SID, Owner: s.Owner, Scope: s.Scope, State: s.State,
+			SID: s.SID, Owner: s.Owner, State: s.State,
 			Mode: s.Mode, Model: s.Model,
 			Title:     titleOrTaskLocked(s),
 			StartedAt: s.StartedAt.UTC().Format(time.RFC3339),
@@ -1456,11 +1496,12 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 		st = StateEnded // 无执行体残留不可续
 	}
 	s := &Session{
-		SID: rec.SID, Owner: rec.Owner, Scope: rec.Scope, Task: rec.Task, Title: rec.Title,
+		SID: rec.SID, Owner: rec.Owner, Task: rec.Task, Title: rec.Title,
 		State: st, Mode: rec.Mode, Model: rec.Model,
 		StartedAt: rec.StartedAt, UpdatedAt: rec.UpdatedAt,
 		Events:  append([]Event(nil), rec.Events...),
 		summary: rec.Summary, fileChanges: rec.FileChanges, stoppedCh: make(chan struct{}),
+		lastUsedModel: rec.LastUsedModel,
 	}
 	if st == StatePendingApproval {
 		s.curAppID, s.pendingKind, s.pendingDue = rec.PendingAppID, rec.PendingKind, rec.PendingDue
@@ -1509,7 +1550,7 @@ func (r *Registry) DetailDisk(owner, sid string, since int) (SessionDetail, bool
 	s.Model.Effort = llm.NormalizeEffort(s.Model.Effort) // 盘面直读回显同规则
 	ts := activityTs(s.UpdatedAt, s.StartedAt)
 	return SessionDetail{
-		SID: s.SID, Owner: s.Owner, Scope: s.Scope, State: s.State,
+		SID: s.SID, Owner: s.Owner, State: s.State,
 		Mode: s.Mode, Model: s.Model,
 		Title:     titleOrTaskStr(s.Title, s.Task),
 		StartedAt: s.StartedAt.UTC().Format(time.RFC3339),
@@ -1556,7 +1597,6 @@ func (s *Session) FileChangesSnapshot() []contract.FileChange {
 type diskItem struct {
 	SID       string    `json:"sid"`
 	Owner     string    `json:"owner"`
-	Scope     string    `json:"scope"`
 	Task      string    `json:"task"`
 	Title     string    `json:"title"`
 	State     string    `json:"state"`
@@ -1671,7 +1711,7 @@ func (r *Registry) listAll(ql string) []SessionListItem {
 		}
 		ts := activityTs(s.UpdatedAt, s.StartedAt)
 		out = append(out, entry{SessionListItem{
-			SID: s.SID, Scope: s.Scope, Owner: s.Owner, State: s.State,
+			SID: s.SID, Owner: s.Owner, State: s.State,
 			Title:     titleOrTaskLocked(s),
 			StartedAt: s.StartedAt.UTC().Format(time.RFC3339),
 			UpdatedAt: ts.UTC().Format(time.RFC3339), Summary: s.summary,
@@ -1703,7 +1743,7 @@ func (r *Registry) listAll(ql string) []SessionListItem {
 			}
 			ts := activityTs(rec.UpdatedAt, rec.StartedAt)
 			out = append(out, entry{SessionListItem{
-				SID: rec.SID, Scope: rec.Scope, Owner: rec.Owner, State: rec.State,
+				SID: rec.SID, Owner: rec.Owner, State: rec.State,
 				Title:     titleOrTaskStr(rec.Title, rec.Task),
 				StartedAt: rec.StartedAt.UTC().Format(time.RFC3339),
 				UpdatedAt: ts.UTC().Format(time.RFC3339), Summary: rec.Summary,

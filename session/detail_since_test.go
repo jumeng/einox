@@ -6,6 +6,7 @@ package session
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/internal/tstore"
@@ -35,8 +36,10 @@ func TestDetailSince(t *testing.T) {
 func TestDetailDiskSince(t *testing.T) {
 	st := tstore.New(t.TempDir())
 	reg := NewRegistry(st)
+	// 时间戳取当前时刻（同 search_test：防 7 天 TTL 过期清理误伤 fixture）
+	now := time.Now().UTC().Format(time.RFC3339)
 	doc := `{"sid":"d9","owner":"张三","task":"t","title":"T","state":"ended",` +
-		`"started_at":"2026-08-26T01:00:00Z","updated_at":"2026-08-26T02:00:00Z",` +
+		`"started_at":"` + now + `","updated_at":"` + now + `",` +
 		`"events":[{"id":1,"event":"user_message","data":{"text":"a"}},` +
 		`{"id":2,"event":"text_delta","data":{"delta":"b"}},` +
 		`{"id":3,"event":"text_delta","data":{"delta":"c"}}]}`

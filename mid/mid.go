@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jumeng/einox/contract"
@@ -43,23 +44,28 @@ func (w *errFeedTool) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 var ToolDeadline = 10 * time.Minute
 
 // Guard 防死循环包装：同参连续第 3 次起在结果前注入提醒；执行超时强制截止。
-// 计数器随组装实例存续（轮内有效——死循环场景即轮内）。
+// 计数器随组装实例存续（轮内有效——死循环场景即轮内）；有状态故持锁——
+// eino ToolsNode 并发执行同批多个 tool_call 时同一实例被并发 Invoke。
 func Guard(t contract.Tool) contract.Tool { return &guardTool{t: t} }
 
 type guardTool struct {
 	t        contract.Tool
 	lastArgs string
 	n        int
+	mu       sync.Mutex
 }
 
 func (g *guardTool) Info() *contract.ToolInfo { return g.t.Info() }
 
 func (g *guardTool) Invoke(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	g.mu.Lock()
 	if string(args) == g.lastArgs {
 		g.n++
 	} else {
 		g.lastArgs, g.n = string(args), 1
 	}
+	n := g.n
+	g.mu.Unlock()
 	gctx, cancel := context.WithTimeout(ctx, ToolDeadline)
 	defer cancel()
 	out, err := g.t.Invoke(gctx, args)
@@ -69,8 +75,8 @@ func (g *guardTool) Invoke(ctx context.Context, args json.RawMessage) (json.RawM
 		}
 		return nil, err
 	}
-	if g.n >= 3 {
-		out = json.RawMessage(fmt.Sprintf("⚠ 本工具已连续第 %d 次以相同参数调用——若前次结果已够用勿再重复；若一直失败请换思路（改参数/换工具/ask_user 问用户）。\n%s", g.n, out))
+	if n >= 3 {
+		out = json.RawMessage(fmt.Sprintf("⚠ 本工具已连续第 %d 次以相同参数调用——若前次结果已够用勿再重复；若一直失败请换思路（改参数/换工具/ask_user 问用户）。\n%s", n, out))
 	}
 	return out, nil
 }

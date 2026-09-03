@@ -579,6 +579,9 @@ func msgTextOf(m *schema.Message) string {
 // ④ 孤儿 tool 消息剔除：tool 消息前无带对应 tool_call 的 assistant——回传
 // 即 400。
 func sanitizeHistory(msgs []*schema.Message) []*schema.Message {
+	// 深拷贝改写：源切片与 persist 的持锁 marshal 共享同批 *Message（CloneHistory
+	// 浅拷贝），锁外原地改写 ToolCalls/Arguments 构成竞态——在副本上改写零共享。
+	msgs = cloneMsgs(msgs)
 	for _, m := range msgs {
 		for i := range m.ToolCalls {
 			if m.ToolCalls[i].Function.Arguments == "" {
@@ -636,6 +639,20 @@ func sanitizeHistory(msgs []*schema.Message) []*schema.Message {
 		kept = append(kept, m)
 	}
 	return kept
+}
+
+// cloneMsgs 消息浅层组拷贝（消息值拷贝 + ToolCalls 切片拷贝——后续改写
+// ToolCalls 元素不触共享底数组；Content 等标量字段值语义天然隔离）。
+func cloneMsgs(msgs []*schema.Message) []*schema.Message {
+	out := make([]*schema.Message, len(msgs))
+	for i, m := range msgs {
+		cp := *m
+		if len(m.ToolCalls) > 0 {
+			cp.ToolCalls = append([]schema.ToolCall(nil), m.ToolCalls...)
+		}
+		out[i] = &cp
+	}
+	return out
 }
 
 // Run 执行一轮会话（同步阻塞至本轮结束/中断/错误；事件写出经 fn 回调）。
@@ -788,7 +805,11 @@ func (m *Manager) FlushQueue(s *session.Session) bool {
 // panic 由引擎兜底（此时终态已落盘，不该被应用钩子拖垮）；同步调用——重
 // 提取归应用异步。
 func (m *Manager) turnEpilogue(s *session.Session) {
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("engine: TurnEpilogue 钩子 panic（终态已落盘，不拖垮引擎）：%v", r)
+		}
+	}()
 	m.Opt.TurnEpilogue(TurnEndSummary{
 		Owner: s.Owner, SID: s.SID, Title: s.TitleOf(), Task: s.TaskOf(),
 		Summary: s.SummaryOf(), Files: s.FileChangesSnapshot(), EndedAt: time.Now(),
@@ -841,6 +862,13 @@ func (m *Manager) settleTurn(s *session.Session, acc *runAccum, endState string,
 		done := s.MarkTitleFlight() // 在途信号挂会话：Run 后写可 join（测试收尾/删除方等待锚点）
 		go func() {
 			defer done()
+			// 游离 goroutine 护栏（timers 同纪律）：genTitle 走应用注入的
+			// NewModel 与外网 Generate——panic 不拖垮进程，收敛为日志。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("engine: genTitle panic（标题回退 Task）：%v", r)
+				}
+			}()
 			m.genTitle(s, turnUser, accText(acc)) // 标题：异步总结，失败静默回退 Task
 		}()
 	}
@@ -888,15 +916,17 @@ func init() {
 
 // assemble 模型解析 + agent 组装 + runner 构造（Run/Resume 共用）。
 func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatModelAgent, *adk.Runner, map[string]string, error) {
+	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发——本轮组装口径统一）
 	providers := m.Opt.Providers()
 	if len(llm.FlattenModels(providers)) == 0 {
 		return nil, nil, nil, &configError{"未配置模型供应商——请先在模型页选择厂家并填 API Key 添加"}
 	}
-	p, spec, found := llm.FindSpec(providers, s.Model.Model)
+	p, spec, found := llm.FindSpec(providers, ms.Model)
 	if !found {
-		return nil, nil, nil, &configError{"模型不在可用清单内：" + s.Model.Model + "（模型页检查配置）"}
+		return nil, nil, nil, &configError{"模型不在可用清单内：" + ms.Model + "（模型页检查配置）"}
 	}
-	cm, err := m.Opt.NewModel(ctx, p, spec, s.Model.Effort)
+	s.NoteModelCall(ms.Model) // 调用边界比对：与上次实际调用不同才落切换注记（选择器切换不落）
+	cm, err := m.Opt.NewModel(ctx, p, spec, ms.Effort)
 	if err != nil {
 		return nil, nil, nil, &configError{"模型构造失败：" + err.Error()}
 	}
@@ -929,7 +959,7 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		ts = append(ts, rt)
 	}
 	if spec.NoToolCalls && (len(ts) > 0 || m.Opt.SubAgents != nil) { // A4 能力门控（组装期 fail fast）
-		return nil, nil, nil, &configError{"模型 " + s.Model.Model + " 不支持函数调用（NoToolCalls 置位），不能装配工具面（含会话域件/spawn）"}
+		return nil, nil, nil, &configError{"模型 " + ms.Model + " 不支持函数调用（NoToolCalls 置位），不能装配工具面（含会话域件/spawn）"}
 	}
 	behaviors := make(map[string]string, len(ts)) // UI-B2：行为标记快照（tool_call 事件携带——前端分组数据源；值由工具自declare，引擎不判别）
 	for _, t := range ts {
@@ -1080,7 +1110,8 @@ func (m *Manager) imageCapableOf(s *session.Session) bool {
 // briefOf 会话 → Instruction 入参概要（每轮 assemble/estimate 实时取——
 // 会话内切换模型/effort 后下一轮提示即更新，永不陈旧）。
 func (m *Manager) briefOf(s *session.Session) SessionBrief {
-	return SessionBrief{Mode: s.ModePublic(), Model: s.Model.Model, Effort: s.Model.Effort,
+	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发）
+	return SessionBrief{Mode: s.ModePublic(), Model: ms.Model, Effort: ms.Effort,
 		Owner: s.Owner, SID: s.SID}
 }
 
@@ -1482,7 +1513,7 @@ func (m *Manager) genTitle(s *session.Session, userMsg, assistant string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	providers := m.Opt.Providers()
-	p, spec, ok := llm.FindSpec(providers, s.Model.Model)
+	p, spec, ok := llm.FindSpec(providers, s.ModelSnapshot().Model) // 持锁快照（PUT settings 随时写并发）
 	if !ok {
 		return
 	}

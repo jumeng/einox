@@ -374,9 +374,7 @@ func inferContextWindow(id string) int {
 		return 128_000
 	case hit("o3", "o4"):
 		return 200_000
-	case hit("qwen"):
-		return 131_072
-	case hit("glm", "kimi", "moonshot"):
+	case hit("glm"): // 智谱内置预置同源（缺省 GLM 线 128K；具体值以预置 Limit 为准）
 		return 128_000
 	}
 	return 0

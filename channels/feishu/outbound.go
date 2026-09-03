@@ -319,8 +319,12 @@ func (h *cardHub) settlePend(b engine.ChannelBrief, _ session.Event, note string
 	}
 }
 
-// sendStandalone 独立通知卡（channel_push 等）。
+// sendStandalone 独立通知卡（channel_push 等）。cli 未接（Start 前回调 /
+// 构造失败路径）静默跳过——nil 接口调用会 panic 且发生在 SDK 事件 goroutine。
 func (h *cardHub) sendStandalone(b engine.ChannelBrief, text string) {
+	if h.cli == nil {
+		return
+	}
 	_, _ = h.cli.SendCard(h.ctx, b.Chat, simpleCard(text))
 }
 

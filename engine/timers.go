@@ -93,14 +93,16 @@ func (m *Manager) startApprovalTimer(s *session.Session, appID string, timeoutAt
 // 成超时拒绝、把 BeginRun 的 running 改写回 ended。部分到达（批量决议逐项
 // 写入的非原子窗口）同样让位——未决项由 Resume 重放 fail-closed 兜底。
 func (m *Manager) expirePending(s *session.Session, appID, kind string) {
-	if s.Stopped() || s.PendingAppID() != appID || s.HasPendingDecision() {
-		return // 已决议/已删除/决议已到达（Resume 将消费）
+	if s.Stopped() {
+		return // 已删除
 	}
-	// 项清单先取：SetPendingApproval("") 会一并清空 pendingItems——先清后取
-	// 令合并卡逐项落拒从未生效（实落 "" 槽，重放各工具按 item_id 领不到决议，
-	// 走的是「无决议到达」文案的 fail-closed——语义偏差，实测暴露）。
-	items := s.PendingItems()
-	s.SetPendingApproval("")
+	// 条件原子清挂起：锁内校验「仍挂起该 appID 且无决议」才清（项清单随清
+	// 返回）——闭合「守卫检查→清挂起」两步间的 TOCTOU（用户 approve 与超时
+	// 并发时抢到锁者赢，另一方让位；fail-closed 兜底语义不变）。
+	items, ok := s.ClearPendingIf(appID)
+	if !ok {
+		return // 已决议/决议已到达（Resume 将消费）
+	}
 	if kind == "ask" {
 		// 提问超时：不作答即分支取消（Resume 时 Decision 为 nil → fail-closed）
 		s.Record(contract.EvAskTimeout, map[string]string{"ask_id": appID, "reason": "提问超时未作答"})

@@ -10,6 +10,7 @@ package plan
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -112,10 +113,14 @@ func resume(cfg Config, saved planState) (map[string]any, error) {
 		if reason == "" {
 			reason = "用户未提供原因"
 		}
-		_ = cfg.Writer(saved.Info.Path, docOf(cfg, saved.Info, "rejected（"+reason+"）"))
+		if err := cfg.Writer(saved.Info.Path, docOf(cfg, saved.Info, "rejected（"+reason+"）")); err != nil {
+			log.Printf("plan: 决议回写失败（%s rejected）：%v", saved.Info.Path, err)
+		}
 		return fail("计划被拒：" + reason + "——请按用户反馈修订后重新 submit_plan（新序号留痕，旧稿不动）")
 	}
-	_ = cfg.Writer(saved.Info.Path, docOf(cfg, saved.Info, "approved"))
+	if err := cfg.Writer(saved.Info.Path, docOf(cfg, saved.Info, "approved")); err != nil {
+		log.Printf("plan: 决议回写失败（%s approved）：%v", saved.Info.Path, err)
+	}
 	if saved.Info.Mode == contract.ModePlan {
 		cfg.S.GrantTask() // 批准计划 = 授权任务期全部写（只审这一次）
 		return map[string]any{

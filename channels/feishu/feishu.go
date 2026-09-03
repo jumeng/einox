@@ -70,6 +70,7 @@ func (b *Bot) Start(m *engine.Manager) error {
 		return err
 	}
 	b.cli = cli
+	b.cards.cli = cli // 出站卡链路（Deliver/sendStandalone 都走 cardHub；漏接=全链静默丢弃）
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	b.wg.Add(1)

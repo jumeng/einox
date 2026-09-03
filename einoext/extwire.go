@@ -316,15 +316,18 @@ func newMCPTools(ctx context.Context, url string) []tool.BaseTool {
 }
 
 // mcpHandshake 初始化握手 + 拉取工具 + mcp_ 前缀改名（SSE/stdio 共用）。
+// 失败路径关连接——stdio 形态下客户端挂着子进程，泄漏即进程永久滞留。
 func mcpHandshake(ctx context.Context, cli *client.Client) []tool.BaseTool {
 	req := mcp.InitializeRequest{}
 	req.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	req.Params.ClientInfo = mcp.Implementation{Name: "einox", Version: "0.1"}
 	if _, err := cli.Initialize(ctx, req); err != nil {
+		_ = cli.Close()
 		return nil
 	}
 	ts, err := mcpclient.GetTools(ctx, &mcpclient.Config{Cli: cli})
 	if err != nil {
+		_ = cli.Close()
 		return nil
 	}
 	out := make([]tool.BaseTool, 0, len(ts))

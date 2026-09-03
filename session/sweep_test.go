@@ -8,17 +8,20 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/internal/tstore"
 )
 
 // mkDiskSession 造磁盘会话记录（state 供 SweepTmpWorkspaces 的 sessionEnded
-// 判定）。
+// 判定）。updated_at 相对 now 显式构造「已过期」（> 7 天 TTL）——写死日历
+// 日期会随时间漂移（写死值距今越远越脆弱；反向则悄悄失去过期语义）。
 func mkDiskSession(t *testing.T, st *tstore.Store, owner, sid, state string) {
 	t.Helper()
+	stale := time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	if err := st.WriteUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"),
-		[]byte(`{"state":"`+state+`","updated_at":"2026-08-24T00:00:00Z"}`)); err != nil {
+		[]byte(`{"state":"`+state+`","updated_at":"`+stale+`"}`)); err != nil {
 		t.Fatal(err)
 	}
 }

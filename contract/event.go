@@ -5,8 +5,9 @@ import "time"
 // 事件族（名称常量）：事件流是会话记录与前端渲染的真源——text_delta /
 // thinking_delta / tool_call / tool_result / approval_request /
 // approval_decision / approval_timeout / ask_user_request / ask_decision /
-// ask_timeout / ask_ignored / todo_update / steer_queued / steer_updated / steer_removed /
-// steer_injected / notify_queued / notify_injected / user_message / usage /
+// ask_timeout / ask_ignored / plan_request / plan_decision / plan_timeout /
+// todo_update / steer_queued / steer_updated / steer_removed / steer_injected /
+// steer_reordered / notify_queued / notify_injected / user_message / usage /
 // session_end / error / interrupted / harness_note / subagent / model_change /
 // transport_retry。
 // 传输无关：应用层订阅 Session 事件后映射到自己的管线（SSE 编码归应用）。
@@ -53,7 +54,9 @@ type Event struct {
 }
 
 // ModelChange 会话内模型切换注记（UI-B5：居中分隔条数据源——界面注记即数据，
-// 回放/live 一致；effort 变更不发）。ZCode 对位 = timeline part（model_change）。
+// 回放/live 一致）。语义（2026-09-03 定调）：选择器切换只记录不落事件；下一次
+// 模型调用时本次与上次实际调用不同才落（effort 变更不发）。ZCode 对位 =
+// timeline part（model_change）。
 type ModelChange struct {
 	From string `json:"from"`
 	To   string `json:"to"`

@@ -34,7 +34,7 @@ func TestMergeBuiltinSemantics(t *testing.T) {
 		{ // 未命中：原样透传
 			ID: "vllm", Kind: "openai", BaseURL: "http://10.0.0.2:8000/v1",
 			APIKey: "k", Enabled: true,
-			Models: []ModelSpec{{ID: "qwen3", Input: []string{"text"}}},
+			Models: []ModelSpec{{ID: "acme-7b", Input: []string{"text"}}},
 		},
 		{ // 命中内置：智谱极简引用——参数全靠内置补全（glm 方言 + 多模态标记）
 			ID: "zhipu", APIKey: "zp-x", Enabled: true,
@@ -71,7 +71,7 @@ func TestMergeBuiltinSemantics(t *testing.T) {
 	}
 
 	v := got[2]
-	if v.BaseURL != "http://10.0.0.2:8000/v1" || len(v.Models) != 1 || v.Models[0].ID != "qwen3" {
+	if v.BaseURL != "http://10.0.0.2:8000/v1" || len(v.Models) != 1 || v.Models[0].ID != "acme-7b" {
 		t.Fatalf("未命中条目应原样：%+v", v)
 	}
 
@@ -189,7 +189,7 @@ func TestMergeProvidersExtra(t *testing.T) {
 		{"id":"deepseek","api_key":"sk-x","enabled":true},
 		{"id":"extra","api_key":"k","enabled":true},
 		{"id":"vllm","kind":"openai","base_url":"http://10.0.0.2:8000/v1","api_key":"k2","enabled":true,
-		 "models":[{"id":"qwen3","input":["text"]}]}]}`)}
+		 "models":[{"id":"acme-7b","input":["text"]}]}]}`)}
 	ps3 := ResolveFileMergedWith(st3, extraPreset())
 	if len(ps3) != 3 || ps3[0].Dialect != "deepseek" || ps3[1].BaseURL != "https://gw.internal/v1" ||
 		ps3[2].BaseURL != "http://10.0.0.2:8000/v1" {

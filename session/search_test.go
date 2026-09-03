@@ -7,16 +7,20 @@ package session
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/internal/tstore"
 )
 
 // mkSearchDisk 盘上会话（title/task + events 数组——search 路径轻解析的输入）。
+// 时间戳取当前时刻：Sweeper 随 Registry.Create 触发 7 天 TTL 清理，写死日期
+// 的 fixture 会在 8 天后被当过期清光而炸（2026-09-03 服务器全量实证）。
 func mkSearchDisk(t *testing.T, st *tstore.Store, owner, sid, title, task, eventsJSON string) {
 	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
 	doc := `{"sid":"` + sid + `","owner":"` + owner + `","task":"` + task + `","title":"` + title +
-		`","state":"ended","started_at":"2026-08-26T01:00:00Z","updated_at":"2026-08-26T02:00:00Z",` +
+		`","state":"ended","started_at":"` + now + `","updated_at":"` + now + `",` +
 		`"events":[` + eventsJSON + `]}`
 	if err := st.WriteUserTreeFile(owner, filepath.Join("sessions", sid, "session.json"), []byte(doc)); err != nil {
 		t.Fatal(err)

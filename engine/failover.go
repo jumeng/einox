@@ -60,7 +60,7 @@ func (m *Manager) modelFailoverConfig(ctx context.Context, s *session.Session) *
 		return nil
 	}
 	keys := append([]string(nil), m.Opt.FallbackModels...)
-	last := s.Model.Model // 上次尝试的模型（From 基准；粘滞后可能是链上模型）
+	last := s.ModelSnapshot().Model // 上次尝试的模型（From 基准；持锁快照防 PUT settings 并发写）
 	maxR := uint(len(chain))
 	return &adk.ModelFailoverConfig[*schema.Message]{
 		MaxRetries: maxR,
