@@ -1,0 +1,2 @@
+# 行尾由 git 统一（对齐 einox-pm 仓规范）：全 LF，禁止手动改行尾
+* text=auto eol=lf
