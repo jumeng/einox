@@ -8,6 +8,7 @@ package webfetch
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,10 +24,12 @@ import (
 
 // Config 配置（零值可用——全部字段有缺省）。
 type Config struct {
-	Client    *http.Client      // 缺省自建：15s 超时、5 跳重定向、内网自签放行
+	Client    *http.Client      // 缺省自建：15s 超时、5 跳重定向、按 Insecure/RootCAs 定 TLS 姿态
 	MaxBytes  int64             // 响应体读取上限（缺省 2MB）
 	MaxOutput int               // markdown 输出上限 runes（缺省 30000，对齐 read_document）
 	UserAgent string            // 缺省 einox/0.1
+	Insecure  bool              // 跳过 TLS 证书校验（缺省 false=严格校验——行业缺省；内网自签场景显式开）
+	RootCAs   *x509.CertPool    // 追加信任根（企业自签 CA 正解：装根而非跳校验；nil=系统池）
 	Egress    *egress.Validator // 出口校验器（nil = 不治理——默认零行为变化，真源 §9；注入后：请求前置校验恒生效，受管 transport〔校验与拨号同源〕+ 重定向重校验**仅在 Client 为缺省自建时接管**——自定义 Client 时 transport/redirect 归注入方自担，前置校验之后的绕行面〔如重定向入私网〕不在治理内）
 }
 
@@ -70,8 +73,9 @@ func run(ctx context.Context, cfg Config, in fetchIn) (map[string]any, error) {
 	}
 	client := cfg.Client
 	if client == nil {
-		// 内网产品默认放行自签证书（内部 wiki 常态；公网部署可在 Client 注入收紧）
-		tlsConf := &tls.Config{InsecureSkipVerify: true}
+		// TLS 姿态（2026-09-03 定调：缺省严格校验——curl/requests 等行业缺省；
+		// 内网自签两条路：RootCAs 装企业根（正解）或 Insecure 显式跳过〔逃生〕）
+		tlsConf := &tls.Config{InsecureSkipVerify: cfg.Insecure, RootCAs: cfg.RootCAs}
 		client = &http.Client{Timeout: 15 * time.Second}
 		if cfg.Egress != nil {
 			client.Transport = cfg.Egress.Transport(tlsConf)
