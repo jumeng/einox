@@ -224,7 +224,7 @@ func (m *Manager) acquireBG(ctx context.Context, s *session.Session, reg *bgRegi
 		select {
 		case reg.bgGate <- struct{}{}:
 		case <-ctx.Done():
-			m.finishSpawnBG(s, id, task, "", errors.New("后台子代理已停止（等待并发额度时取消）"), false)
+			m.finishSpawnBG(s, id, task, "", "", fmt.Errorf("后台子代理已停止（等待并发额度时取消）：%w", context.Canceled), false)
 			return false
 		}
 	}
@@ -235,7 +235,7 @@ func (m *Manager) acquireBG(ctx context.Context, s *session.Session, reg *bgRegi
 			if reg.bgGate != nil {
 				<-reg.bgGate
 			}
-			m.finishSpawnBG(s, id, task, "", errors.New("后台子代理已停止（等待并发额度时取消）"), false)
+			m.finishSpawnBG(s, id, task, "", "", fmt.Errorf("后台子代理已停止（等待并发额度时取消）：%w", context.Canceled), false)
 			return false
 		}
 	}
@@ -250,7 +250,7 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 	// 额度（取消≠释放，收尾完成才释放——dsh stopping 语义）。
 	defer func() {
 		if r := recover(); r != nil {
-			m.finishSpawnBG(s, id, task, "", fmt.Errorf("后台子代理 panic：%v", r), true)
+			m.finishSpawnBG(s, id, task, "", "", fmt.Errorf("后台子代理 panic：%v", r), true)
 		}
 		reg.remove(id)
 		if reg.sem != nil {
@@ -263,7 +263,7 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 
 	sub, err := buildSub(ctx, "bg")
 	if err != nil {
-		m.finishSpawnBG(s, id, task, "", fmt.Errorf("后台子代理构造失败：%w", err), true)
+		m.finishSpawnBG(s, id, task, "", "", fmt.Errorf("后台子代理构造失败：%w", err), true)
 		return
 	}
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: sub, EnableStreaming: true})
@@ -286,15 +286,18 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 				// 停止=全停的取消（会话活着）：发 failed 终态封口前端卡与
 				// watch 保活，但**不通知注入**——用户刚按停止，再唤醒=把中断
 				// 洗成模型请求（自审 A3）
-				m.finishSpawnBG(s, id, task, "", errors.New("后台子代理已停止（会话停止/删除）"), false)
+				m.finishSpawnBG(s, id, task, "", "", fmt.Errorf("后台子代理已停止（会话停止/删除）：%w", context.Canceled), false)
 				return
 			}
-			m.finishSpawnBG(s, id, task, "", fmt.Errorf("后台子代理执行失败：%s", truncateRunes(llm.Classify(unwrapRetryExhausted(ev.Err)).Message, 200)), true)
+			// 原始错误 %w 保留身份（StopReason 映射依据：取消→aborted、轮次
+			// 耗尽→max_tokens）；分类文案前置给父模型可读。
+			m.finishSpawnBG(s, id, task, "", lastText, fmt.Errorf("后台子代理执行失败（%s）：%w",
+				truncateRunes(llm.Classify(unwrapRetryExhausted(ev.Err)).Message, 120), unwrapRetryExhausted(ev.Err)), true)
 			return
 		}
 		if ev.Action != nil && ev.Action.Interrupted != nil {
 			// 防御路径（正常白名单下无审批/提问面）：后台无人决议——failed 收尾
-			m.finishSpawnBG(s, id, task, "", errors.New("子代理请求人工交互（审批/提问），后台不可用——请调整白名单或改用同步 spawn"), true)
+			m.finishSpawnBG(s, id, task, "", lastText, errors.New("子代理请求人工交互（审批/提问），后台不可用——请调整白名单或改用同步 spawn"), true)
 			return
 		}
 		if ev.Output != nil && ev.Output.MessageOutput != nil {
@@ -310,7 +313,7 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 	if s.Stopped() {
 		return
 	}
-	m.finishSpawnBG(s, id, task, lastText, nil, true)
+	m.finishSpawnBG(s, id, task, lastText, "", nil, true)
 }
 
 // recordLastText 末段 assistant 文本累积（覆盖式——多轮工具循环的中间段
@@ -366,17 +369,24 @@ func (m *Manager) offloadConclusion(s *session.Session, id, text string) string 
 	return string(r[:bgConclusionLimit]) + fmt.Sprintf("…\n（结论超长已外置——全文经 read_file spill/spawn/%s 取回）", id)
 }
 
-// finishSpawnBG 终态收尾：done/failed 事件（结论/errFeed 信封）+ 通知注入
+// finishSpawnBG 终态收尾：done/failed 事件（结论/errFeed 信封 + 终态细分
+// StopReason/Partial——dsh stopReason 形态对齐，Kind 词表不动）+ 通知注入
 // （notify=true 时；自激护栏内）。事件先行、通知最后（dsh
 // completion-announced-last 同款：通知可能同步开自续轮，其余观察者须已见
 // 终态）。notify=false 用于用户主动停止的取消（终态封口但不打扰）。
-func (m *Manager) finishSpawnBG(s *session.Session, id, task, conclusion string, failure error, notify bool) {
+// partial = 终止前最后一段 assistant 输出（失败信封附带——父模型拿到
+// 半成品可判断补做还是放弃；同步路径暂缺见 spawnFailFeed 注）。
+func (m *Manager) finishSpawnBG(s *session.Session, id, task, conclusion, partial string, failure error, notify bool) {
 	if s.Stopped() {
 		return // 已删除：磁盘零残留
 	}
 	text := conclusion
 	if failure != nil {
-		b, _ := json.Marshal(map[string]any{"ok": false, "error": failure.Error()})
+		env := map[string]any{"ok": false, "error": failure.Error()}
+		if partial != "" {
+			env["partial"] = "终止前最后一段输出：\n" + partial
+		}
+		b, _ := json.Marshal(env)
 		text = string(b)
 	}
 	kind := "done"
@@ -386,13 +396,31 @@ func (m *Manager) finishSpawnBG(s *session.Session, id, task, conclusion string,
 	flow := m.offloadConclusion(s, id, text) // 一次外置，事件与通知共用（指引一致）
 	m.emit(s, noopEmit, contract.EvSubAgent, contract.SubAgentEvent{
 		SpawnID: id, Agent: spawnToolName, Kind: kind,
-		Text: flow,
+		Text:       flow,
+		StopReason: spawnStopReason(failure),
+		Partial:    partial,
 	})
 
 	if !notify || s.Stopped() { // 终态事件后删除竞态：注入无意义
 		return
 	}
 	m.NotifyOwner(s, notifyText(id, task, flow, failure == nil))
+}
+
+// spawnStopReason 终态细分映射（dsh stopReason 形态：completed | aborted |
+// error | max_tokens；refusal 无对应面——内容策略拒绝在组件层已是文本）。
+// 「已停止」类取消路径经 %w context.Canceled 包装——文案与归类兼得。
+func spawnStopReason(failure error) string {
+	if failure == nil {
+		return "completed"
+	}
+	if errors.Is(failure, context.Canceled) {
+		return "aborted"
+	}
+	if errors.Is(failure, adk.ErrExceedMaxIterations) {
+		return "max_tokens"
+	}
+	return "error"
 }
 
 // notifyText 通知文本（提示词配套教学格式）：完成=结论（已外置/截断形态，

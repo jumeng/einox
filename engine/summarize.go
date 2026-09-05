@@ -93,6 +93,9 @@ func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Ses
 			last.Content += transcriptNoteOf(s)
 			out[n-1] = &last
 		}
+		if gerr := convergenceGate(orig, out); gerr != nil {
+			return nil, gerr // 病态摘要拒绝落地：走降级链（终点 = 清窗兜底）
+		}
 		return out, nil
 	}
 	one := 1
@@ -138,6 +141,21 @@ func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Ses
 func summarTokenCounter(_ context.Context, in *summarization.TokenCounterInput) (int, error) {
 	n, err := shapedTokenCounter(context.Background(), in.Messages, in.Tools)
 	return int(n), err
+}
+
+// convergenceGate 收敛不变量（dsh compaction region.ts:383-388 形态）：摘要
+// 落地前校验「压缩产物 token < 被压缩原文 token」——越压越大的病态摘要拒绝
+// 落地。finalize 报错不进摘要 Retry/Failover（那两级只包生成），自然落进
+// clearWindowFallback 清窗兜底：transcript 落域 + 通知卡 + 尾段新窗续跑，
+// 最坏路径可观测可恢复。口径与触发/预算同源（shapedTokenCounter——同一
+// 计数器，不引入第二口径）。
+func convergenceGate(orig, out []*schema.Message) error {
+	o, _ := shapedTokenCounter(context.Background(), orig, nil)
+	n, _ := shapedTokenCounter(context.Background(), out, nil)
+	if o > 0 && n >= o {
+		return fmt.Errorf("摘要不收敛（产物 %d ≥ 原文 %d token），拒绝落地走清窗兜底", n, o)
+	}
+	return nil
 }
 
 // summarizerFailover H9-10 摘要降级链（adk Failover 白拿位）：主摘要失败

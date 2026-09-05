@@ -363,7 +363,13 @@ func (f *spawnFailFeed) InvokableRun(ctx context.Context, args string, opts ...t
 	if errors.As(err, &sig) {
 		return "", err // 中断原样穿透（审批/提问续流链路）
 	}
-	b, _ := json.Marshal(map[string]any{"ok": false, "error": "子代理执行失败：" + err.Error()})
+	// 终态细分随信封（stop_reason）；partial 暂缺——同步路径经 agent_tool
+	// 内部执行，子流不经过引擎面无从累积半成品（bg 档经泵 lastText 可供，
+	// 见 spawnbg.go finishSpawnBG——升级位：同步路径接内部事件转发累积）。
+	b, _ := json.Marshal(map[string]any{
+		"ok": false, "error": "子代理执行失败：" + err.Error(),
+		"stop_reason": spawnStopReason(err),
+	})
 	return string(b), nil
 }
 

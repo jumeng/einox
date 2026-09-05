@@ -336,7 +336,7 @@ func TestBgCancelSpawns(t *testing.T) {
 	})
 	waitFor(t, "取消终态封口（A3：failed 事件）", func() bool {
 		for _, e := range subeventsOf(s) {
-			if e.SpawnID != "" && e.Kind == "failed" && strings.Contains(e.Text, "已停止") {
+			if e.SpawnID != "" && e.Kind == "failed" && strings.Contains(e.Text, "已停止") && e.StopReason == "aborted" {
 				return true
 			}
 		}

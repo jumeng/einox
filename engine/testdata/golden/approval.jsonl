@@ -1,0 +1,6 @@
+{"id":1,"event":"user_message","data":{"text":"写文件"}}
+{"id":2,"event":"tool_call","data":{"call_id":"cw","tool":"write_tool","args_digest":""}}
+{"id":3,"event":"approval_request","data":{"approval_id":"RID","tool":"write_tool","action":"write_tool","plan":[{"action":"write_tool","summary":"{}","count":1}],"timeout_at":"RID","items":[{"item_id":"RID","tool":"write_tool","action":"write_tool","plan":[{"action":"write_tool","summary":"{}","count":1}]}]}}
+{"id":4,"event":"tool_result","data":{"call_id":"cw","ok":true,"digest":"","preview":"{\"ok\":true}"}}
+{"id":5,"event":"text_delta","data":{"delta":"完成"}}
+{"id":6,"event":"session_end","data":{"summary":"完成","hist_len":4}}

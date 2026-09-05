@@ -8,11 +8,13 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
@@ -629,5 +631,27 @@ func TestSpawnDenyToolsValidation(t *testing.T) {
 	if _, err := m.newTopologySub(context.Background(), s,
 		SubAgentSpec{Tools: []string{"read_tool", "write_tool"}, DenyTools: []string{"write_tool"}}, ts); err == nil {
 		t.Fatal("拓扑装配链应同样装配期报错（白名单∩DenyTools）")
+	}
+}
+
+// TestSpawnStopReason 终态细分映射（dsh stopReason 形态）：取消链（含 %w
+// 包装——取消路径文案与归类兼得）→ aborted；轮次耗尽 → max_tokens；其余
+// 失败 → error。
+func TestSpawnStopReason(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{nil, "completed"},
+		{context.Canceled, "aborted"},
+		{fmt.Errorf("后台子代理已停止（会话停止/删除）：%w", context.Canceled), "aborted"},
+		{adk.ErrExceedMaxIterations, "max_tokens"},
+		{fmt.Errorf("后台子代理执行失败（x）：%w", adk.ErrExceedMaxIterations), "max_tokens"},
+		{errors.New("boom"), "error"},
+	}
+	for _, c := range cases {
+		if got := spawnStopReason(c.err); got != c.want {
+			t.Errorf("%v：got %s want %s", c.err, got, c.want)
+		}
 	}
 }

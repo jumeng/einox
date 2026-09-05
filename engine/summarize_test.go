@@ -438,3 +438,53 @@ func TestSummarizerFailoverExhausted(t *testing.T) {
 		t.Fatalf("链尽应触发清窗兜底通知卡，实得 %+v", note)
 	}
 }
+
+// TestConvergenceGate 收敛不变量单元（dsh region.ts:383-388 形态）：产物 <
+// 原文放行；≥ 原文拒绝——防「越压越大」的病态摘要落地进上下文。
+func TestConvergenceGate(t *testing.T) {
+	big := sumHist(6, 5000)
+	if err := convergenceGate(big, []*schema.Message{schema.UserMessage("短摘要")}); err != nil {
+		t.Fatalf("正常摘要不应拒绝：%v", err)
+	}
+	giant := sumHist(12, 10000)
+	if err := convergenceGate(big, giant); err == nil {
+		t.Fatal("产物 ≥ 原文应拒绝落地")
+	}
+}
+
+// TestSummarizeConvergenceRejectsGiantSummary 病态摘要（产物 > 原文）→
+// finalize 拒绝落地 → 清窗兜底：主模型输入 = 尾段新窗、运行正常收口无 error
+// 终态；摘要模型恰一次调用（finalize 错误不进生成侧 Retry/Failover——区别
+// 于生成失败路径的重试计数）。
+func TestSummarizeConvergenceRejectsGiantSummary(t *testing.T) {
+	parent := &scriptedModel{}
+	sub := &recGenModel{reply: strings.Repeat("膨胀 ", 60000)} // 巨型摘要
+	n := 0
+	m, _ := newReductionManager(t, 20000, nil, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n == 2 { // 构造序：主模型(1) → 摘要模型(2)
+			return sub, nil
+		}
+		return parent, nil
+	})
+	s := m.Registry().Create("张三", "膨胀", "plan", contract.UserPrefs{Model: "p/m"})
+	s.AppendHistory(sumHist(6, 15000)...)
+	s.SetState(session.StateRunning)
+	m.Run(context.Background(), s, "继续", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+
+	if len(sub.inputs) != 1 {
+		t.Fatalf("摘要模型应恰一次调用（finalize 错误不重试），实得 %d", len(sub.inputs))
+	}
+	if len(parent.inputs) != 1 {
+		t.Fatalf("主模型应恰一次调用（清窗后续跑），实得 %d", len(parent.inputs))
+	}
+	var joined strings.Builder
+	for _, m2 := range parent.inputs[0] {
+		joined.WriteString(msgTextOf(m2))
+	}
+	all := joined.String()
+	if strings.Contains(all, "R1BIG") || strings.Contains(all, "膨胀") {
+		t.Fatalf("主模型输入应为清窗尾段（旧轮与病态摘要均不可见）")
+	}
+}

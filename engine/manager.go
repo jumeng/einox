@@ -1199,9 +1199,11 @@ func errCard(err error) contract.ErrorOut {
 }
 
 // pump 事件泵：迭代 runner 事件 → 契约事件分类（Run/Resume 共用）。
-// 返回 (本轮累积, 终态)：StatePendingApproval = 审批挂起（调用方不收尾）；
-// endState 空 = 静默收线（停止/断连）。est = 上下文分类估算（usage 事件用）。
-func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEvent], fn emitFn, est ctxEstimates, behaviors map[string]string) (*runAccum, string) {
+// 返回 (本轮累积, 终态, 终态模型错误)：StatePendingApproval = 审批挂起
+// （调用方不收尾）；endState 空 = 静默收线（停止/断连）。est = 上下文分类
+// 估算（usage 事件用）。第三返回值非空 ⟺ OVERFLOW 类终态错误且未发卡
+// （其余终态错误就地发卡后归零——超窗裁决权在上层 pumpWithOverflow）。
+func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEvent], fn emitFn, est ctxEstimates, behaviors map[string]string) (*runAccum, string, error) {
 	acc := &runAccum{}
 	endState := session.StateEnded
 	subCalls := map[string]string{} // 子代理 callID → 工具名（EvSubAgent tool_result 契约语义=工具名，配对回填）
@@ -1212,11 +1214,11 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 		}
 		if ev.Err != nil {
 			if s.Stopped() {
-				return nil, "" // 删除：静默（磁盘零残留）
+				return nil, "", nil // 删除：静默（磁盘零残留）
 			}
 			if errors.Is(ev.Err, context.Canceled) {
 				m.interruptUnlessStopped(s, fn) // 断连/停止：中断收尾
-				return nil, ""
+				return nil, "", nil
 			}
 			var wr *adk.WillRetryError
 			if errors.As(ev.Err, &wr) {
@@ -1233,6 +1235,11 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 					maxIterations)})
 				endState = session.StateError
 				break
+			}
+			// 超窗：不在泵面发卡——交 pumpWithOverflow 裁剪重装配裁决
+			//（rerr 非空 ⟺ 超窗未发卡；其余终态错误就地发卡后归零）
+			if llm.Classify(unwrapRetryExhausted(ev.Err)).Code == llm.CodeOverflow {
+				return acc, session.StateError, ev.Err
 			}
 			m.emit(s, fn, contract.EvError, errCard(ev.Err))
 			endState = session.StateError
@@ -1257,7 +1264,7 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 				}
 				m.startApprovalTimer(s, askID, timeoutAt, "ask")
 				m.finishOf(s)(session.StatePendingApproval)
-				return acc, session.StatePendingApproval
+				return acc, session.StatePendingApproval, nil
 			}
 			// 计划提交中断（plan 工具发起）：发 plan_request → 挂起态落盘 → 流
 			// 收线（approve 端点按 pending_kind=plan 分叉回执，Resume 续流）。
@@ -1277,7 +1284,7 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 				}
 				m.startApprovalTimer(s, planID, timeoutAt, "plan")
 				m.finishOf(s)(session.StatePendingApproval)
-				return acc, session.StatePendingApproval
+				return acc, session.StatePendingApproval, nil
 			}
 			// 审批中断（写工具 wrapper 发起）：聚合发一卡（H4-2 合并决议——一轮
 			// 并行写调用的全部审批上下文收进一张 EvApprovalRequest N 项）→ 挂起态
@@ -1310,7 +1317,7 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 				}
 				m.startApprovalTimer(s, appID, timeoutAt, "approval")
 				m.finishOf(s)(session.StatePendingApproval)
-				return acc, session.StatePendingApproval
+				return acc, session.StatePendingApproval, nil
 			}
 		}
 		// H8-2 全量转发档：子代理内部事件（AgentName 非空 = 子 agent——父
@@ -1328,22 +1335,25 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 		if ev.Output == nil || ev.Output.MessageOutput == nil {
 			continue
 		}
-		if stop := m.handleOutput(s, fn, acc, ev.Output.MessageOutput, est, behaviors); stop != outContinue {
+		if stop, terr := m.handleOutput(s, fn, acc, ev.Output.MessageOutput, est, behaviors); stop != outContinue {
 			// 已删除/断连：删除静默，断连中断收尾；传输致命：错误卡已发，
 			// 立即收线 error 态（不再赌下一次 iter.Next 送错——事件层客户
 			// 副本被中途弃读后内部管线可能互等，即「卡 running」旧病根）
 			if stop == outDeleted {
 				m.interruptUnlessStopped(s, fn)
-				return nil, ""
+				return nil, "", nil
+			}
+			if stop == outOverflow {
+				return acc, session.StateError, terr // 超窗未发卡：交 pumpWithOverflow 裁决
 			}
 			endState = session.StateError
 			break
 		}
 	}
 	if s.Stopped() {
-		return nil, ""
+		return nil, "", nil
 	}
-	return acc, endState
+	return acc, endState, nil
 }
 
 // interruptUnlessStopped 断连/停止收尾（删除会话静默跳过）：翻中断终态 +
@@ -1388,12 +1398,14 @@ const (
 	outContinue outVerdict = iota // 继续泵
 	outDeleted                    // 会话已删：静默弃（调用方 interruptUnlessStopped 兜删除分支）
 	outFatal                      // 传输致命：错误卡已发，立即收线 error 态
+	outOverflow                   // 上下文超窗：未发卡，错误经第二返回值上交（pumpWithOverflow 裁决）
 )
 
 // handleOutput 单事件分类。est = 上下文分类估算（usage 事件载荷）。
 // 返回值：outContinue 继续泵；outDeleted 会话已删（调用方静默弃）；
-// outFatal 传输致命（错误卡已发，调用方立即收线 error 态）。
-func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *adk.TypedMessageVariant[*schema.Message], est ctxEstimates, behaviors map[string]string) outVerdict {
+// outFatal 传输致命（错误卡已发，调用方立即收线 error 态）；outOverflow
+// 超窗未发卡（错误随第二返回值上交——裁剪重装配归 pumpWithOverflow）。
+func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *adk.TypedMessageVariant[*schema.Message], est ctxEstimates, behaviors map[string]string) (outVerdict, error) {
 	switch v.Role {
 	case schema.Tool:
 		// 工具结果（streaming 时拼装完整内容；digest 截断）
@@ -1418,7 +1430,7 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 			callID = v.Message.ToolCallID
 		}
 		if s.Stopped() {
-			return outDeleted
+			return outDeleted, nil
 		}
 		ok, digest, preview := mid.ToolResultDigest(content) // 语义摘要 + 原始头（展开用）
 		var cr struct {
@@ -1429,7 +1441,7 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 		m.emit(s, fn, contract.EvToolResult, contract.ToolResult{CallID: callID, OK: ok, Digest: digest, Preview: preview, Counts: cr.Counts, Verb: cr.Verb})
 		acc.addToolResult(callID, content) // 入史：assistant(tool_calls) 须紧跟 tool 结果，缺失回传即 400
 		m.reg.Persist(s)                   // 工具边界节流落盘（C2）：轮内崩溃不丢已完工具轮——频率有界（工具调用数）、单文件全量格式不变
-		return outContinue
+		return outContinue, nil
 
 	case schema.Assistant:
 		if v.IsStreaming && v.MessageStream != nil {
@@ -1440,7 +1452,7 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 						break
 					}
 					if s.Stopped() || errors.Is(err, context.Canceled) {
-						return outDeleted
+						return outDeleted, nil
 					}
 					var wr *adk.WillRetryError
 					if errors.As(err, &wr) {
@@ -1450,11 +1462,16 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 						// 前端回卷显示；重试尝试的新流作为下一事件自然到达。
 						m.emitTransportRetry(s, fn, wr)
 						acc.discardSeg()
-						return outContinue
+						return outContinue, nil
+					}
+					// 超窗：不发卡——交 pumpWithOverflow 裁剪重装配裁决（与
+					// ev.Err 分支同纪律）
+					if llm.Classify(unwrapRetryExhausted(err)).Code == llm.CodeOverflow {
+						return outOverflow, err
 					}
 					// 致命（欠费/认证/参数错/重试耗尽/未知）：分类错误卡 + 立即收线
 					m.emit(s, fn, contract.EvError, errCard(err))
-					return outFatal
+					return outFatal, nil
 				}
 				if chunk == nil {
 					continue
@@ -1474,7 +1491,7 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 					acc.addToolCall(tc) // 分片归并（首片带 id/name，续片仅 arguments 增量）
 				}
 				if s.Stopped() {
-					return outDeleted
+					return outDeleted, nil
 				}
 			}
 			// 工具调用事件在消息段收口后发：arguments 分片此时归并完整——
@@ -1483,12 +1500,12 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 				m.emit(s, fn, contract.EvToolCall, contract.ToolCall{CallID: tc.ID, Tool: tc.Function.Name, ArgsDigest: mid.ToolArgsDigest(tc.Function.Arguments), Behavior: behaviors[tc.Function.Name]})
 			}
 			acc.endAssistantMsg()
-			return outContinue
+			return outContinue, nil
 		}
 		// 非流式完整消息
 		msg := v.Message
 		if msg == nil {
-			return outContinue
+			return outContinue, nil
 		}
 		if msg.ResponseMeta != nil {
 			m.emitUsage(s, fn, msg.ResponseMeta.Usage, est, "")
@@ -1506,10 +1523,10 @@ func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *
 			m.emit(s, fn, contract.EvToolCall, contract.ToolCall{CallID: tc.ID, Tool: tc.Function.Name, ArgsDigest: mid.ToolArgsDigest(tc.Function.Arguments), Behavior: behaviors[tc.Function.Name]})
 		}
 		acc.endAssistantMsg()
-		return outContinue
+		return outContinue, nil
 
 	default:
-		return outContinue
+		return outContinue, nil
 	}
 }
 

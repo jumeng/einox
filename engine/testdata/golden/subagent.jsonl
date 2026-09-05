@@ -1,0 +1,5 @@
+{"id":1,"event":"user_message","data":{"text":"帮我勘察"}}
+{"id":2,"event":"tool_call","data":{"call_id":"c1","tool":"spawn","args_digest":"expect: 数量, task: 勘察并统计, tools: read_tool"}}
+{"id":3,"event":"tool_result","data":{"call_id":"c1","ok":true,"digest":"","preview":"子代理结论：仓库共 3 文件"}}
+{"id":4,"event":"text_delta","data":{"delta":"完成"}}
+{"id":5,"event":"session_end","data":{"summary":"完成","hist_len":4}}

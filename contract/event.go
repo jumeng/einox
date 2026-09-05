@@ -83,6 +83,8 @@ type HarnessNote struct {
 // 同步调用事件不带（零值 = 前端回退「归最近」启发式，回放兼容）。
 // Kind 扩展 done | failed 两态（后台派生终态）：Text = 结论全文 / 失败
 // errFeed 信封；killed/cancelled 位预留（v1.1 kill/wait 引入时扩第三态）。
+// 终态细分走 StopReason 载荷字段（不拆 Kind 词表——软契约纯增量，dsh
+// stopReason 形态对齐）；failed 附 Partial 半成品。
 type SubAgentEvent struct {
 	SpawnID string `json:"spawn_id,omitempty"` // 实例键（后台派生；会话域唯一）
 	Agent   string `json:"agent"`              // 子代理名（spawn）
@@ -91,6 +93,9 @@ type SubAgentEvent struct {
 	Tool    string `json:"tool,omitempty"`     // 子代理调用的工具名
 	Args    string `json:"args,omitempty"`     // tool_call 参数摘要
 	OK      bool   `json:"ok,omitempty"`       // tool_result 成败
+	// 终态细分（非终态零值）：
+	StopReason string `json:"stop_reason,omitempty"` // completed | aborted | error | max_tokens
+	Partial    string `json:"partial,omitempty"`     // failed 附带：终止前最后一段 assistant 输出（父模型可判补做/放弃）
 }
 
 // Delta 文本/思考增量。
@@ -251,7 +256,9 @@ type TransportRetry struct {
 }
 
 // ErrorOut 错误卡片（Code：CONFIG | SERVER | TRANSPORT | ABORTED | AUTH |
-// RATE_LIMIT——后两者为网络容错 ③ 分类器新增：认证失败 / 限速重试耗尽）。
+// RATE_LIMIT | OVERFLOW——AUTH/RATE_LIMIT 为网络容错 ③ 分类器新增〔认证
+// 失败 / 限速重试耗尽〕；OVERFLOW = 上下文超窗〔manager 裁剪重装配有界
+// 重试一次后才如实报错〕）。
 type ErrorOut struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`

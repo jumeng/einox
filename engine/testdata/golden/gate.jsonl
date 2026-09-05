@@ -1,0 +1,5 @@
+{"id":1,"event":"user_message","data":{"text":"做"}}
+{"id":2,"event":"text_delta","data":{"delta":"已处理。"}}
+{"id":3,"event":"harness_note","data":{"kind":"gate","title":"质量门未过，已退回修复","detail":"第 1 次回灌：lint 未过：残留调试打印"}}
+{"id":4,"event":"text_delta","data":{"delta":"已处理。"}}
+{"id":5,"event":"session_end","data":{"summary":"已处理。已处理。","hist_len":4}}

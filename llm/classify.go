@@ -30,7 +30,7 @@ import (
 // llm 不反向依赖 contract，字面量权威在 contract/event.go 注释）。
 type Classified struct {
 	Retryable bool
-	Code      string // SERVER | AUTH | RATE_LIMIT | TRANSPORT
+	Code      string // SERVER | AUTH | RATE_LIMIT | TRANSPORT | OVERFLOW
 	Message   string // 面向用户的中文文案（调用方自行截断）
 }
 
@@ -46,9 +46,19 @@ func Classify(err error) Classified {
 	if errors.Is(err, ErrIdleTimeout) || errors.Is(err, context.DeadlineExceeded) {
 		return Classified{Retryable: true, Code: "TRANSPORT", Message: transportMsg(err)}
 	}
+	// 上下文超窗：不可重试、不进 failover（换模型救不了真超窗——窗口更小的
+	// 备模型更糟），恢复归 manager 输入面（裁剪重装配有界重试，engine/overflow.go）。
+	// 两协议 400 族错误体的带内信号无统一类型面，错误全文文本横扫是跨协议
+	// 单一权威（词表是数据，见 overflowTexts）。
+	if isOverflowErr(err) {
+		return Classified{Code: CodeOverflow, Message: "上下文超出模型窗口——本轮输入过长"}
+	}
 	// openai 协议：组件 APIError（业务码细化优先，未命中走 HTTP 状态码面）
 	var oe *einoopenai.APIError
 	if errors.As(err, &oe) {
+		if s, _ := oe.Code.(string); s == "context_length_exceeded" {
+			return Classified{Code: CodeOverflow, Message: "上下文超出模型窗口——本轮输入过长"}
+		}
 		if c, ok := classifyBizCode(oe.Code); ok {
 			return c
 		}
@@ -87,6 +97,39 @@ var transportTexts = []string{
 	"unexpected EOF",
 	"http2: server sent GOAWAY",
 	"use of closed network connection",
+}
+
+// CodeOverflow 上下文超窗类（消费方：engine manager 层裁剪重装配恢复——
+// 不可重试、不进 failover，与 ABORTED 同为致命面但语义独立）。
+const CodeOverflow = "OVERFLOW"
+
+// overflowTexts 超窗错误全文标记词表（数据面——新厂家短语在此扩，不进逻辑）。
+var overflowTexts = []string{
+	"context_length_exceeded",                            // openai 协议 error.code（DeepSeek 同款）
+	"maximum context length",                             // openai 系错误消息
+	"prompt is too long",                                 // anthropic 系错误消息（Error() 含响应体）
+	"input length and `max_tokens` exceed context limit", // GLM 系
+	"input length and max_tokens exceed context limit",   // GLM 系（无反引号变体）
+}
+
+// isOverflowErr 超窗判别（错误全文含标记短语；anthropic SDK Error 的
+// Error() 在 Request/Response 为 nil 时 panic——走 anthropicRaw 防御面；
+// openai 组件 APIError 的 error.code 字段另在类型分支显式比对——Error()
+// 渲染不保证含 code）。
+func isOverflowErr(err error) bool {
+	s := ""
+	var ae *anthropic.Error
+	if errors.As(err, &ae) {
+		s = anthropicRaw(ae)
+	} else {
+		s = err.Error()
+	}
+	for _, m := range overflowTexts {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyStatus HTTP 状态码 → 处置（DeepSeek 官方错误码表对齐）。

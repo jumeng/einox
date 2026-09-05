@@ -51,12 +51,12 @@ func gateRetries(g *GateConfig) int {
 // drive 泵事件至收束 + 收束门回灌循环（Run/Resume 共用）：自然收束且门在
 // 场→跑 checker→过则正常收束；不过→门卡通知 + 反馈消息入史（steering 同款
 // user 消息形态）+ 重入循环；重试耗尽→error 收束（诚实报错不静默放行）。
-// est 每轮重算（回灌后上下文已变）。
+// est 每轮重算（回灌后上下文已变）。超窗有界恢复（pumpWithOverflow，见
+// overflow.go）在泵面之上：OVERFLOW 类终态错误重装配输入重试一次。
 func (m *Manager) drive(runCtx context.Context, s *session.Session, fn emitFn,
 	iter *adk.AsyncIterator[*adk.AgentEvent], behaviors map[string]string) (*runAccum, string) {
-	est := m.estimateContext(s)
-	m.checkContextBudget(s, fn, est) // B1 常驻面超限告警（会话内只发一次，不阻断）
-	acc, endState := m.pump(s, iter, fn, est, behaviors)
+	m.checkContextBudget(s, fn, m.estimateContext(s)) // B1 常驻面超限告警（会话内只发一次，不阻断）
+	acc, endState := m.pumpWithOverflow(runCtx, s, fn, iter, behaviors)
 	var gate *GateConfig
 	if m.Opt.FinalGate != nil {
 		gate = m.Opt.FinalGate(m.briefOf(s))
@@ -97,7 +97,7 @@ func (m *Manager) drive(runCtx context.Context, s *session.Session, fn emitFn,
 			return acc, session.StateError
 		}
 		behaviors = behaviors2
-		acc, endState = m.pump(s, iter2, fn, m.estimateContext(s), behaviors)
+		acc, endState = m.pumpWithOverflow(runCtx, s, fn, iter2, behaviors)
 	}
 	return acc, endState
 }

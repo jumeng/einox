@@ -74,3 +74,30 @@ func TestClassifyTable(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyOverflow 超窗类（OVERFLOW）：跨协议标记（code 面/消息面）归
+// 一文本词表；不可重试（恢复归 manager 裁剪重装配，不进 failover）；非超窗
+// 错误不误报。
+func TestClassifyOverflow(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"openai code 面", &einoopenai.APIError{HTTPStatusCode: 400, Code: "context_length_exceeded", Message: "This model's maximum context length is 65536 tokens"}, CodeOverflow},
+		{"openai 消息面", errors.New("400 Bad Request: maximum context length is 65536 tokens, however you requested 70000"), CodeOverflow},
+		{"anthropic 消息面", errors.New(`400 {"type":"error","message":"prompt is too long: 200000 tokens > 128000 maximum"}`), CodeOverflow},
+		{"GLM 短语", errors.New("input length and `max_tokens` exceed context limit: 131072 > 128000"), CodeOverflow},
+		{"非超窗 400 不误报", &einoopenai.APIError{HTTPStatusCode: 400, Message: "bad body"}, "SERVER"},
+		{"传输错误不误报", errors.New("connection reset by peer"), "TRANSPORT"},
+	}
+	for _, c := range cases {
+		got := Classify(c.err)
+		if got.Code != c.code {
+			t.Errorf("%s：got code=%s want %s", c.name, got.Code, c.code)
+		}
+		if got.Code == CodeOverflow && got.Retryable {
+			t.Errorf("%s：超窗类不可重试", c.name)
+		}
+	}
+}
