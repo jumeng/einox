@@ -311,7 +311,7 @@ func TestGateStrictZeroRetries(t *testing.T) {
 }
 
 // TestGateMultiRoundEpilogueOnce 多轮门回灌后过门：收尾钩子恰触发一次
-//（回灌轮不重复 settle——单次收尾语义）。
+// （回灌轮不重复 settle——单次收尾语义）。
 func TestGateMultiRoundEpilogueOnce(t *testing.T) {
 	var gateCalls, epilogues atomic.Int32
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {

@@ -59,6 +59,7 @@ func (m *Manager) overflowRetry(runCtx context.Context, s *session.Session, fn e
 	}
 	hist := sanitizeHistory(s.CloneHistory())
 	input := append(append([]*schema.Message{}, tailFromLastUser(hist)...), taskAnchor(s, lastTodoState(hist)))
+	input = renderSpeakers(input) // T6 署名前缀投影（重装配输入同主输入同律）
 	before, _ := shapedTokenCounter(context.Background(), hist, nil)
 	after, _ := shapedTokenCounter(context.Background(), input, nil)
 	if after >= before {

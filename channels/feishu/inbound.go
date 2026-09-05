@@ -11,10 +11,11 @@ import (
 // 日志级丢弃：飞书侧无回执通道，重试语义由用户重发表达）。
 func (b *Bot) handleMsg(m inboundMsg) {
 	err := b.gw.Handle(engine.InboundMsg{
-		Channel: b.id,
-		Chat:    m.chatID,
-		Owner:   m.openID, // owner = 发送者（渠道账号 ↔ 用户绑定体系在业务层）
-		Text:    m.text,
+		Channel:   b.id,
+		Chat:      m.chatID,
+		Owner:     m.openID, // owner = 发送者（渠道账号 ↔ 用户绑定体系在业务层）
+		SpeakerID: m.openID, // T6 发送者身份全链透传（p2p 即 owner；群聊后续发送者不再被丢弃——Name 解析需 OpenAPI，归应用补）
+		Text:      m.text,
 	})
 	if err != nil {
 		// 分流失败如实回执（卡片形态——用户可感知可重发）

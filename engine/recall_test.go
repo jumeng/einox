@@ -215,7 +215,7 @@ func TestRecallLimitBounds(t *testing.T) {
 func TestRecallHitCountSortPriority(t *testing.T) {
 	m := newSeamManager(t, func(o *Options) { o.Recall = true })
 	seedPersisted(t, m, "张三", "部署KEY老任务", "老双KEY") // Task+Title 双命中（较老）
-	seedPersisted(t, m, "张三", "别的主题", "新单KEY")      // 仅 Title 单命中（较新）
+	seedPersisted(t, m, "张三", "别的主题", "新单KEY")     // 仅 Title 单命中（较新）
 	joined, _ := recallTurn(t, m, "查", `{"query":"KEY"}`)
 	o, n := strings.Index(joined, "老双KEY"), strings.Index(joined, "新单KEY")
 	if o < 0 || n < 0 {

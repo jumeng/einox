@@ -46,6 +46,12 @@ type InboundMsg struct {
 	Mode        string
 	Text        string
 	Attachments []session.Attachment
+	// T6 多参与者：发送者身份（适配器解析协议后透传——feishu 的 open_id 等；
+	// 渠道账号 ↔ 业务用户的映射归应用）。空 = 单用户零变化（Owner 语义原样）。
+	// 群聊第二个及以后的发送者经此入链：名册首见登记 + 当轮说话人 + 排队署名
+	//——此前（实锚）已绑定会话的后续发送者身份被静默丢弃。
+	SpeakerID   string
+	SpeakerName string
 }
 
 // ChannelConfig 渠道实例装配（Options.Channels 条目）。ID 是消息路由键
@@ -240,14 +246,22 @@ func (g *ChannelGateway) Handle(msg InboundMsg) error {
 	if err != nil {
 		return err
 	}
+	var actor *contract.Participant // T6 身份链：发送者在册登记（首见 joined）
+	if msg.SpeakerID != "" {
+		actor = &contract.Participant{ID: msg.SpeakerID, Name: msg.SpeakerName}
+		s.UpsertParticipant(*actor)
+	}
 	mode := firstNonEmpty(msg.Mode, contract.ModeManual)
 	for i := 0; i < 2; i++ {
 		if s.BeginRun(mode) {
+			if actor != nil {
+				s.SetTurnActor(actor) // 当轮说话人（跨审批中断保留）
+			}
 			go g.m.Run(context.Background(), s, msg.Text, msg.Attachments, noopEmit)
 			return nil
 		}
-		if s.Steer(msg.Text, msg.Attachments, mode) {
-			return nil
+		if s.SteerBy(actor, msg.Text, msg.Attachments, mode) {
+			return nil // 排队署名（运行中注入/下轮前置均带 Speaker）
 		}
 	}
 	return errors.New("engine: 渠道消息分流失败（会话状态竞态，可重发）")

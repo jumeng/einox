@@ -184,7 +184,7 @@ func (b *bgSpawnTool) start(ctx context.Context, args string) (string, error) {
 	// 仅经 CancelSpawns / 进程退出）。operator 等契约值继承会话事实。
 	id := reg.alloc()
 	bgCtx, cancel := context.WithCancel(context.Background())
-	bgCtx = contract.WithOperator(bgCtx, b.s.Owner)
+	bgCtx = contract.WithOperator(bgCtx, b.m.operatorOf(b.s)) // T6 当轮说话人（回退 Owner 零变化）
 	bgCtx = contract.WithChangeRecorder(bgCtx, b.s.RecordFileChange)
 	bgCtx = contract.WithImageInput(bgCtx, b.m.imageCapableOf(b.s))
 	reg.add(id, cancel)

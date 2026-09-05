@@ -91,16 +91,18 @@ type Session struct {
 	// decisions 按 item_id 的决议表（H4-2 合并决议多槽；"" 键 = 旧单决议——
 	// plan/超时兜底与升级前 checkpoint 重放共用）
 	decisions    map[string]*ApprovalDecision
-	curAppID     string       // 挂起中的审批/提问 ID（空 = 无）
-	pendingKind  string       // 挂起类型（"approval"|"ask"——跨重启续表用）
-	pendingDue   time.Time    // 挂起截止时刻（超时兜底跨重启——进程重启丢内存计时器）
-	pendingItems []string     // 合并决议卡项标识清单（kind=approval；超时批量拒与端点覆盖校验依据）
-	askDecision  *AskDecision // ask_user 作答（answer 端点写入；Resume 消费后清空）
-	turnGrant    bool         // plan 档本轮写授权（首个批准置位；session_end 清零）
-	taskGrant    bool         // plan 档任务期写授权（计划批准置位；任务成功收尾/换档/新计划提交清零）
-	planSeq      int          // 计划文档序号（submit_plan 自增取号；修订递增留痕）
-	turnUserMsg  string       // 轮次用户消息（跨审批中断保留）
-	notifySpent  int          // 后台通知连续自续已花费预算（W-3 自激护栏；用户消息消费清零，通知自身不恢复）
+	curAppID     string                 // 挂起中的审批/提问 ID（空 = 无）
+	pendingKind  string                 // 挂起类型（"approval"|"ask"——跨重启续表用）
+	pendingDue   time.Time              // 挂起截止时刻（超时兜底跨重启——进程重启丢内存计时器）
+	pendingItems []string               // 合并决议卡项标识清单（kind=approval；超时批量拒与端点覆盖校验依据）
+	askDecision  *AskDecision           // ask_user 作答（answer 端点写入；Resume 消费后清空）
+	turnGrant    bool                   // plan 档本轮写授权（首个批准置位；session_end 清零）
+	taskGrant    bool                   // plan 档任务期写授权（计划批准置位；任务成功收尾/换档/新计划提交清零）
+	planSeq      int                    // 计划文档序号（submit_plan 自增取号；修订递增留痕）
+	turnUserMsg  string                 // 轮次用户消息（跨审批中断保留）
+	notifySpent  int                    // 后台通知连续自续已花费预算（W-3 自激护栏；用户消息消费清零，通知自身不恢复）
+	participants []contract.Participant // T6 参与者名册（多人群聊/坐席协同；落盘随 session.json，变更经 participant_update 事件落流）
+	turnActor    *contract.Participant  // T6 当轮说话人（渠道/应用 Run 前设置；跨审批中断保留保 Requester/Operator 连续；不落盘——轮次事实）
 }
 
 // ApprovalDecision 审批决议（approve 端点 → 包装工具消费；契约形态）。
@@ -128,7 +130,11 @@ func (s *Session) TakeAskDecision() *AskDecision {
 // RecordAskDecision 作答回执落流（answer 端点在 SetAskDecision 后调用——
 // 切回/回放重建提问卡终态的真源）。
 func (s *Session) RecordAskDecision(askID string, d AskDecision) {
-	s.Record("ask_decision", map[string]any{"ask_id": askID, "answers": d.Answers, "free_text": d.FreeText})
+	m := map[string]any{"ask_id": askID, "answers": d.Answers, "free_text": d.FreeText}
+	if d.DeciderID != "" { // T6：谁作答的（空 = 零变化）
+		m["decider_id"], m["decider_name"] = d.DeciderID, d.DeciderName
+	}
+	s.Record("ask_decision", m)
 }
 
 // SetDecision 登记决议（approve 端点调用；幂等覆盖前值无意义——单审批通道）。
@@ -194,10 +200,67 @@ func (s *Session) HasPendingDecision() bool {
 	return false
 }
 
+// UpsertParticipant 名册登记（T6）：首见落 joined、在册变更落 updated
+// （participant_update 事件——回放重建 roster 的真源，不依赖 session.json
+// 快照）。Name/Role 空值不覆盖在册值（部分更新）。返回变更 Kind（无变更
+// 空串）；Kind 封闭集含 left（移除面待第一个消费者，本批不开）。
+func (s *Session) UpsertParticipant(p contract.Participant) string {
+	if p.ID == "" {
+		return ""
+	}
+	s.mu.Lock()
+	for i := range s.participants {
+		if s.participants[i].ID != p.ID {
+			continue
+		}
+		kind := ""
+		if p.Name != "" && p.Name != s.participants[i].Name {
+			s.participants[i].Name = p.Name
+			kind = "updated"
+		}
+		if p.Role != "" && p.Role != s.participants[i].Role {
+			s.participants[i].Role = p.Role
+			kind = "updated"
+		}
+		cur := s.participants[i]
+		s.mu.Unlock()
+		if kind != "" {
+			s.Record(contract.EvParticipantUpdate, contract.ParticipantEvent{Participant: cur, Kind: kind})
+		}
+		return kind
+	}
+	s.participants = append(s.participants, p)
+	s.mu.Unlock()
+	s.Record(contract.EvParticipantUpdate, contract.ParticipantEvent{Participant: p, Kind: "joined"})
+	return "joined"
+}
+
+// ParticipantsOf 名册快照。
+func (s *Session) ParticipantsOf() []contract.Participant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]contract.Participant(nil), s.participants...)
+}
+
+// SetTurnActor 当轮说话人（T6：渠道/应用在 Run 前设置）。
+func (s *Session) SetTurnActor(p *contract.Participant) {
+	s.mu.Lock()
+	s.turnActor = p
+	s.mu.Unlock()
+}
+
+// TurnActorOf 当轮说话人（nil = 单用户零变化——引擎回退 Owner 语义）。
+func (s *Session) TurnActorOf() *contract.Participant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnActor
+}
+
 // RecordDecision 决议回执落流（approve 端点在 SetDecision 后调用）。事件流是
 // 切回/回放重建审批卡终态的真源——决议只 Set 不落流，卡片永远停在待审批态。
 func (s *Session) RecordDecision(appID string, d ApprovalDecision) {
-	s.Record("approval_decision", contract.DecisionOut{ApprovalID: appID, Approve: d.Approve, Reason: d.Reason})
+	s.Record("approval_decision", contract.DecisionOut{ApprovalID: appID, Approve: d.Approve, Reason: d.Reason,
+		DeciderID: d.DeciderID, DeciderName: d.DeciderName}) // T6：谁决议的——回放可审计
 }
 
 // TakeDecision 取走决议（Resume 消费；取后清空防复用）。
@@ -323,7 +386,8 @@ func (s *Session) NextPlanSeq() int {
 // RecordPlanDecision 计划决议回执落流（approve 端点按 pending_kind=plan 分叉
 // 调用；切回/回放重建计划卡终态的真源）。
 func (s *Session) RecordPlanDecision(planID string, d ApprovalDecision) {
-	s.Record(contract.EvPlanDecision, contract.PlanDecisionOut{PlanID: planID, Approve: d.Approve, Reason: d.Reason})
+	s.Record(contract.EvPlanDecision, contract.PlanDecisionOut{PlanID: planID, Approve: d.Approve, Reason: d.Reason,
+		DeciderID: d.DeciderID, DeciderName: d.DeciderName}) // T6：谁决议的
 }
 
 // SetTurnUserMsg / TakeTurnUserMsg 轮次用户消息（跨审批中断保留——Resume 完成
@@ -672,6 +736,12 @@ func newQueueID() string {
 // 返回 false = 会话空闲（走正常 Run 而非 steering）。入队落 steer_queued
 // 事件——排队态可回放重建（切回/刷新不丢，对齐审批决议回执定案）。
 func (s *Session) Steer(msg string, atts []Attachment, mode string) bool {
+	return s.SteerBy(nil, msg, atts, mode) // 无说话人——单用户/系统语义零变化
+}
+
+// SteerBy 带说话人入队（T6 多参与者：群聊中他人消息排队不丢身份——
+// 排队消息与 steer_queued 事件携带 Speaker，运行中注入/下轮前置均署名）。
+func (s *Session) SteerBy(actor *contract.Participant, msg string, atts []Attachment, mode string) bool {
 	s.mu.Lock()
 	if s.State != StateRunning && s.State != StatePendingApproval {
 		s.mu.Unlock()
@@ -681,11 +751,15 @@ func (s *Session) Steer(msg string, atts []Attachment, mode string) bool {
 	var q QueuedMsg
 	if msg != "" || len(atts) > 0 {
 		q = QueuedMsg{ID: newQueueID(), Text: msg, Attachments: atts}
+		if actor != nil {
+			q.SpeakerID, q.SpeakerName = actor.ID, actor.Name
+		}
 		s.pendingMsgs = append(s.pendingMsgs, q)
 	}
 	s.mu.Unlock()
 	if q.ID != "" {
-		s.Record("steer_queued", contract.SteerEvent{ID: q.ID, Text: q.Text, Attachments: q.Attachments})
+		s.Record("steer_queued", contract.SteerEvent{ID: q.ID, Text: q.Text, Attachments: q.Attachments,
+			SpeakerID: q.SpeakerID, SpeakerName: q.SpeakerName})
 	}
 	return true
 }
@@ -1063,28 +1137,29 @@ func sessionEnded(st Store, owner, sid string) bool {
 
 // sessionRecord 落盘 DTO（显式字段——Session 含锁与运行态字段不整体序列化）。
 type sessionRecord struct {
-	SID           string                `json:"sid"`
-	Owner         string                `json:"owner"`
-	Task          string                `json:"task"`
-	Title         string                `json:"title"`
-	State         string                `json:"state"`
-	Mode          string                `json:"mode"`
-	Model         contract.UserPrefs    `json:"model"`
-	LastUsedModel string                `json:"last_used_model,omitempty"`
-	ParentSID     string                `json:"parent_sid,omitempty"` // 辅助对话父会话（空 = 普通会话）
-	StartedAt     time.Time             `json:"started_at"`
-	UpdatedAt     time.Time             `json:"updated_at"`
-	Events        []Event               `json:"events"`
-	Summary       string                `json:"summary"`
-	FileChanges   map[string]fileChange `json:"file_changes"`
-	Messages      []*schema.Message     `json:"messages"`                 // 续聊历史（进程重启后恢复）
-	Pending       []QueuedMsg           `json:"pending,omitempty"`        // 排队消息（重启续接——用户补充指令是交互内容，不随进程丢）
-	PendingAppID  string                `json:"pending_app_id,omitempty"` // 挂起审批/提问/计划 ID（重启续接——checkpoint 在盘，决议可续流）
-	PendingKind   string                `json:"pending_kind,omitempty"`   // 挂起类型（approval|ask|plan——续表/超时翻转动作分叉）
-	PendingDue    time.Time             `json:"pending_due,omitempty"`    // 挂起截止（超时兜底跨重启——内存计时器随进程丢）
-	PendingItems  []string              `json:"pending_items,omitempty"`  // 合并决议卡项标识清单（重启续接——超时批量拒/决议覆盖校验依据）
-	TaskGranted   bool                  `json:"task_granted,omitempty"`   // plan 档任务期写授权（重启续接——批准的计划不因进程重启失效）
-	PlanSeq       int                   `json:"plan_seq,omitempty"`       // 计划文档序号末号（新提交接续递增）
+	SID           string                 `json:"sid"`
+	Owner         string                 `json:"owner"`
+	Task          string                 `json:"task"`
+	Title         string                 `json:"title"`
+	State         string                 `json:"state"`
+	Mode          string                 `json:"mode"`
+	Model         contract.UserPrefs     `json:"model"`
+	LastUsedModel string                 `json:"last_used_model,omitempty"`
+	ParentSID     string                 `json:"parent_sid,omitempty"` // 辅助对话父会话（空 = 普通会话）
+	StartedAt     time.Time              `json:"started_at"`
+	UpdatedAt     time.Time              `json:"updated_at"`
+	Events        []Event                `json:"events"`
+	Summary       string                 `json:"summary"`
+	FileChanges   map[string]fileChange  `json:"file_changes"`
+	Messages      []*schema.Message      `json:"messages"`                 // 续聊历史（进程重启后恢复）
+	Pending       []QueuedMsg            `json:"pending,omitempty"`        // 排队消息（重启续接——用户补充指令是交互内容，不随进程丢）
+	PendingAppID  string                 `json:"pending_app_id,omitempty"` // 挂起审批/提问/计划 ID（重启续接——checkpoint 在盘，决议可续流）
+	PendingKind   string                 `json:"pending_kind,omitempty"`   // 挂起类型（approval|ask|plan——续表/超时翻转动作分叉）
+	PendingDue    time.Time              `json:"pending_due,omitempty"`    // 挂起截止（超时兜底跨重启——内存计时器随进程丢）
+	PendingItems  []string               `json:"pending_items,omitempty"`  // 合并决议卡项标识清单（重启续接——超时批量拒/决议覆盖校验依据）
+	TaskGranted   bool                   `json:"task_granted,omitempty"`   // plan 档任务期写授权（重启续接——批准的计划不因进程重启失效）
+	PlanSeq       int                    `json:"plan_seq,omitempty"`       // 计划文档序号末号（新提交接续递增）
+	Participants  []contract.Participant `json:"participants,omitempty"`   // T6 参与者名册（Fork/Side/Reattach 继承）
 }
 
 // fileChangesCopy 变更表拷贝（持锁块内调用）。
@@ -1139,6 +1214,7 @@ func recordOf(s *Session) sessionRecord {
 		Pending:      append([]QueuedMsg(nil), s.pendingMsgs...),
 		PendingAppID: s.curAppID, PendingKind: s.pendingKind, PendingDue: s.pendingDue,
 		PendingItems: append([]string(nil), s.pendingItems...),
+		Participants: append([]contract.Participant(nil), s.participants...),
 		TaskGranted:  s.taskGrant, PlanSeq: s.planSeq,
 	}
 }
@@ -1345,6 +1421,7 @@ func (r *Registry) forkOf(rec *sessionRecord, anchor int) *Session {
 		Events:  append([]Event(nil), cp.Events...),
 		summary: cp.Summary, fileChanges: cp.FileChanges, stoppedCh: make(chan struct{}),
 		lastUsedModel: cp.LastUsedModel,
+		participants:  append([]contract.Participant(nil), cp.Participants...), // T6 名册继承（快照后各自演化）
 	}
 	if n := len(ns.Events); n > 0 {
 		ns.seq = ns.Events[n-1].ID // 接续末位事件 ID——不接续则新事件撞号（截断后末位 = 锚）
@@ -1464,6 +1541,7 @@ func (r *Registry) Side(owner, sid string) *Session {
 		StartedAt: time.Now(), UpdatedAt: time.Now(),
 		history: cp.Messages, parentSID: cp.SID,
 		stoppedCh: make(chan struct{}), lastUsedModel: cp.LastUsedModel,
+		participants: append([]contract.Participant(nil), cp.Participants...), // T6 名册继承
 	}
 	ns.Record(contract.EvHarnessNote, contract.HarnessNote{
 		Kind: "side", Title: "辅助对话",
@@ -1709,6 +1787,7 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 		Events:  append([]Event(nil), rec.Events...),
 		summary: rec.Summary, fileChanges: rec.FileChanges, stoppedCh: make(chan struct{}),
 		lastUsedModel: rec.LastUsedModel, parentSID: rec.ParentSID,
+		participants: append([]contract.Participant(nil), rec.Participants...), // T6 名册续接
 	}
 	if st == StatePendingApproval {
 		s.curAppID, s.pendingKind, s.pendingDue = rec.PendingAppID, rec.PendingKind, rec.PendingDue

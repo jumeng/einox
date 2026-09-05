@@ -88,7 +88,7 @@ func (m *Manager) drive(runCtx context.Context, s *session.Session, fn emitFn,
 		}
 		fb := schema.UserMessage("（质量门未过）" + gerr.Error() +
 			"。请修复以上问题后重新完成任务，不要直接重复原回答。")
-		hist := sanitizeHistory(s.CloneHistory())
+		hist := renderSpeakers(sanitizeHistory(s.CloneHistory())) // T6 署名前缀投影（回灌输入同主输入同律）
 		s.AppendHistory(fb)
 		m.reg.Persist(s)
 		iter2, behaviors2, rerr := m.runIter(runCtx, s, append(hist, fb))

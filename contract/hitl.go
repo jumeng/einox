@@ -13,15 +13,20 @@ const (
 )
 
 // ApprovalDecision 审批决议（应用 approve 端点 → 审批包装工具消费）。
+// Decider*（T6）：谁决议的——空 = 单用户零变化；落 DecisionOut 回执可审计。
 type ApprovalDecision struct {
-	Approve bool
-	Reason  string
+	Approve     bool
+	Reason      string
+	DeciderID   string
+	DeciderName string
 }
 
 // AskDecision ask_user 作答（应用 answer 端点 → ask_user 工具消费）。
 type AskDecision struct {
-	Answers  []string
-	FreeText string
+	Answers     []string
+	FreeText    string
+	DeciderID   string // T6：谁作答（空 = 单用户零变化）
+	DeciderName string
 }
 
 // ApprovalCard 审批中断载荷（Suspend.Info；approval_request 事件数据源）。

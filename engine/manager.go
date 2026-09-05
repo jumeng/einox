@@ -56,6 +56,10 @@ type SessionBrief struct {
 	// ParentSID 辅助对话父会话（空 = 普通会话——应用可据此调 Instruction/
 	// 工具面/skill 目录；side 共享父工作区与外置域，见 wsSID）。
 	ParentSID string
+	// T6 当轮说话人（空 = 单用户零变化）：应用装配面可见——按人裁剪
+	// Instruction/工具面/审批判定（机制与内容分离：身份只透传，策略归应用）。
+	TurnSpeakerID   string
+	TurnSpeakerName string
 }
 
 // Options 引擎组装配置（应用装配层构造）。
@@ -659,6 +663,12 @@ func cloneMsgs(msgs []*schema.Message) []*schema.Message {
 		if len(m.ToolCalls) > 0 {
 			cp.ToolCalls = append([]schema.ToolCall(nil), m.ToolCalls...)
 		}
+		if len(m.Extra) > 0 { // T6：Extra map 一层拷贝——map 共享引用会被 sanitizeHistory 原地改写竞态（值只读不深拷，与 Messages 浅层纪律同款）
+			cp.Extra = make(map[string]any, len(m.Extra))
+			for k, v := range m.Extra {
+				cp.Extra[k] = v
+			}
+		}
 		out[i] = &cp
 	}
 	return out
@@ -670,6 +680,7 @@ func cloneMsgs(msgs []*schema.Message) []*schema.Message {
 func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, atts []session.Attachment, fn emitFn) {
 	s.ClearTurnGrant()
 	s.SetPendingApproval("")
+	actor := s.TurnActorOf() // T6 当轮说话人（nil = 单用户零变化）
 	queued := s.TakePending()
 	for _, q := range queued { // 翻「已注入」回执：steer_queued/notify_queued 已建条目，翻态而非补建 user_message（回放不重复）；notify 条目独立事件名（审计区分系统通知与用户输入）
 		if q.Kind == "notify" {
@@ -677,32 +688,44 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 			continue
 		}
 		s.RestoreNotifyBudget() // 用户真实输入到达本轮输入：恢复自续预算（W-3——通知自身不恢复）
-		s.Record(contract.EvSteerInjected, contract.SteerEvent{ID: q.ID, Text: q.Text, Attachments: q.Attachments})
+		s.Record(contract.EvSteerInjected, contract.SteerEvent{ID: q.ID, Text: q.Text, Attachments: q.Attachments,
+			SpeakerID: q.SpeakerID, SpeakerName: q.SpeakerName}) // T6 谁的排队消息
 	}
 	if userMsg != "" {
 		s.RestoreNotifyBudget() // 直接输入（非排队）同属用户消息
 	}
 	if userMsg != "" || len(atts) > 0 {
-		s.Record(contract.EvUserMessage, contract.UserMsg{Text: userMsg, Attachments: atts})
-	}
-	if len(queued) > 0 {
-		texts := make([]string, 0, len(queued)+1)
-		var allAtts []session.Attachment
-		for _, q := range queued {
-			texts = append(texts, withAttachments(q.Text, q.Attachments))
-			allAtts = append(allAtts, q.Attachments...)
+		var spID, spName string // T6 谁说的（Name = 快照）
+		if actor != nil {
+			spID, spName = actor.ID, actor.Name
 		}
-		texts = append(texts, withAttachments(userMsg, atts))
-		userMsg = strings.Join(texts, "\n\n")
-		atts = append(allAtts, atts...)
-	} else {
-		userMsg = withAttachments(userMsg, atts)
+		s.Record(contract.EvUserMessage, contract.UserMsg{Text: userMsg, Attachments: atts, SpeakerID: spID, SpeakerName: spName})
 	}
-	userMsgFinal := userMessageWithImages(userMsg, atts)
-	s.SetTurnUserMsg(userMsg)
+	// T6 输入分段：排队消息 + 直接输入按说话人分段——同人相邻合并、异人各自
+	// 成条（Extra 署名，装配期 renderSpeakers 渲染前缀）；说话人全空 = 单段 =
+	// 旧单条合并形态（通知段无 speaker 并入——与旧行为一致；空源跳过）。
+	var userMsgs []*schema.Message
+	{
+		segs := inputSegments(queued, userMsg, atts, actor)
+		disp := make([]string, 0, len(segs))
+		for _, seg := range segs {
+			joined := strings.Join(seg.texts, "\n\n")
+			msg := userMessageWithImages(joined, seg.atts)
+			if seg.speaker != nil {
+				if msg.Extra == nil {
+					msg.Extra = map[string]any{}
+				}
+				msg.Extra[speakerExtraID] = seg.speaker.ID
+				msg.Extra[speakerExtraName] = seg.speaker.Name
+			}
+			userMsgs = append(userMsgs, msg)
+			disp = append(disp, joined)
+		}
+		s.SetTurnUserMsg(strings.Join(disp, "\n\n"))
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
-	runCtx = contract.WithOperator(runCtx, s.Owner) // 工具层审计主体 = 会话发起人
+	runCtx = contract.WithOperator(runCtx, m.operatorOf(s)) // 工具层审计主体 = 当轮说话人（T6；回退 Owner 零变化）
 	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
 	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s)) // 读图工具门禁：会话模型明示能力
 	runCtx = withEmitFn(runCtx, fn)                               // failover 切换事件的 live 转发面
@@ -715,8 +738,8 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 
 	finish := m.finishOf(s)
 
-	history := sanitizeHistory(s.CloneHistory())
-	iter, behaviors, err := m.runIter(runCtx, s, append(history, userMsgFinal))
+	history := renderSpeakers(sanitizeHistory(s.CloneHistory()))                               // T6 署名前缀投影（副本上——原文不带，Extra 携）
+	iter, behaviors, err := m.runIter(runCtx, s, append(history, renderSpeakers(userMsgs)...)) // 当前轮消息同律投影
 	if err != nil {
 		m.emit(s, fn, contract.EvError, errToEvent(err, s))
 		finish(session.StateError)
@@ -726,7 +749,7 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 	// 中断保险：本轮用户消息即刻入史落盘——进程死在轮中（或断连取消），
 	// Reattach 仍保有完整提问脉络，模型不失忆；assistant 终态由 settleTurn
 	// 轮末补录（user_message 事件的即时记录只保回放，不保模型上下文）。
-	s.AppendHistory(userMsgFinal)
+	s.AppendHistory(userMsgs...)
 	m.reg.Persist(s)
 
 	acc, endState := m.drive(runCtx, s, fn, iter, behaviors)
@@ -747,7 +770,7 @@ func (m *Manager) Resume(ctx context.Context, s *session.Session, fn emitFn) {
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
-	runCtx = contract.WithOperator(runCtx, s.Owner)
+	runCtx = contract.WithOperator(runCtx, m.operatorOf(s)) // T6 当轮说话人（跨审批中断保留——Requester/审计连续）
 	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
 	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s))
 	runCtx = withEmitFn(runCtx, fn) // failover 切换事件的 live 转发面
@@ -1129,8 +1152,21 @@ func (m *Manager) imageCapableOf(s *session.Session) bool {
 // 会话内切换模型/effort 后下一轮提示即更新，永不陈旧）。
 func (m *Manager) briefOf(s *session.Session) SessionBrief {
 	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发）
-	return SessionBrief{Mode: s.ModePublic(), Model: ms.Model, Effort: ms.Effort,
+	b := SessionBrief{Mode: s.ModePublic(), Model: ms.Model, Effort: ms.Effort,
 		Owner: s.Owner, SID: s.SID, ParentSID: s.ParentOf()}
+	if a := s.TurnActorOf(); a != nil { // T6 当轮说话人（空 = 零变化）
+		b.TurnSpeakerID, b.TurnSpeakerName = a.ID, a.Name
+	}
+	return b
+}
+
+// operatorOf 工具审计主体（T6）：当轮说话人优先、回退会话 Owner——单用户
+// 行为零变化（Owner 语义不动）；多参与者下「谁调的工具」由此可答。
+func (m *Manager) operatorOf(s *session.Session) string {
+	if a := s.TurnActorOf(); a != nil && a.ID != "" {
+		return a.ID
+	}
+	return s.Owner
 }
 
 // configError 配置类错误（error 事件 code=CONFIG）。
@@ -1294,6 +1330,13 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 				appID := newApprovalID()
 				timeoutAt := time.Now().Add(ApprovalTimeout())
 				req := contract.ApprovalReq{ApprovalID: appID, TimeoutAt: timeoutAt}
+				// T6 审批身份链：谁的动作（当轮说话人；回退 Owner ID——
+				//「问谁」路由与审计「这条指令谁下的」的数据前提）
+				if a := s.TurnActorOf(); a != nil {
+					req.RequesterID, req.RequesterName = a.ID, a.Name
+				} else {
+					req.RequesterID = s.Owner
+				}
 				ids := make([]string, 0, len(cards))
 				for _, c := range cards {
 					ids = append(ids, c.ItemID)
@@ -1556,8 +1599,12 @@ func (m *Manager) genTitle(s *session.Session, userMsg, assistant string) {
 	if err != nil {
 		return
 	}
-	prompt := "为下面的任务对话生成一个不超过16个字的中文标题，直接输出标题本身，不要引号、句号或任何解释。\n\n用户：" +
-		truncateRunes(userMsg, 2000) + "\n\n助手：" + truncateRunes(assistant, 500)
+	speaker := "用户" // T6 说话人措辞（单用户零变化）
+	if a := s.TurnActorOf(); a != nil && a.Name != "" {
+		speaker = a.Name
+	}
+	prompt := "为下面的任务对话生成一个不超过16个字的中文标题，直接输出标题本身，不要引号、句号或任何解释。\n\n" +
+		speaker + "：" + truncateRunes(userMsg, 2000) + "\n\n助手：" + truncateRunes(assistant, 500)
 	out, err := cm.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)})
 	if err != nil || s.Stopped() {
 		return

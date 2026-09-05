@@ -217,11 +217,13 @@ func TestNoToolCallsGate(t *testing.T) {
 	reg := session.NewRegistry(st)
 	spec := llm.ModelSpec{ID: "m", Input: []string{"text"}, Priority: 100, NoToolCalls: true}
 	m, err := NewManager(reg, Options{
-		Providers:    func() []llm.ProviderSpec { return []llm.ProviderSpec{{ID: "p", Kind: "openai", Enabled: true, Models: []llm.ModelSpec{spec}}} },
-		Instruction:  func(SessionBrief) string { return "test" },
-		Tools:        func(SessionBrief) []contract.Tool { return []contract.Tool{writeToolOf(nil)} },
-		NewModel:     factoryOf(&scriptedModel{}),
-		CheckPoints:  func(operator, sid string) CheckPointStore { return checkpoint.NewCheckPointStore(st, operator, sid) },
+		Providers: func() []llm.ProviderSpec {
+			return []llm.ProviderSpec{{ID: "p", Kind: "openai", Enabled: true, Models: []llm.ModelSpec{spec}}}
+		},
+		Instruction: func(SessionBrief) string { return "test" },
+		Tools:       func(SessionBrief) []contract.Tool { return []contract.Tool{writeToolOf(nil)} },
+		NewModel:    factoryOf(&scriptedModel{}),
+		CheckPoints: func(operator, sid string) CheckPointStore { return checkpoint.NewCheckPointStore(st, operator, sid) },
 		WorkspaceRoot: func(owner, sid string) string {
 			return st.TmpDir() + "/ws/" + owner + "/" + sid
 		},
@@ -436,7 +438,9 @@ func TestToolBoundaryPersist(t *testing.T) {
 			Instruction: func(SessionBrief) string { return "test" },
 			Tools:       func(SessionBrief) []contract.Tool { return ts },
 			NewModel:    factoryOf(fm),
-			CheckPoints: func(operator, sid string) CheckPointStore { return checkpoint.NewCheckPointStore(st.Store, operator, sid) },
+			CheckPoints: func(operator, sid string) CheckPointStore {
+				return checkpoint.NewCheckPointStore(st.Store, operator, sid)
+			},
 			WorkspaceRoot: func(owner, sid string) string {
 				return st.TmpDir() + "/ws/" + owner + "/" + sid
 			},

@@ -12,37 +12,38 @@ import "time"
 // transport_retry。
 // 传输无关：应用层订阅 Session 事件后映射到自己的管线（SSE 编码归应用）。
 const (
-	EvTextDelta        = "text_delta"
-	EvThinkingDelta    = "thinking_delta"
-	EvToolCall         = "tool_call"
-	EvToolResult       = "tool_result"
-	EvApprovalRequest  = "approval_request"
-	EvApprovalDecision = "approval_decision"
-	EvApprovalTimeout  = "approval_timeout"
-	EvAskRequest       = "ask_user_request"
-	EvAskDecision      = "ask_decision"
-	EvAskTimeout       = "ask_timeout"
-	EvAskIgnored       = "ask_ignored"
-	EvPlanRequest      = "plan_request"
-	EvPlanDecision     = "plan_decision"
-	EvPlanTimeout      = "plan_timeout"
-	EvTodoUpdate       = "todo_update"
-	EvSteerQueued      = "steer_queued"
-	EvSteerUpdated     = "steer_updated"
-	EvSteerRemoved     = "steer_removed"
-	EvSteerInjected    = "steer_injected"
-	EvNotifyQueued     = "notify_queued"
-	EvNotifyInjected   = "notify_injected"
-	EvUserMessage      = "user_message"
-	EvUsage            = "usage"
-	EvSessionEnd       = "session_end"
-	EvError            = "error"
-	EvInterrupted      = "interrupted"
-	EvHarnessNote      = "harness_note"
-	EvSubAgent         = "subagent"
-	EvModelChange      = "model_change"
-	EvSteerReordered   = "steer_reordered"
-	EvTransportRetry   = "transport_retry"
+	EvTextDelta         = "text_delta"
+	EvThinkingDelta     = "thinking_delta"
+	EvToolCall          = "tool_call"
+	EvToolResult        = "tool_result"
+	EvApprovalRequest   = "approval_request"
+	EvApprovalDecision  = "approval_decision"
+	EvApprovalTimeout   = "approval_timeout"
+	EvAskRequest        = "ask_user_request"
+	EvAskDecision       = "ask_decision"
+	EvAskTimeout        = "ask_timeout"
+	EvAskIgnored        = "ask_ignored"
+	EvPlanRequest       = "plan_request"
+	EvPlanDecision      = "plan_decision"
+	EvPlanTimeout       = "plan_timeout"
+	EvTodoUpdate        = "todo_update"
+	EvSteerQueued       = "steer_queued"
+	EvSteerUpdated      = "steer_updated"
+	EvSteerRemoved      = "steer_removed"
+	EvSteerInjected     = "steer_injected"
+	EvNotifyQueued      = "notify_queued"
+	EvNotifyInjected    = "notify_injected"
+	EvUserMessage       = "user_message"
+	EvParticipantUpdate = "participant_update"
+	EvUsage             = "usage"
+	EvSessionEnd        = "session_end"
+	EvError             = "error"
+	EvInterrupted       = "interrupted"
+	EvHarnessNote       = "harness_note"
+	EvSubAgent          = "subagent"
+	EvModelChange       = "model_change"
+	EvSteerReordered    = "steer_reordered"
+	EvTransportRetry    = "transport_retry"
 )
 
 // Event 已发事件（回放/订阅的统一载体；Data 为下方载荷类型之一或 map）。
@@ -153,6 +154,11 @@ type ApprovalReq struct {
 	Note       string         `json:"note,omitempty"`      // 卡面提示（如「批准后本轮后续写操作一并执行」）
 	Diff       string         `json:"diff,omitempty"`      // 审批卡逐行 diff 载荷（apply_patch 补丁原文 / repo_commit git diff；超长截断）
 	Items      []ApprovalItem `json:"items,omitempty"`     // 合并决议卡逐项（空 = 旧单卡形态）
+
+	// T6 多参与者：谁的动作触发的审批（当轮说话人，回退 Owner ID——
+	//「问谁」路由与审计「这条指令谁下的」的数据前提）
+	RequesterID   string `json:"requester_id,omitempty"`
+	RequesterName string `json:"requester_name,omitempty"`
 }
 
 // ItemDecisionOut 合并决议卡单项决议回执（切回/回放重建逐项终态的真源）。
@@ -160,6 +166,9 @@ type ItemDecisionOut struct {
 	ItemID  string `json:"item_id"`
 	Approve bool   `json:"approve"`
 	Reason  string `json:"reason,omitempty"`
+	// T6 多参与者：谁决议的（空 = 单用户零变化——回放可答「谁批的」）
+	DeciderID   string `json:"decider_id,omitempty"`
+	DeciderName string `json:"decider_name,omitempty"`
 }
 
 // DecisionOut 审批决议回执（事件流是切回/回放重建审批卡终态的真源）。
@@ -169,6 +178,10 @@ type DecisionOut struct {
 	Approve    bool              `json:"approve"`
 	Reason     string            `json:"reason,omitempty"`
 	Items      []ItemDecisionOut `json:"items,omitempty"` // 合并决议逐项回执（空 = 旧单卡决议）
+
+	// T6：顶层镜像（首项决议者；N=1 主形态直读）
+	DeciderID   string `json:"decider_id,omitempty"`
+	DeciderName string `json:"decider_name,omitempty"`
 }
 
 // AskOption 提问候选项（value 缺省 = label）。
@@ -203,9 +216,11 @@ type PlanReq struct {
 
 // PlanDecisionOut 计划决议回执（事件流是切回/回放重建计划卡终态的真源）。
 type PlanDecisionOut struct {
-	PlanID  string `json:"plan_id"`
-	Approve bool   `json:"approve"`
-	Reason  string `json:"reason,omitempty"`
+	PlanID      string `json:"plan_id"`
+	Approve     bool   `json:"approve"`
+	Reason      string `json:"reason,omitempty"`
+	DeciderID   string `json:"decider_id,omitempty"` // T6：谁决议的（空 = 零变化）
+	DeciderName string `json:"decider_name,omitempty"`
 }
 
 // SteerEvent 排队消息事件载荷（steer_queued/updated/removed/injected）。
@@ -216,6 +231,9 @@ type SteerEvent struct {
 	Text        string       `json:"text,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	Kind        string       `json:"kind,omitempty"`
+	// T6 多参与者：谁排的队/谁的补充（空 = 单用户零变化）
+	SpeakerID   string `json:"speaker_id,omitempty"`
+	SpeakerName string `json:"speaker_name,omitempty"`
 }
 
 // InterruptOut 打断行载荷（interrupted 事件——立即处理排队的取消收尾，
@@ -228,6 +246,16 @@ type InterruptOut struct {
 type UserMsg struct {
 	Text        string       `json:"text"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	// T6 多参与者：谁说的（Name = 快照；空 = 单用户零变化）
+	SpeakerID   string `json:"speaker_id,omitempty"`
+	SpeakerName string `json:"speaker_name,omitempty"`
+}
+
+// ParticipantEvent 参与者名册变更（participant_update；回放重建 roster 的
+// 真源——不依赖 session.json 快照）。Kind 封闭集：joined | updated | left。
+type ParticipantEvent struct {
+	Participant Participant `json:"participant"`
+	Kind        string      `json:"kind"` // joined | updated | left
 }
 
 // FileChange session_end 文件变更清单条目（会话累计，path 排序）。

@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
@@ -25,6 +26,90 @@ type steeringMiddleware struct {
 // newSteeringMiddleware 构造。
 func newSteeringMiddleware(sess *session.Session) adk.TypedChatModelAgentMiddleware[*schema.Message] {
 	return &steeringMiddleware{sess: sess}
+}
+
+// speakerExtraID/Name 历史消息 Extra 的说话人署名双键（T6——Extra 是 adk
+// 体系公共 map 通道，键带命名空间防撞）。平铺存字符串而非嵌套 map：adk
+// 检查点是 gob 序列化，接口槽位放 map 需 gob.Register（feishu 实测挂起点
+// 存检查点即炸）——纯内建 string 值免注册，JSON/gob 往返天然安全。
+const (
+	speakerExtraID   = "einox.speaker.id"
+	speakerExtraName = "einox.speaker.name"
+)
+
+// inputSegment 输入分段（T6 多参与者）：同人相邻合并、异人各自成条。
+type inputSegment struct {
+	speaker *contract.Participant // nil = 无署名（单用户/系统通知）
+	texts   []string
+	atts    []session.Attachment
+}
+
+// inputSegments 排队消息 + 直接输入按说话人分段（T6）；空源跳过；说话人
+// 全空退化为单段 = 旧单条合并形态（含通知段并入——与旧行为一致）。
+func inputSegments(queued []session.QueuedMsg, userMsg string, atts []session.Attachment, actor *contract.Participant) []inputSegment {
+	var segs []inputSegment
+	add := func(sp *contract.Participant, text string, as []session.Attachment) {
+		if text == "" && len(as) == 0 {
+			return
+		}
+		if n := len(segs); n > 0 && sameSpeaker(segs[n-1].speaker, sp) {
+			segs[n-1].texts = append(segs[n-1].texts, withAttachments(text, as))
+			segs[n-1].atts = append(segs[n-1].atts, as...)
+			return
+		}
+		segs = append(segs, inputSegment{speaker: sp, texts: []string{withAttachments(text, as)}, atts: as})
+	}
+	for _, q := range queued {
+		var sp *contract.Participant
+		if q.SpeakerID != "" {
+			sp = &contract.Participant{ID: q.SpeakerID, Name: q.SpeakerName}
+		}
+		add(sp, q.Text, q.Attachments)
+	}
+	add(actor, userMsg, atts)
+	return segs
+}
+
+func sameSpeaker(a, b *contract.Participant) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.ID == b.ID
+}
+
+// renderSpeakers 模型输入投影（T6）：带署名的 user 消息渲染「名字：」前缀——
+// 说话人原生进模型面（einox 自持历史投影的账二兑现位）。copy-on-write 不动
+// 入参（存储保真——history 原文不带前缀，Extra 携署名）；多模态消息前缀进
+// 首个 text part。
+func renderSpeakers(msgs []*schema.Message) []*schema.Message {
+	out, copied := msgs, false
+	for i, m := range msgs {
+		if m.Role != schema.User || m.Extra == nil {
+			continue
+		}
+		name, _ := m.Extra[speakerExtraName].(string)
+		if name == "" {
+			continue
+		}
+		prefix := name + "："
+		cp := *m
+		switch {
+		case cp.Content != "":
+			cp.Content = prefix + cp.Content
+		case len(cp.UserInputMultiContent) > 0 && cp.UserInputMultiContent[0].Type == schema.ChatMessagePartTypeText:
+			parts := append([]schema.MessageInputPart(nil), cp.UserInputMultiContent...)
+			parts[0].Text = prefix + parts[0].Text
+			cp.UserInputMultiContent = parts
+		default:
+			continue
+		}
+		if !copied {
+			out = append([]*schema.Message(nil), msgs...)
+			copied = true
+		}
+		out[i] = &cp
+	}
+	return out
 }
 
 // withAttachments 附件引用拼接（模型输入形态：路径引用，读文档工具消费）。
@@ -83,7 +168,11 @@ func (m *steeringMiddleware) BeforeModelRewriteState(
 	ctx context.Context, state *adk.TypedChatModelAgentState[*schema.Message], mc *adk.ModelContext,
 ) (context.Context, *adk.TypedChatModelAgentState[*schema.Message], error) {
 	for _, msg := range m.sess.TakePending() {
-		state.Messages = append(state.Messages, userMessageWithImages("（用户运行中补充）"+msg.Text, msg.Attachments))
+		label := "（用户运行中补充）"
+		if msg.SpeakerName != "" { // T6 谁的运行中补充
+			label = "（" + msg.SpeakerName + " 运行中补充）"
+		}
+		state.Messages = append(state.Messages, userMessageWithImages(label+msg.Text, msg.Attachments))
 	}
 	return ctx, state, nil
 }

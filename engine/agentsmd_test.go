@@ -44,7 +44,9 @@ func TestAgentsMDInjectedBeforeFirstUser(t *testing.T) {
 	p := writeAgentsMD(t, dir, "MARKER_XYZ 用户级约定")
 	fm := &scriptedModel{}
 	m := newSeamManager(t, func(o *Options) {
-		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) { return fm, nil }
+		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return fm, nil
+		}
 		o.AgentsMD = func(SessionBrief) []string { return []string{p} }
 	})
 	runOnce(t, m)
@@ -72,7 +74,9 @@ func TestAgentsMDInjectedBeforeFirstUser(t *testing.T) {
 func TestAgentsMDEmptyListNoInjection(t *testing.T) {
 	fm := &scriptedModel{}
 	m := newSeamManager(t, func(o *Options) {
-		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) { return fm, nil }
+		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return fm, nil
+		}
 		o.AgentsMD = func(SessionBrief) []string { return nil }
 	})
 	runOnce(t, m)
@@ -95,7 +99,9 @@ func TestAgentsMDMaxBytesSkipsOverflow(t *testing.T) {
 	}
 	fm := &scriptedModel{}
 	m := newSeamManager(t, func(o *Options) {
-		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) { return fm, nil }
+		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return fm, nil
+		}
 		o.AgentsMD = func(SessionBrief) []string { return []string{big, smallMarker} } // 首文件即超 32KiB 预算
 		o.AgentsMDMaxBytes = 32 * 1024
 	})
@@ -108,7 +114,7 @@ func TestAgentsMDMaxBytesSkipsOverflow(t *testing.T) {
 }
 
 // TestAgentsMDImportRecursion @import 递归：清单文件内 @sub.md 引用被装载
-//（相对宿主目录解析、上游深度上限 5）。
+// （相对宿主目录解析、上游深度上限 5）。
 func TestAgentsMDImportRecursion(t *testing.T) {
 	dir := t.TempDir()
 	main := writeAgentsMD(t, dir, "MARKER_MAIN 与递归引用：\n@sub.md\n")
@@ -118,7 +124,9 @@ func TestAgentsMDImportRecursion(t *testing.T) {
 	}
 	fm := &scriptedModel{}
 	m := newSeamManager(t, func(o *Options) {
-		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) { return fm, nil }
+		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return fm, nil
+		}
 		o.AgentsMD = func(SessionBrief) []string { return []string{main} }
 	})
 	runOnce(t, m)

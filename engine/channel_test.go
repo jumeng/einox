@@ -363,7 +363,9 @@ func TestChannelBindingPersistsAcrossRestart(t *testing.T) {
 		t.Fatal("解绑后再入站应新建会话")
 	}
 	chanWaitFor(t, func() bool { return s3.StateOf() == session.StateEnded },
-		func() string { return "解绑后新会话应收束（Windows 清理竞态——先等收束再清 TempDir）" })
+		func() string {
+			return "解绑后新会话应收束（Windows 清理竞态——先等收束再清 TempDir）"
+		})
 	waitTitleFlight(t, s3)
 }
 

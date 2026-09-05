@@ -288,7 +288,13 @@ func transcriptPath(s *session.Session) string {
 func writeTranscript(st session.Store, s *session.Session, msgs []*schema.Message) {
 	var b strings.Builder
 	for _, m := range msgs {
-		fmt.Fprintf(&b, "## %s\n", m.Role)
+		who := "" // T6 说话人署名（user 消息带 Extra 时）——存档可分谁说的
+		if m.Role == schema.User {
+			if n, _ := m.Extra[speakerExtraName].(string); n != "" {
+				who = "（" + n + "）"
+			}
+		}
+		fmt.Fprintf(&b, "## %s%s\n", m.Role, who)
 		if m.ReasoningContent != "" {
 			b.WriteString(m.ReasoningContent + "\n")
 		}
