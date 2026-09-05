@@ -236,6 +236,10 @@ type FileChange struct {
 type SessionEnd struct {
 	Summary string       `json:"summary"`
 	Files   []FileChange `json:"files,omitempty"` // 有改动才带（纯问答省缺）
+	// HistLen 轮末历史长度（分叉锚定数据：ForkAt 截断重建依据；零值 = 不可
+	// 锚——旧存量事件兼容）。记录时点先于本轮历史追加，值 = 追加前长度 +
+	// 本轮待追加消息数（预测值即轮后精确值）。
+	HistLen int `json:"hist_len,omitempty"`
 }
 
 // TransportRetry 传输重连通知（网络容错 ②：模型调用重试在途——事件层已实时

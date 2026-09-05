@@ -85,7 +85,7 @@ func TestSummarizeTriggersAndFidelity(t *testing.T) {
 	if !strings.Contains(mainAll, "非流式答复摘要文本") {
 		t.Fatalf("主模型输入应含摘要文本")
 	}
-	if !strings.Contains(mainAll, "spill/transcript.txt") {
+	if !strings.Contains(mainAll, "spill/transcript-"+s.SID+".txt") {
 		t.Fatalf("摘要信封应含 transcript 溯源路径（Finalize 包装注入）")
 	}
 	// 保真锚定：session 历史六轮原文全部未动
@@ -101,7 +101,7 @@ func TestSummarizeTriggersAndFidelity(t *testing.T) {
 		}
 	}
 	// transcript 全文落域（含被裁的最老轮——模型可溯源）
-	if tr, ok := st.ReadUserTreeFile("张三", "sessions/"+s.SID+"/spill/transcript.txt"); !ok || !strings.Contains(string(tr), "R1BIG") {
+	if tr, ok := st.ReadUserTreeFile("张三", "sessions/"+s.SID+"/spill/transcript-"+s.SID+".txt"); !ok || !strings.Contains(string(tr), "R1BIG") {
 		t.Fatalf("transcript 应含全量历史：ok=%v", ok)
 	}
 }
@@ -158,7 +158,7 @@ func TestSummarizeFallbackClearsWindow(t *testing.T) {
 	}
 	// 兜底先落 transcript 原文（防「压缩失败 = 全文丢失」）+ 发清窗通知卡
 	//（经 s.Record 落事件流——生产 live 流靠订阅扇出，与 reduction note 同通道）
-	if tr, ok := st.ReadUserTreeFile("张三", "sessions/"+s.SID+"/spill/transcript.txt"); !ok || !strings.Contains(string(tr), "R1BIG") {
+	if tr, ok := st.ReadUserTreeFile("张三", "sessions/"+s.SID+"/spill/transcript-"+s.SID+".txt"); !ok || !strings.Contains(string(tr), "R1BIG") {
 		t.Fatalf("清窗兜底应先落域 transcript 全文：ok=%v", ok)
 	}
 	var note *contract.HarnessNote
@@ -217,7 +217,7 @@ func TestSummarizeFallbackTaskAnchor(t *testing.T) {
 	if !strings.Contains(all, "[completed] 勘察仓库结构") || !strings.Contains(all, "[in_progress] 汇总差异清单") {
 		t.Fatalf("任务锚应含最后 todo 清单状态：%.160s", all)
 	}
-	if !strings.Contains(all, "任务状态锚") || !strings.Contains(all, "spill/transcript.txt") || !strings.Contains(all, "不要从头重做") {
+	if !strings.Contains(all, "任务状态锚") || !strings.Contains(all, "spill/transcript-"+s.SID+".txt") || !strings.Contains(all, "不要从头重做") {
 		t.Fatalf("任务锚应含锚指引与 transcript 路径：%.160s", all)
 	}
 	// 锚不落 session 真源（单轮注入——保真：合成消息不进历史）
@@ -255,7 +255,7 @@ func TestSummarizeFallbackAnchorNoTodo(t *testing.T) {
 		joined.WriteString(msgTextOf(m2))
 	}
 	all := joined.String()
-	if !strings.Contains(all, "任务状态锚") || !strings.Contains(all, "spill/transcript.txt") {
+	if !strings.Contains(all, "任务状态锚") || !strings.Contains(all, "spill/transcript-"+s.SID+".txt") {
 		t.Fatalf("无 todo 轮时锚应降级为纯指引：%.160s", all)
 	}
 	if strings.Contains(all, "当前任务清单状态") {

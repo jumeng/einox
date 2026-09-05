@@ -125,14 +125,32 @@ func (m *Manager) sessionTools(s *session.Session) ([]contract.Tool, error) {
 	return out, nil
 }
 
+// wsSIDOf 工作区/外置域寻址键（包级——writeTranscript 等非 Manager 件共用）：
+// 辅助对话共享父会话域（ZCode「同一任务上下文」语义——side 能读父当轮产出
+// 与 spill 外置域）。父轮末即清对 side 的可见性影响是共享临时域的固有代价
+// （工作区一轮一清，side 的文件上下文跟随父任务）。
+func wsSIDOf(s *session.Session) string {
+	if p := s.ParentOf(); p != "" {
+		return p
+	}
+	return s.SID
+}
+
+// wsSID 同 wsSIDOf（Manager 方法形态——workspaceOf/wipeWorkspace/spillDirOf 寻址）。
+func (m *Manager) wsSID(s *session.Session) string { return wsSIDOf(s) }
+
 // workspaceOf 会话工作区（WorkspaceRoot 注入，用户域 workspaces/<sid>；
 // 模型见 einox/workspace）。
 func (m *Manager) workspaceOf(s *session.Session) string {
-	return workspace.Of(m.Opt.WorkspaceRoot(s.Owner, s.SID))
+	return workspace.Of(m.Opt.WorkspaceRoot(s.Owner, m.wsSID(s)))
 }
 
 // wipeWorkspace 任务正常收尾即清会话工作区（一轮任务一清；WorkspaceKeep
-// 声明的持久子区豁免，随会话删除/过期/孤儿清扫整清）。
+// 声明的持久子区豁免，随会话删除/过期/孤儿清扫整清）。辅助对话跳过——
+// 共享工作区的清理权在父会话（side 收尾清了会毁父在途现场）。
 func (m *Manager) wipeWorkspace(s *session.Session) {
-	workspace.Wipe(m.Opt.WorkspaceRoot(s.Owner, s.SID), m.Opt.WorkspaceKeep...)
+	if s.ParentOf() != "" {
+		return
+	}
+	workspace.Wipe(m.Opt.WorkspaceRoot(s.Owner, m.wsSID(s)), m.Opt.WorkspaceKeep...)
 }

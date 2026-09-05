@@ -53,6 +53,9 @@ type SessionBrief struct {
 	Effort string
 	Owner  string // 会话归属用户
 	SID    string // 会话标识
+	// ParentSID 辅助对话父会话（空 = 普通会话——应用可据此调 Instruction/
+	// 工具面/skill 目录；side 共享父工作区与外置域，见 wsSID）。
+	ParentSID string
 }
 
 // Options 引擎组装配置（应用装配层构造）。
@@ -91,6 +94,12 @@ type Options struct {
 	//  5. 勿从包装内发起 *contract.Suspend（引擎三卡分叉与决议消费链路
 	//     未对应用开放）。
 	ToolWrap func(t contract.Tool) contract.Tool
+	// Hooks 订阅式工具钩子（audit/拦截零样板订阅口，nil = 零变化）：挂
+	// ToolWrap 之外的最外层（包装序 hitl → ToolWrap → Hooks → einoext——
+	// 审计看终局：Pre 先于审批决策触发、Post 收审批拒绝信封与工具原始
+	// 返回）。主面与子代理面同挂；Pre 可否决（error = 拒绝信封回喂，只能
+	// 收紧不能放宽——与 ToolWrap 同纪律）。语义全貌见 toolhooks.go。
+	Hooks *ToolHooks
 	// NewModel 模型构造口（缺省生产构造 llm.NewChatModel；测试注入假模型）。
 	NewModel llm.ModelFactory
 	// ImageResolve 图片引用解析（文档仓库路径 → 字节+MIME；nil = 图片不可用——
@@ -200,7 +209,7 @@ type TurnEndSummary struct {
 	SID     string
 	Title   string
 	Task    string
-	Summary string               // 会话累计文本聚合（session_end 同源；列表摘要口径截 60 字，非单轮）
+	Summary string                // 会话累计文本聚合（session_end 同源；列表摘要口径截 60 字，非单轮）
 	Files   []contract.FileChange // 文件变更清单（有改动才非空）
 	EndedAt time.Time
 }
@@ -495,8 +504,8 @@ func (m *Manager) emitUsage(s *session.Session, fn emitFn, u *schema.TokenUsage,
 	}
 	m.emit(s, fn, contract.EvUsage, contract.UsageOut{
 		PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens,
-		TotalTokens:   u.TotalTokens,
-		SpawnID:       spawnID,
+		TotalTokens:    u.TotalTokens,
+		SpawnID:        spawnID,
 		EstInstruction: est.instruction, EstTools: est.tools, EstMessages: est.messages,
 		EstSaved: est.saved, // 整形节省注记（H8-1；原始-整形差额，>0 才有意义）
 	})
@@ -836,16 +845,25 @@ func (m *Manager) settleTurn(s *session.Session, acc *runAccum, endState string,
 	firstTurn := !hasAssistant(s.CloneHistory())
 	turnUser := s.TurnUserMsgOf()
 	// 收尾顺序：session_end 先记录（与回放一致）→ 历史追加 → 终态落盘 →
-	// 最后写事件——客户端见 end 时状态已在写队列
-	endEv := s.Record(contract.EvSessionEnd, contract.SessionEnd{Summary: s.SummaryOf(), Files: s.FileChangesSnapshot()})
+	// 最后写事件——客户端见 end 时状态已在写队列。HistLen 在记录时点先于
+	// 追加：追加前长度 + 本轮待追加消息数 = 轮后精确值（ForkAt 锚定依据）。
+	// 末段保险必须先于 HistLen 计算收口——流中致命错误轮带着未封账的半截
+	// 段到达此处，晚封账即少计一条（错误轮锚恰是「从失败点重试」场景）。
+	if acc != nil {
+		acc.endAssistantMsg() // 封账只改 acc 不发事件（流分支已逐段封账，空段跳过）
+	}
+	histLen := s.HistoryLen()
+	if acc != nil {
+		histLen += len(acc.msgs)
+	}
+	endEv := s.Record(contract.EvSessionEnd, contract.SessionEnd{
+		Summary: s.SummaryOf(), Files: s.FileChangesSnapshot(), HistLen: histLen,
+	})
 	if endEv.ID == 0 {
 		return // 已删除：静默
 	}
-	if acc != nil {
-		acc.endAssistantMsg() // 末段保险（流分支已逐段封账，空段跳过）
-		if len(acc.msgs) > 0 {
-			s.AppendHistory(acc.msgs...) // 用户消息已由 Run 开头入史（中断保险）
-		}
+	if acc != nil && len(acc.msgs) > 0 {
+		s.AppendHistory(acc.msgs...) // 用户消息已由 Run 开头入史（中断保险）
 	}
 	finish(endState)
 	if endState == session.StateEnded {
@@ -933,10 +951,10 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	cm = llm.NewVisionModel(cm, spec, m.Opt.ImageResolve) // 图片引用解析/驱逐/门禁（请求边界）
 	cm = llm.NewHistoryShapeModel(cm, p.Kind)             // reasoning 出站整形（请求边界，H1①）
 	agConf := &adk.ChatModelAgentConfig{
-		Instruction:      m.Opt.Instruction(m.briefOf(s)),
-		Model:            cm,
-		MaxIterations:    maxIterations,
-		ModelRetryConfig: m.modelRetryConfig(), // 网络容错 ②：有界重试（机制默认挂接，应用零配置）
+		Instruction:         m.Opt.Instruction(m.briefOf(s)),
+		Model:               cm,
+		MaxIterations:       maxIterations,
+		ModelRetryConfig:    m.modelRetryConfig(),          // 网络容错 ②：有界重试（机制默认挂接，应用零配置）
 		ModelFailoverConfig: m.modelFailoverConfig(ctx, s), // 主模型降级链（空清单 nil 零变化）
 	}
 	var ts []contract.Tool
@@ -1086,10 +1104,10 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	return ag, runner, behaviors, nil
 }
 
-// wrapFace 契约面统一包装序：hitl 审批 → ToolWrap（应用缝，最外）→ einoext
-// 适配。主面与子代理面（spawn/拓扑）同序——审计/准入对子代理同样生效；
-// 应用包装在审批外层即单调收紧（透传保留审批，额外拒绝生效，豁免不可达）。
-// nil ToolWrap = 只走 hitl，零变化。
+// wrapFace 契约面统一包装序：hitl 审批 → ToolWrap（应用缝）→ Hooks（订阅
+// 钩子，最外）→ einoext 适配。主面与子代理面（spawn/拓扑）同序——审计/准入
+// 对子代理同样生效；应用包装在审批外层即单调收紧（透传保留审批，额外拒绝
+// 生效，豁免不可达）。nil ToolWrap / nil Hooks = 跳过该层，零变化。
 func (m *Manager) wrapFace(ts []contract.Tool, s *session.Session, mode string) []tool.BaseTool {
 	wrapped := hitl.WrapTools(ts, s, mode, m.Opt.Approval)
 	if m.Opt.ToolWrap != nil {
@@ -1097,7 +1115,7 @@ func (m *Manager) wrapFace(ts []contract.Tool, s *session.Session, mode string) 
 			wrapped[i] = m.Opt.ToolWrap(t)
 		}
 	}
-	return einoext.Adapt(wrapped)
+	return einoext.Adapt(m.hookFace(wrapped, m.briefOf(s)))
 }
 
 // imageCapableOf 会话模型是否声明图片输入（read_image 工具门禁——当前路由
@@ -1112,7 +1130,7 @@ func (m *Manager) imageCapableOf(s *session.Session) bool {
 func (m *Manager) briefOf(s *session.Session) SessionBrief {
 	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发）
 	return SessionBrief{Mode: s.ModePublic(), Model: ms.Model, Effort: ms.Effort,
-		Owner: s.Owner, SID: s.SID}
+		Owner: s.Owner, SID: s.SID, ParentSID: s.ParentOf()}
 }
 
 // configError 配置类错误（error 事件 code=CONFIG）。

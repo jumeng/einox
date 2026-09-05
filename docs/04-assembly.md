@@ -16,6 +16,7 @@
 | `ProcessTools` | | 进程级通用件——应用**选择加入**的基座件（时钟/网页抓取等） |
 | `SessionToolsOff` | | 排除的会话域工具族（todo/ask/plan/fs/cmd/patch；nil = 全挂零变化，未知名构造期即拒——fail-fast。裁 fs 族 = 放弃 reduction 外置换指针取回——超长工具结果只剩截断头尾） |
 | `ToolWrap` | | 工具包装缝（hitl 审批外层，主面与子代理面同挂——调用审计/结果脱敏/动态准入。只能收紧不能放宽：透传保留审批语义；拒绝以 `{"ok":false}` 信封回喂模型） |
+| `Hooks` | | 订阅式工具钩子（ToolWrap 之外最外层，主面与子代理面同挂——审计观察/策略拦截零样板订阅。`Pre` 返回 error = 拒绝信封回喂〔只能收紧不能放宽〕；`Post` 收工具原始返回与耗时——审批拒绝的调用也过钩子；Pre panic fail-closed 转拒绝、Post panic 记日志；nil/双空回调 = 零变化） |
 | `NewModel` | | 模型构造口（缺省 `llm.NewChatModel`；测试注入 `llmtest` 假模型） |
 | `ImageResolve` | | 图片引用解析（nil = 图片不可用，含图请求即错误面） |
 | `SkillsDir` | | skill 物化目录（`func(SessionBrief) string`——按租户物化不同 skill 包；nil/空 = 不挂 skill middleware） |
@@ -172,6 +173,11 @@ func (t *createOrder) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 三层结构（对标 llm 供应商「内置目录 + 自定义」，详见 [03](03-capabilities.md) 渠道三层）：**① 机制核** `engine/channel.go`（`Manager.Channels()` 编排泵——渠道无关）；**② 官方通用件** `channels/feishu`（飞书）、`channels/voice`（语音占位）；**③ 业务自定义渠道**（长在业务仓）。
 
 名词对照：渠道件以国内品牌 feishu 命名；Lark 为同一产品的海外品牌，`larksuite` 是其 GitHub org 与依赖溯源主体名（SDK import path 由此而来）。当前实现走国内域，接海外域属端点配置扩展，不产生第二个渠道件。
+
+### 7. 会话派生（分叉 / 辅助对话）
+
+- **全量分叉** `Registry.Fork(owner, sid)`：复制当前完整态生成新会话（血缘 note + spill 整目录复制）；**锚定分叉** `Registry.ForkAt(owner, sid, anchor)`：anchor = 某条 `session_end` 事件 ID，从该轮边界岔出（事件/历史/账目截至锚；anchor=0 即全量）。UI 取锚点 = 轮末事件（自然收束与错误轮终均可）。
+- **辅助对话** `Registry.Side(owner, sid)`：继承主会话历史快照的轻量会话（父 running 时可开——「主任务执行中问快速问题」）；工作区/外置域共享父域（side 轮末不清、父删除级联关闭）；`Registry.SidesOf(owner, sid)` 列 side（UI 寻址）；`SessionBrief.ParentSID` 供 Instruction/工具面按 side 形态裁剪。生命周期细则见 [03](03-capabilities.md) Side 行。
 
 **飞书开箱装配**（`channels/feishu`，长连接模式——免公网回调与签名验证）：
 

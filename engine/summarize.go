@@ -7,8 +7,9 @@ package engine
 //     自尾向前保留、起点回退 user 边界不切 tool 配对；codex trim 同语义）
 //   ②清窗兜底（包装层：摘要降级链耗尽不外抛——state 改自最后 user 起的
 //     尾段新窗，运行继续；codex token-budget compact 语义）
-//   ③transcript 落域（触发即写 sessions/<sid>/spill/transcript.txt——成功
-//     路径 Callback 写压缩前全文、清窗兜底写原文；溯源路径经 Finalize 包装
+//   ③transcript 落域（触发即写 sessions/<wsSID>/spill/transcript-<sid>.txt
+//     ——成功路径 Callback 写压缩前全文、清窗兜底写原文；存储域走 wsSID 共享
+//     寻址、文件名带自身 SID（共享外置域防覆盖）；溯源路径经 Finalize 包装
 //     注入摘要信封，模型经 read_file spill/ 路由可取回，零新增机制）
 // 触发 70% 窗口、挂 reduction 之后（计数看 clear 后状态——语义压缩只兜机械
 // 压缩兜不住的文本膨胀）；TokenCounter 用 shapedTokenCounter（整形后出站
@@ -41,9 +42,12 @@ const (
 	summarizeInputPct   = 80 // 摘要请求输入预算：防超窗
 )
 
-// transcriptNote 摘要信封溯源段（Finalize 包装注入——adk 的 TranscriptFilePath
+// transcriptNoteOf 摘要信封溯源段（Finalize 包装注入——adk 的 TranscriptFilePath
 // 与 Finalize 互斥，Finalize 设置时该字段被架空，路径只能经包装进信封）。
-const transcriptNote = "\n\n完整对话记录已存档：spill/transcript.txt（需要被压缩内容的原文细节时，用 read_file 读取该路径）"
+// 路径按会话命名（transcriptPath——共享外置域防覆盖）。
+func transcriptNoteOf(s *session.Session) string {
+	return "\n\n完整对话记录已存档：" + transcriptPath(s) + "（需要被压缩内容的原文细节时，用 read_file 读取该路径）"
+}
 
 // summarizeInstruction 摘要指令（任务水位/todo/结论/全景/未决——断链防护）。
 const summarizeInstruction = `请把以上完整对话历史压缩为一份结构化摘要，作为后续对话的上下文。必须保留：
@@ -86,7 +90,7 @@ func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Ses
 		}
 		if n := len(out); n > 0 && out[n-1] != nil {
 			last := *out[n-1]
-			last.Content += transcriptNote
+			last.Content += transcriptNoteOf(s)
 			out[n-1] = &last
 		}
 		return out, nil
@@ -112,11 +116,11 @@ func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Ses
 		Callback: func(ctx context.Context, before, after adk.TypedChatModelAgentState[*schema.Message]) error {
 			bTok, _ := shapedTokenCounter(ctx, before.Messages, nil)
 			aTok, _ := shapedTokenCounter(ctx, after.Messages, nil)
-			writeTranscript(m.reg.Store(), s.Owner, s.SID, before.Messages)
+			writeTranscript(m.reg.Store(), s, before.Messages)
 			s.Record(contract.EvHarnessNote, contract.HarnessNote{
 				Kind:   "compaction",
 				Title:  fmt.Sprintf("已压缩历史 %d → %d token（保留任务水位）", bTok, aTok),
-				Detail: "被压缩内容以摘要形态注入后续上下文；全文 spill/transcript.txt（read_file 可溯源）",
+				Detail: "被压缩内容以摘要形态注入后续上下文；全文 " + transcriptPath(s) + "（read_file 可溯源）",
 			})
 			return nil
 		},
@@ -126,7 +130,7 @@ func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Ses
 	}
 	return &clearWindowFallback{
 		TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
-		inner:                             inner, st: m.reg.Store(), owner: s.Owner, sid: s.SID, sess: s,
+		inner:                             inner, st: m.reg.Store(), sess: s,
 	}, nil
 }
 
@@ -225,8 +229,6 @@ type clearWindowFallback struct {
 	*adk.TypedBaseChatModelAgentMiddleware[*schema.Message]
 	inner adk.ChatModelAgentMiddleware
 	st    session.Store
-	owner string
-	sid   string
 	sess  *session.Session // 清窗通知卡 Record 面
 }
 
@@ -237,11 +239,11 @@ func (c *clearWindowFallback) BeforeModelRewriteState(
 	if err == nil {
 		return nctx, nstate, nil
 	}
-	writeTranscript(c.st, c.owner, c.sid, state.Messages)
+	writeTranscript(c.st, c.sess, state.Messages)
 	c.sess.Record(contract.EvHarnessNote, contract.HarnessNote{
 		Kind:   "compaction",
 		Title:  "摘要失败，已清窗续跑（保留最近上下文）",
-		Detail: fmt.Sprintf("压缩降级链耗尽：%v。上下文改用最近消息续跑；全文 spill/transcript.txt（read_file 可溯源）", err),
+		Detail: fmt.Sprintf("压缩降级链耗尽：%v。上下文改用最近消息续跑；全文 %s（read_file 可溯源）", err, transcriptPath(c.sess)),
 	})
 	after := *state
 	tail := tailFromLastUser(state.Messages)
@@ -250,13 +252,22 @@ func (c *clearWindowFallback) BeforeModelRewriteState(
 	// 进 events，模型当轮消化后经回复/todo_write 延续。
 	out := make([]*schema.Message, len(tail), len(tail)+1)
 	copy(out, tail)
-	out = append(out, taskAnchor(c.sess.TitleOf(), lastTodoState(state.Messages)))
+	out = append(out, taskAnchor(c.sess, lastTodoState(state.Messages)))
 	after.Messages = out
 	return ctx, &after, nil
 }
 
-// writeTranscript 全文落会话持久域（触发即写；read_file spill/transcript.txt 读回）。
-func writeTranscript(st session.Store, owner, sid string, msgs []*schema.Message) {
+// transcriptPath 会话全文外置的虚拟前缀路径（通知卡承诺与 read_file 寻址
+// 同源）。文件名带自身 SID：辅助对话与父会话共用外置域（wsSIDOf 共享寻址），
+// 固定名会互相覆盖（reduction spill 靠 callID 命名无此问题）。旧格式
+// spill/transcript.txt 不迁移——非 side 会话旧指针仍指向自身目录可读。
+func transcriptPath(s *session.Session) string {
+	return "spill/transcript-" + s.SID + ".txt"
+}
+
+// writeTranscript 全文落会话持久域（触发即写；read_file 经 transcriptPath 读回）。
+// 存储域走 wsSIDOf 共享寻址（side → 父目录），文件名带自身 SID 防覆盖。
+func writeTranscript(st session.Store, s *session.Session, msgs []*schema.Message) {
 	var b strings.Builder
 	for _, m := range msgs {
 		fmt.Fprintf(&b, "## %s\n", m.Role)
@@ -268,10 +279,11 @@ func writeTranscript(st session.Store, owner, sid string, msgs []*schema.Message
 		}
 		b.WriteString(msgTextOf(m) + "\n\n")
 	}
-	// 落盘失败记日志：通知卡已向模型承诺「transcript.txt 可 read_file 溯源」——
+	// 落盘失败记日志：通知卡已向模型承诺「transcript 可 read_file 溯源」——
 	// 静默吞错会让指路落空且无从排障。
-	if err := st.WriteUserTreeFile(owner, path.Join("sessions", sid, "spill", "transcript.txt"), []byte(b.String())); err != nil {
-		log.Printf("summarize: transcript 落盘失败（%s/%s）：%v", owner, sid, err)
+	rel := path.Join("sessions", wsSIDOf(s), "spill", "transcript-"+s.SID+".txt")
+	if err := st.WriteUserTreeFile(s.Owner, rel, []byte(b.String())); err != nil {
+		log.Printf("summarize: transcript 落盘失败（%s/%s）：%v", s.Owner, s.SID, err)
 	}
 }
 
@@ -331,7 +343,7 @@ func lastTodoState(msgs []*schema.Message) []todoState {
 // 压缩保任务状态是主流共识（Claude Code 摘要 Pending Tasks 章节/plan file
 // 重注入、codex notes 跨窗持久）；成功路径摘要指令已要求保 todo，fallback
 // 路径此前裸奔——此锚补差。
-func taskAnchor(title string, todos []todoState) *schema.Message {
+func taskAnchor(s *session.Session, todos []todoState) *schema.Message {
 	var b strings.Builder
 	b.WriteString("[任务状态锚] 此前对话已因压缩失败清窗，以上为清窗保留的最近消息。")
 	if len(todos) > 0 {
@@ -340,9 +352,9 @@ func taskAnchor(title string, todos []todoState) *schema.Message {
 			fmt.Fprintf(&b, "- [%s] %s\n", it.Status, it.Content)
 		}
 	}
-	if title != "" {
+	if title := s.TitleOf(); title != "" {
 		fmt.Fprintf(&b, "会话主题：%s\n", title)
 	}
-	b.WriteString("完整对话记录已存档 spill/transcript.txt（需要原文细节时用 read_file 读取）。请基于以上锚点继续任务，不要从头重做。")
+	b.WriteString("完整对话记录已存档 " + transcriptPath(s) + "（需要原文细节时用 read_file 读取）。请基于以上锚点继续任务，不要从头重做。")
 	return schema.UserMessage(b.String())
 }

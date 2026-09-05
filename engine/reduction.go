@@ -62,7 +62,7 @@ func (m *Manager) newReductionMiddleware(s *session.Session, window int, notify 
 		}
 	}
 	cfg := &reduction.Config{
-		Backend:                   spillBackend{st: m.reg.Store(), owner: s.Owner, sid: s.SID, note: note},
+		Backend:                   spillBackend{st: m.reg.Store(), owner: s.Owner, sid: m.wsSID(s), note: note},
 		MaxLengthForTrunc:         truncMaxLength,
 		ReadFileToolName:          "read_file", // 耦合 fs 族（sessionTools）：裁 fs 族后外置指针不可取回（Options.SessionToolsOff 注释与 docs/04 裁剪表已警示）；不联动禁外置——上游截断与外置在同一 handler 内一体，禁外置须复制其逻辑
 		TruncExcludeTools:         toolSearchExclude,
@@ -85,9 +85,10 @@ func (m *Manager) newReductionMiddleware(s *session.Session, window int, notify 
 	return reduction.New(context.Background(), cfg)
 }
 
-// spillDirOf 会话外置域绝对路径（fsutil spill/ 前缀的取回根）。
+// spillDirOf 会话外置域绝对路径（fsutil spill/ 前缀的取回根；辅助对话解析
+// 到父目录——共享外置域直读，无复制）。
 func (m *Manager) spillDirOf(s *session.Session) string {
-	return filepath.Join(m.reg.Store().UserTreeDir(s.Owner), "sessions", s.SID, "spill")
+	return filepath.Join(m.reg.Store().UserTreeDir(s.Owner), "sessions", m.wsSID(s), "spill")
 }
 
 // spillPathGen 模型面外置路径生成（spill/<kind>/<callID>——虚拟前缀，由

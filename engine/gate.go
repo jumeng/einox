@@ -109,7 +109,7 @@ func (m *Manager) runGateCheckers(ctx context.Context, s *session.Session, gate 
 			err = fmt.Errorf("质量门 checker panic：%v", r)
 		}
 	}()
-	root := m.Opt.WorkspaceRoot(s.Owner, s.SID)
+	root := m.Opt.WorkspaceRoot(s.Owner, m.wsSID(s)) // 辅助对话共享父工作区——判据根同寻址
 	for _, c := range gate.Checkers {
 		if c == nil {
 			continue

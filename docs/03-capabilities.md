@@ -15,7 +15,8 @@
 | 挂起-续流通道 | `contract.Suspend` 哨兵 + 引擎 Interrupt×Resume：审批卡、结构化提问、计划卡共用同一机制。`Resume` 入口整备：单锁原子查清挂起域 + 翻 running + 挂 runDone——重复/并发第二个 Resume 即拒（明确 error 事件而非脏重放：checkpoint 不随 Resume 消费，迟到放行 = 加载旧检查点重执行）；续流执行期状态可见为 running（FlushQueue/Drain 可寻址） |
 | 检查点 | `engine.CheckPointStore`（Get/Set 两方法），中断/取消恢复与审批挂起续流的事实载体；三卡 State 经 `schema.Register` gob 注册（hitl/askuser/plan 属主包 init），属主包各持 round-trip 兼容回归测试（字段重命名红——gob 按字段名编码，静默破坏存量检查点） |
 | 常驻上下文预算（ContextBudget） | `Options.ContextBudget`（0 = 缺省关；`EINO_CONTEXT_BUDGET` 可覆盖）：Instruction + 常驻工具面（业务面+进程件+**会话域件**+spawn/recall：名+描述+参数 schema JSON）合计的超限告警线——超限发一张 `harness_note`（Kind: budget，含分类账本与瘦身指引）+ 服务端日志，不阻断运行（大工具面配 toolsearch 就是合法超标）；会话内只发一次（判定扫事件流既有同 Kind note，跨重启天然不重发）。toolsearch 名单内工具不计（只有常驻面计费） |
-| 会话分叉（Fork） | `Registry.Fork(owner, sid)`：全量快照分叉——record JSON 往返深隔离（零共享指针）、事件 ID 接续、spill 外置域整目录复制、血缘 `harness_note`（Kind: fork，Detail 含源 sid）；挂起域/任务授权/排队消息不带（分叉体无执行体残留，与 Reattach 降级同裁决）。V1 限定源非 running（spill 复制与源外置写并发无锁覆盖）；内存优先、不在内存则磁盘重建（历史会话分叉主场景）；归属不符/未知 sid/源 running 返回 nil |
+| 会话分叉（Fork / ForkAt） | `Registry.Fork(owner, sid)`：全量快照分叉——record JSON 往返深隔离（零共享指针）、事件 ID 接续、spill 外置域整目录复制、血缘 `harness_note`（Kind: fork，Detail 含源 sid）；挂起域/任务授权/排队消息不带（分叉体无执行体残留，与 Reattach 降级同裁决）。V1 限定源非 running（spill 复制与源外置写并发无锁覆盖）；内存优先、不在内存则磁盘重建（历史会话分叉主场景）；归属不符/未知 sid/源 running 返回 nil。`Registry.ForkAt(owner, sid, anchor)` 锚定分叉（ZCode「从已完成消息岔出」对位）：anchor = 某条 `session_end` 事件 ID（载荷 HistLen>0 才可锚——旧存量零值事件不可锚），事件截至锚（含）、历史截至锚 HistLen、fileChanges/summary 取锚事件载荷重建、事件 seq 接锚 ID；anchor=0 即全量（Fork 同义）。自然收束与错误轮终均可锚（从失败点重试是合法场景）；side 会话不可分叉，其余纪律同 Fork |
+| 辅助对话（Side） | `Registry.Side(owner, sid)`：继承主会话当前历史快照的轻量派生会话（ZCode side chat 对位）——快照语义（创建后各自演化，父后续轮不流入）、Model/Effort/Mode/lastUsedModel 继承、事件流置空 + 血缘 note（Kind: side）；Summary/FileChanges/挂起域/排队消息不带。**允许父 running**（核心场景：主任务执行中问快速问题——历史快照持锁安全，spill/工作区父感知共享不复制）；工作区与外置域经 `engine.wsSID` 解析到父域（side 轮末**跳过清理**——父持有清理权；主轮末即清对 side 的可见性影响是共享临时域的固有代价）；`Registry.SidesOf(owner, sid)` UI 寻址（内存+盘面扫）；父删除**级联删 side**（ZCode 语义：主任务删除即辅助对话永久关闭）；side of side 拒绝。`SessionBrief.ParentSID` 透出父身份——应用可据此调 Instruction/工具面 |
 | 消息渠道（channel） | `Options.Channels` + `Manager.Channels()`（`engine/channel.go`）：渠道编排机制核——入站 `Handle` 分流（空闲起轮/运行中 Steer 排队/挂起接决议续流）、常驻事件订阅出站（`ChannelSink.Deliver`，覆盖挂起期与后台通知——补齐 live 回调绑定 Run 生命周期只覆盖执行期的缺口；水位 + 间隙/静默双路补投）、`Approve`/`Answer` 决议回写（合并卡空 itemID = 全批/全拒逐项登记）、`Cancel` 停轮、`Push` 主动通知、`(channel, chat)→sid` 绑定表（UserTree 落盘，重启经 Reattach 找回，删除自愈）。渠道协议与渲染归适配器（三层结构见下节） |
 | 优雅停机（Drain） | `Registry.Drain(deadline)`：取消全部 running 态会话并有界等执行体收尾（走中断链：终态事件+检查点+中断注记全落），到点未收尾的 SID 如实返回（调用方记日志不阻塞停机）；挂起态无执行体不在列（跨重启 RearmPendingTimer 续表）。应用停机序 = HTTP Shutdown → Channels().Close → Drain → store Close（先停渠道事件投递面，再收执行体；终态落盘依赖 store 存活） |
 
@@ -41,8 +42,8 @@
 | 工具 | `tool_call`（参数摘要 + 行为标记）/ `tool_result`（Digest+Preview、文件变更信封 `+A -D`） |
 | 挂起交互 | `approval_request/decision/timeout`（**合并决议卡**：一轮并行写聚合一卡 N 项、逐项决议）/ `ask_user_request/decision/timeout/ignored` / `plan_request/decision/timeout` |
 | steering 与通知 | `steer_queued/updated/removed/reordered/injected` / `notify_queued/notify_injected`（后台子代理完成回传）/ `user_message` |
-| 过程 | `todo_update` / `harness_note`（系统通知卡，**Kind 取值封闭集**：`offload` 外置 / `compaction` 摘要压缩 / `gate` 质量门回灌 / `failover` 降级链装配失败留痕 / `budget` 常驻面超预算告警 / `fork` 会话分叉血缘 / `channel_push` 渠道主动推送——新 Kind 属前端可观察的软契约增长，增改须同步本表）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态）/ `model_change` / `transport_retry`（重连在途——前端回卷当前段半截显示） |
-| 收束 | `session_end`（摘要 + 文件变更清单）/ `error`（Code：CONFIG / SERVER / TRANSPORT / ABORTED / AUTH / RATE_LIMIT）/ `interrupted`（打断收尾，非故障形态） |
+| 过程 | `todo_update` / `harness_note`（系统通知卡，**Kind 取值封闭集**：`offload` 外置 / `compaction` 摘要压缩 / `gate` 质量门回灌 / `failover` 降级链装配失败留痕 / `budget` 常驻面超预算告警 / `fork` 会话分叉血缘 / `side` 辅助对话血缘 / `channel_push` 渠道主动推送——新 Kind 属前端可观察的软契约增长，增改须同步本表）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态）/ `model_change` / `transport_retry`（重连在途——前端回卷当前段半截显示） |
+| 收束 | `session_end`（摘要 + 文件变更清单 + HistLen 轮末历史长度——ForkAt 锚定数据）/ `error`（Code：CONFIG / SERVER / TRANSPORT / ABORTED / AUTH / RATE_LIMIT）/ `interrupted`（打断收尾，非故障形态） |
 
 ## 工具族（tools/）
 
@@ -79,6 +80,7 @@
 | 工具中间件链（mid） | `Validate`（入参 schema 子集校验——type/enum/数值边界/items/嵌套递归，违规带字段路径转信封回喂；不校验 required——反射 schema 把全部非指针字段标 required，与零值可接受的工具语义普遍不符）、`ErrFeed`（可恢复错误转结果回喂模型自纠——Go error 会终止整轮且模型不可见）、`Guard`（防死循环提醒 + 单工具执行硬上限）、`digest`（审批卡/事件流参数摘要，不倾倒原始 JSON） |
 | 幻觉工具兜底 | 模型调用不存在的工具名 → `{"ok":false}` 信封回喂自纠（不终止整轮）：toolsearch 名单内工具 miss 附“先 tool_search 检索”指引；名单外报可用名单 + 归一化拼写建议（唯一命中才提示、绝不代执行）。主面/拓扑子面/spawn 子面三处同挂 |
 | 工具 panic 隔离 | einoext 桥单点 recover：包装链任一层 panic 收敛为错误信封回喂（进程不崩、模型可换参自纠；Guard 死循环计数照常防 panic-重试循环） |
+| 订阅式工具钩子（Hooks） | `Options.Hooks`（nil = 零变化）：挂 ToolWrap 之外的最外层（包装序 hitl → ToolWrap → Hooks → einoext——审计看终局：Pre 先于审批决策触发、Post 收审批拒绝信封与工具原始返回〔reduction 外真值〕+ 耗时）。Pre 返回 error = 拒绝执行、`{"ok":false,"error":"pre-hook: …"}` 信封回喂（只能收紧不能放宽——与 ToolWrap 同纪律）；Pre panic fail-closed 转拒绝、Post panic 记日志不破坏运行；主面与子代理面同挂（wrapFace 共用），spawn 派发本体不经钩子 |
 | skill 机制 | `SkillsDir` 指向物化目录即挂 skill middleware（agentskills.io 标准发现）；物化归应用 |
 | AGENTS.md 注入 | `AgentsMD` 清单按序注入（eino agentsmd 中间件白拿）：transient 不入历史/检查点、@import 递归（深度 5）、字节预算超限即止（跳过留服务端日志，codex tracing::warn 同级——非用户弹窗）、挂 summarization 之后不被压缩。发现逻辑归应用清单（ZCode 双层形态 = 用户级文件先、工作区级文件后收窄覆盖） |
 
