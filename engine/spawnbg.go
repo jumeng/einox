@@ -158,6 +158,24 @@ func (b *bgSpawnTool) InvokableRun(ctx context.Context, args string, opts ...too
 	if json.Unmarshal([]byte(args), &in) == nil && in.Background {
 		return b.start(ctx, args)
 	}
+	// T8 结构化回传（同步档）：ctx 注入收束信号（穿透 agent_tool 全链），
+	// 返回面改写——合法提交回 canonical JSON，自然结束未提交按 error 终态
+	//（不静默降级为文本结论——dsh「无有效结构化输出即失败」形态）。
+	if b.cfg.Output != nil && b.cfg.Output.Schema != nil {
+		sig := &concludeSignal{}
+		out, err := b.inner.InvokableRun(withConcludeSignal(ctx, sig), args, opts...)
+		if err != nil {
+			return out, err
+		}
+		if v, ok := sig.result(); ok {
+			bv, _ := json.Marshal(map[string]any{"ok": true, "value": v})
+			return string(bv), nil
+		}
+		bv, _ := json.Marshal(map[string]any{
+			"ok": false, "stop_reason": "error",
+			"error": "子代理未提交结构化结论即结束（须以 spawn_submit 提交）"})
+		return string(bv), nil
+	}
 	return b.inner.InvokableRun(ctx, args, opts...)
 }
 
@@ -187,6 +205,9 @@ func (b *bgSpawnTool) start(ctx context.Context, args string) (string, error) {
 	bgCtx = contract.WithOperator(bgCtx, b.m.operatorOf(b.s)) // T6 当轮说话人（回退 Owner 零变化）
 	bgCtx = contract.WithChangeRecorder(bgCtx, b.s.RecordFileChange)
 	bgCtx = contract.WithImageInput(bgCtx, b.m.imageCapableOf(b.s))
+	if b.cfg.Output != nil && b.cfg.Output.Schema != nil { // T8：收束信号随后台 ctx（完成态改写依据）
+		bgCtx = withConcludeSignal(bgCtx, &concludeSignal{})
+	}
 	reg.add(id, cancel)
 
 	task := spawnTaskOf(args)
@@ -291,6 +312,14 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 			}
 			// 原始错误 %w 保留身份（StopReason 映射依据：取消→aborted、轮次
 			// 耗尽→max_tokens）；分类文案前置给父模型可读。
+			// T8 例外：结构化回传档的自纠耗尽（轮次预算内未提交合法结论）按
+			// error 计——dsh 形态锚（§2.3-③ 行为规格：耗尽→StopReason=error）。
+			if sig := concludeSignalOf(ctx); sig != nil {
+				if _, done := sig.result(); !done && errors.Is(unwrapRetryExhausted(ev.Err), adk.ErrExceedMaxIterations) {
+					m.finishSpawnBG(s, id, task, "", lastText, errors.New("结构化结论自纠耗尽（轮次预算内未提交合法结论）"), true)
+					return
+				}
+			}
 			m.finishSpawnBG(s, id, task, "", lastText, fmt.Errorf("后台子代理执行失败（%s）：%w",
 				truncateRunes(llm.Classify(unwrapRetryExhausted(ev.Err)).Message, 120), unwrapRetryExhausted(ev.Err)), true)
 			return
@@ -311,6 +340,17 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 		}
 	}
 	if s.Stopped() {
+		return
+	}
+	// T8 结构化回传（后台档完成态）：合法提交 → canonical JSON 为结论
+	//（done + stop_reason=completed，offload 进事件流即审计真源）；自然结束
+	// 未提交 → failed + stop_reason=error + Partial（半成品可判补做/放弃）。
+	if sig := concludeSignalOf(ctx); sig != nil {
+		if v, ok := sig.result(); ok {
+			m.finishSpawnBG(s, id, task, string(v), "", nil, true)
+			return
+		}
+		m.finishSpawnBG(s, id, task, "", lastText, errors.New("子代理未提交结构化结论即结束（须以 spawn_submit 提交）"), true)
 		return
 	}
 	m.finishSpawnBG(s, id, task, lastText, "", nil, true)

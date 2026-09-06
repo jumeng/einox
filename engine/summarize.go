@@ -26,6 +26,7 @@ import (
 	"log"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"
@@ -56,7 +57,7 @@ const summarizeInstruction = `请把以上完整对话历史压缩为一份结�
 - 关键结论与已做决策（各附一句理由）
 - 涉及的 issue/需求/文档全景（编号与标题）
 - 未决事项与等待中的问题
-丢失以上任何一类都会导致任务断链。直接输出摘要正文，不要解释你在做什么。`
+丢失以上任何一类都会导致任务断链。若输入开头已是此前对话的摘要，请把新内容并入形成单一连贯摘要（保留既有摘要中的关键信息与发言者署名，不逐条罗列旧内容）。直接输出摘要正文，不要解释你在做什么。`
 
 // newSummarizationMiddleware 摘要中间件 + 清窗兜底包装（window>0 才装配）。
 func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Session, window int) (adk.ChatModelAgentMiddleware, error) {
@@ -123,8 +124,9 @@ func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Ses
 			s.Record(contract.EvHarnessNote, contract.HarnessNote{
 				Kind:   "compaction",
 				Title:  fmt.Sprintf("已压缩历史 %d → %d token（保留任务水位）", bTok, aTok),
-				Detail: "被压缩内容以摘要形态注入后续上下文；全文 " + transcriptPath(s) + "（read_file 可溯源）",
+				Detail: "被压缩内容以摘要形态注入后续上下文；全文 " + transcriptPath(s) + "（read_file 可溯源）；摘要已固化（下次运行直接续用，免重摘要）",
 			})
+			m.persistCompactCache(s, before.Messages, after.Messages) // T8 方案甲
 			return nil
 		},
 	})
@@ -273,6 +275,76 @@ func (c *clearWindowFallback) BeforeModelRewriteState(
 	out = append(out, taskAnchor(c.sess, lastTodoState(state.Messages)))
 	after.Messages = out
 	return ctx, &after, nil
+}
+
+// compactCacheState 摘要固化档元数据（T8 方案甲——dsh surface replace 的
+// 轻量对位：压一次、后续 Run 天然续用压缩视图，消除每 Run 重摘要的调用与
+// 延迟）。旧档 summary-N.md 全保留（审计可回溯每次压缩）；派生会话
+// （ForkAt/Side）不拷贝——派生域自起炉灶（设计定案）。
+type compactCacheState struct {
+	N         int   `json:"n"`
+	Watermark int   `json:"watermark"` // 压缩时点会话历史长度——恰为信封覆盖前缀（acc 轮末才入史）
+	BeforeTok int64 `json:"before_tok"`
+	AfterTok  int64 `json:"after_tok"`
+	UpdatedAt int64 `json:"updated_at"`
+}
+
+func compactCacheBase(s *session.Session) string {
+	return path.Join("sessions", wsSIDOf(s), "compact", s.SID)
+}
+
+// persistCompactCache 压缩固化：信封取 after 末条非空消息（DefaultFinalize
+// 产物与溯源注记同体——与 adk 中间件产出同源，重注入零解析歧义）；水位取
+// 回调时点 HistoryLen（轮中压缩的半截段会在下次 Run 与信封并存——过阈会话
+// 的压缩通常发生在首轮模型调用前、此时水位精确，属可接受冗余）。
+func (m *Manager) persistCompactCache(s *session.Session, before, after []*schema.Message) {
+	env := ""
+	for i := len(after) - 1; i >= 0; i-- {
+		if after[i] != nil && after[i].Content != "" {
+			env = after[i].Content
+			break
+		}
+	}
+	if env == "" {
+		return
+	}
+	var st compactCacheState
+	if raw, ok := m.reg.Store().ReadUserTreeFile(s.Owner, compactCacheBase(s)+"-state.json"); ok {
+		_ = json.Unmarshal(raw, &st)
+	}
+	st.N++
+	st.Watermark = s.HistoryLen()
+	st.BeforeTok, _ = shapedTokenCounter(context.Background(), before, nil)
+	st.AfterTok, _ = shapedTokenCounter(context.Background(), after, nil)
+	st.UpdatedAt = time.Now().Unix()
+	sb, _ := json.Marshal(st)
+	if err := m.reg.Store().WriteUserTreeFile(s.Owner, compactCacheBase(s)+"-state.json", sb); err != nil {
+		log.Printf("summarize: 摘要缓存元数据落盘失败（%s）：%v", s.SID, err)
+		return
+	}
+	if err := m.reg.Store().WriteUserTreeFile(s.Owner,
+		fmt.Sprintf("%s-summary-%d.md", compactCacheBase(s), st.N), []byte(env)); err != nil {
+		log.Printf("summarize: 摘要缓存落盘失败（%s）：%v", s.SID, err)
+	}
+}
+
+// loadCompactCache 缓存装载（失败/失锚 fail-open：水位越界 = 落盘异常，退回
+// 全量重放现状行为——崩溃安全等价 dsh 孤儿检测的降级面）。
+func (m *Manager) loadCompactCache(s *session.Session) (string, int, bool) {
+	raw, ok := m.reg.Store().ReadUserTreeFile(s.Owner, compactCacheBase(s)+"-state.json")
+	if !ok {
+		return "", 0, false
+	}
+	var st compactCacheState
+	if json.Unmarshal(raw, &st) != nil || st.Watermark < 0 {
+		return "", 0, false
+	}
+	env, ok := m.reg.Store().ReadUserTreeFile(s.Owner,
+		fmt.Sprintf("%s-summary-%d.md", compactCacheBase(s), st.N))
+	if !ok || len(env) == 0 {
+		return "", 0, false
+	}
+	return string(env), st.Watermark, true
 }
 
 // transcriptPath 会话全文外置的虚拟前缀路径（通知卡承诺与 read_file 寻址

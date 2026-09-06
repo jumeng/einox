@@ -9,6 +9,20 @@ import (
 // （SSE/WS/CLI 由应用层自定），参数 schema 由 ToolInfo 携带。
 // 工具实现不落审批语义——写面审批由基座组装期包装（hitl）统一处理；
 // 需要挂起交互的工具（ask_user 同构）以 *Suspend 哨兵上抛（见 suspend.go）。
+// OutputContract 可选输出契约（T8 吸收设计 §1.3-①——dsh ToolDefinition 的
+// output.schema + render 形态）：实现了即被引擎在装配期识别（wrapFace 入口、
+// mid 包装前——包装链类型不可穿透，hitl.go:216 DiffProvider 同款先例）。
+// 值 / 校验 / 渲染 / UI 四件事正交：canonical 值仍走工具返回，成功路径按
+// OutputSchema 校验（mid.ValidateJSON——required 在场校验），Render 产出模型
+// 可见文本（回喂/reduction/transcript 共用同一投影——渲染只写一份）。
+// 未实现 = 既有行为（自由 JSON 全量回喂）零变化；Render 返回空 = 退回原样。
+type OutputContract interface {
+	// OutputSchema 结果 JSON Schema（object 形；nil = 只声明渲染不校验）。
+	OutputSchema() *Schema
+	// Render canonical 值 → 模型可见文本；空返回 = 退回原样 JSON。
+	Render(args, result json.RawMessage) string
+}
+
 type Tool interface {
 	// Info 工具元数据（名称/描述/参数 schema）。
 	Info() *ToolInfo

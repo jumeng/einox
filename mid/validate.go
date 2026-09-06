@@ -27,6 +27,44 @@ import (
 	"github.com/jumeng/einox/contract"
 )
 
+// ValidateJSON 通用 schema 校验（T8 输出契约 / spawn 结构化回传共用）：与
+// 入参校验同子集纪律（type/enum/min/max/items/properties 递归），另校验
+// required 在场——输出 schema 是应用手写的显式声明，与入参「eino 反射必标
+// required」的豁免场景（2026-08-29 实锚裁决）不同。
+func ValidateJSON(sc *contract.Schema, data json.RawMessage) error {
+	if sc == nil {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return fmt.Errorf("不是合法 JSON：%w", err)
+	}
+	errs := validateValue("output", v, sc)
+	errs = append(errs, requireValue("output", v, sc)...)
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "；"))
+	}
+	return nil
+}
+
+// requireValue required 字段在场校验（object 形；类型不符由 type 面报）。
+func requireValue(path string, v any, sc *contract.Schema) []string {
+	if len(sc.Required) == 0 || sc.Type != "object" {
+		return nil
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	var errs []string
+	for _, k := range sc.Required {
+		if _, has := obj[k]; !has {
+			errs = append(errs, fmt.Sprintf("%s.%s 是必填字段", path, k))
+		}
+	}
+	return errs
+}
+
 // Validate 参数校验包装（Params 为 nil 的工具零开销透传）。
 func Validate(t contract.Tool) contract.Tool { return &validateTool{t: t} }
 

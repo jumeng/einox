@@ -43,6 +43,9 @@ type SubAgentsConfig struct {
 	// 折叠卡展开态消费；并行多 spawn 同名事件交错，per-invocation 归组为
 	// 升级位）。关 = 静默/折叠一行（spawn 的 EvToolCall/EvToolResult 即卡面）。
 	EmitEvents bool
+	// Output 结构化回传（T8，nil = 自由文本结论零变化）：子代理面注入
+	// spawn_submit 工具，合法提交即收束，canonical JSON 回父。
+	Output *SpawnOutput
 }
 
 // spawnToolName 父模型见的工具名（= 子 agent Name）。
@@ -262,9 +265,20 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 	subCM = llm.NewVisionModel(subCM, spec, m.Opt.ImageResolve)
 	subCM = llm.NewHistoryShapeModel(subCM, p.Kind)
 
+	// T8 结构化回传装配：根形校验 + 收束模型包装 + 提示词追加（submit 工具
+	// 在 buildSub 注面——ctx 信号机制见 spawnsubmit.go）
+	if cfg.Output != nil {
+		if cfg.Output.Schema == nil || cfg.Output.Schema.Type != "object" {
+			return nil, &configError{"SpawnOutput.Schema 根形必须为 object（结构化结论契约拒收）"}
+		}
+		subCM = &concludeModel{BaseModel: subCM}
+	}
 	instruction := subInstruction
 	if cfg.Instruction != "" {
 		instruction = cfg.Instruction
+	}
+	if cfg.Output != nil {
+		instruction += spawnOutputInstruction
 	}
 	// buildSub 子代理构造闭包（同步 "auto" / 后台 "bg" 两档——bg 档 ArgsForce
 	// 拒绝回喂不挂起，hitl fail-closed；白名单/提示词/模型/reduction 全共享）
@@ -278,7 +292,12 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 			MaxIterations:    maxIterations,
 			ModelRetryConfig: m.modelRetryConfig(), // 网络容错 ②：与主链同策略
 		}
-		if len(subTs) > 0 {
+		// T8：结构化回传时 submit 工具随面注入（白名单外专用件，读面零审批）
+		face := subTs
+		if cfg.Output != nil {
+			face = append(append([]contract.Tool(nil), subTs...), &spawnSubmitTool{schema: cfg.Output.Schema})
+		}
+		if len(face) > 0 {
 			// 子代理零审批直执（2026-08-26 裁决，codex 对齐：delegates require
 			// approval policy never）：auto/bg 档直落——子代理在父的工具调用内
 			// （或后台 goroutine 中）同步运行，中途等审批 = 子任务卡死等人（并行
@@ -288,8 +307,8 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 			//（fail-closed——挂起无人决议宁可失败）。装配纪律：数据域写与 repo
 			// 写工具不进子面白名单。ToolWrap 与主面同序同挂（wrapFace）。
 			conf.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools:               m.wrapFace(subTs, s, mode),
-				UnknownToolsHandler: newUnknownToolHandler(contractToolNames(subTs), nil), // 幻觉兜底与主面同策略
+				Tools:               m.wrapFace(face, s, mode),
+				UnknownToolsHandler: newUnknownToolHandler(contractToolNames(face), nil), // 幻觉兜底与主面同策略
 			}}
 		}
 		if mw, err := m.newReductionMiddleware(s, window, false); err != nil {

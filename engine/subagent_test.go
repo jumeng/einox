@@ -655,3 +655,165 @@ func TestSpawnStopReason(t *testing.T) {
 		}
 	}
 }
+
+// TestSpawnStructuredSubmitSuccess T8 结构化回传：合法提交即收束——子模型
+// 恰一次调用（conclude 拦截零空跑）、canonical JSON 回父。
+func TestSpawnStructuredSubmitSuccess(t *testing.T) {
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("c1", "spawn", `{"task":"统计","tools":"","expect":"数量"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	sub := &recGenModel{reply: ""} // 占位——Stream 路径由 onStream 驱动？子模型走 Generate（agent_tool 非流式）
+	subStream := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 { // 子代理：直接提交合法结论
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("s1", "spawn_submit", `{"answer":"42"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "不应到达"})
+	}}
+	_ = sub
+	n := 0
+	m, _ := newReductionManager(t, 0, nil, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n == 2 {
+			return subStream, nil
+		}
+		return fm, nil
+	}, func(o *Options) {
+		o.SubAgents = &SubAgentsConfig{
+			Output: &SpawnOutput{Schema: &contract.Schema{
+				Type:       "object",
+				Properties: map[string]*contract.Schema{"answer": {Type: "string"}},
+				Required:   []string{"answer"},
+			}},
+		}
+	})
+	s := m.Registry().Create("张三", "派子", "auto", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	m.Run(context.Background(), s, "帮我查", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+
+	if got := len(subStream.inputs); got != 1 {
+		t.Fatalf("子模型应恰一次调用（提交即收束零空跑），实得 %d", got)
+	}
+	// 父第二轮输入：spawn 工具结果 = canonical JSON 信封
+	found := false
+	for _, msg := range fm.inputs[1] {
+		if msg.Role == schema.Tool && strings.Contains(msg.Content, `"answer":"42"`) && strings.Contains(msg.Content, `"ok":true`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("父应收到 canonical 结论信封，实得 %+v", fm.inputs[1])
+	}
+}
+
+// TestSpawnStructuredSelfCorrect 校验失败回喂自纠：首提不合 schema → 信封
+// 修正提示 → 次提合法 → 收束。
+func TestSpawnStructuredSelfCorrect(t *testing.T) {
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("c1", "spawn", `{"task":"统计","tools":"","expect":"数量"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	subStream := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 { // 首提缺 answer
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("s1", "spawn_submit", `{"wrong":"x"}`)}})
+			return
+		}
+		if n == 2 { // 修正后重提
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("s2", "spawn_submit", `{"answer":"7"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "不应到达"})
+	}}
+	n := 0
+	m, _ := newReductionManager(t, 0, nil, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n == 2 {
+			return subStream, nil
+		}
+		return fm, nil
+	}, func(o *Options) {
+		o.SubAgents = &SubAgentsConfig{
+			Output: &SpawnOutput{Schema: &contract.Schema{Type: "object", Required: []string{"answer"}}},
+		}
+	})
+	s := m.Registry().Create("张三", "自纠", "auto", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	m.Run(context.Background(), s, "帮我查", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+
+	if got := len(subStream.inputs); got != 2 {
+		t.Fatalf("子模型应恰两次调用（失败回喂一次+合法提交收束），实得 %d", got)
+	}
+	// 首提的失败信封须达子模型（第二轮输入含修正提示）
+	corrected := false
+	for _, msg := range subStream.inputs[1] {
+		if msg.Role == schema.Tool && strings.Contains(msg.Content, "不符合 schema") && strings.Contains(msg.Content, "answer") {
+			corrected = true
+		}
+	}
+	if !corrected {
+		t.Fatal("校验失败信封应回喂子模型自纠（含必填字段名）")
+	}
+	found := false
+	for _, msg := range fm.inputs[1] {
+		if msg.Role == schema.Tool && strings.Contains(msg.Content, `"answer":"7"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("父最终应收到修正后的合法结论")
+	}
+}
+
+// TestSpawnStructuredNoSubmit 自然结束未提交：error 终态信封（不静默降级为
+// 文本结论）。
+func TestSpawnStructuredNoSubmit(t *testing.T) {
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("c1", "spawn", `{"task":"统计","tools":"","expect":"数量"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	subStream := &scriptedModel{} // 子代理直接文本回答，不提交
+	n := 0
+	m, _ := newReductionManager(t, 0, nil, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n == 2 {
+			return subStream, nil
+		}
+		return fm, nil
+	}, func(o *Options) {
+		o.SubAgents = &SubAgentsConfig{
+			Output: &SpawnOutput{Schema: &contract.Schema{Type: "object", Required: []string{"answer"}}},
+		}
+	})
+	s := m.Registry().Create("张三", "未提交", "auto", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	m.Run(context.Background(), s, "帮我查", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+
+	found := false
+	for _, msg := range fm.inputs[1] {
+		if msg.Role == schema.Tool && strings.Contains(msg.Content, "未提交结构化结论") && strings.Contains(msg.Content, `"stop_reason":"error"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("未提交应回 error 终态信封，实得 %+v", fm.inputs[1])
+	}
+}

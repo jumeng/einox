@@ -488,3 +488,95 @@ func TestSummarizeConvergenceRejectsGiantSummary(t *testing.T) {
 		t.Fatalf("主模型输入应为清窗尾段（旧轮与病态摘要均不可见）")
 	}
 }
+
+// TestCompactCacheSkipsResummarize T8 方案甲验收：阈上会话二次 Run 零摘要
+// 请求（dsh surface replace 轻量对位——压一次、后续续用）；缓存失锚
+// fail-open 全量重放；session 历史原文保全。
+func TestCompactCacheSkipsResummarize(t *testing.T) {
+	parent := &scriptedModel{}
+	sub := &recGenModel{reply: "压缩摘要文本"}
+	n := 0
+	m, st := newReductionManager(t, 20000, nil, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n >= 2 { // n≥2 全给 sub：主模型位与摘要位共用——摘要调用以「输入含摘要指令」判别
+			return sub, nil
+		}
+		return parent, nil
+	})
+	// summaryCalls：sub 输入中真正携带摘要指令的调用数（摘要模型专有形态）
+	summaryCalls := func() int {
+		c := 0
+		for _, in := range sub.inputs {
+			j := ""
+			for _, msg := range in {
+				j += msgTextOf(msg)
+			}
+			if strings.Contains(j, "结构化摘要") {
+				c++
+			}
+		}
+		return c
+	}
+	s := m.Registry().Create("张三", "压缩", "plan", contract.UserPrefs{Model: "p/m"})
+	s.AppendHistory(sumHist(6, 15000)...)
+	s.SetState(session.StateRunning)
+
+	// Run1：触发压缩 + 固化
+	m.Run(context.Background(), s, "继续推进", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+	if summaryCalls() != 1 {
+		t.Fatalf("首轮应恰一次摘要，实得 %d", summaryCalls())
+	}
+	if _, ok := st.ReadUserTreeFile("张三", "sessions/"+s.SID+"/compact/"+s.SID+"-state.json"); !ok {
+		t.Fatal("摘要缓存元数据应落盘")
+	}
+	if env, ok := st.ReadUserTreeFile("张三", "sessions/"+s.SID+"/compact/"+s.SID+"-summary-1.md"); !ok || !strings.Contains(string(env), "压缩摘要文本") {
+		t.Fatalf("摘要档应在且含摘要正文：ok=%v", ok)
+	}
+
+	// Run2：二次 Run 零摘要请求（THE 验收）；本轮主模型输入 = 信封 + 水位后历史
+	m.Run(context.Background(), s, "再推进", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+	if summaryCalls() != 1 {
+		t.Fatalf("二次 Run 应零摘要请求（缓存续用），实得 %d", summaryCalls())
+	}
+	run2 := ""
+	for _, in := range sub.inputs {
+		j := ""
+		for _, msg := range in {
+			j += msgTextOf(msg)
+		}
+		if !strings.Contains(j, "结构化摘要") {
+			run2 = j // 非摘要调用 = 本轮主模型位
+		}
+	}
+	if !strings.Contains(run2, "压缩摘要文本") {
+		t.Fatal("主模型输入应含缓存信封")
+	}
+	if strings.Contains(run2, "R1BIG") {
+		t.Fatal("水位前旧轮不应重放")
+	}
+	// 保真：session 历史六轮原文全在
+	for i := 1; i <= 6; i++ {
+		found := false
+		for _, m2 := range s.CloneHistory() {
+			if strings.Contains(m2.Content, fmt.Sprintf("R%dBIG", i)) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("保真违例：第 %d 轮原文丢失", i)
+		}
+	}
+
+	// 失锚 fail-open：水位写越界 → 忽略缓存退回全量重放（重新摘要）
+	if err := st.WriteUserTreeFile("张三", "sessions/"+s.SID+"/compact/"+s.SID+"-state.json",
+		[]byte(`{"n":1,"watermark":999}`)); err != nil {
+		t.Fatal(err)
+	}
+	m.Run(context.Background(), s, "第三次推进", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+	if summaryCalls() != 2 {
+		t.Fatalf("失锚应退回全量重放重新摘要，实得 %d 次摘要", summaryCalls())
+	}
+}

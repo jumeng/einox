@@ -1,4 +1,4 @@
 {"id":1,"event":"user_message","data":{"text":"继续推进"}}
-{"id":2,"event":"harness_note","data":{"kind":"compaction","title":"已压缩历史 22629 → 174 token（保留任务水位）","detail":"被压缩内容以摘要形态注入后续上下文；全文 spill/transcript-SID.txt（read_file 可溯源）"}}
+{"id":2,"event":"harness_note","data":{"kind":"compaction","title":"已压缩历史 22629 → 174 token（保留任务水位）","detail":"被压缩内容以摘要形态注入后续上下文；全文 spill/transcript-SID.txt（read_file 可溯源）；摘要已固化（下次运行直接续用，免重摘要）"}}
 {"id":3,"event":"text_delta","data":{"delta":"已处理。"}}
 {"id":4,"event":"session_end","data":{"summary":"已处理。","hist_len":14}}

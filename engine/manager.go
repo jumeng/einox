@@ -747,7 +747,18 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 
 	finish := m.finishOf(s)
 
-	history := renderSpeakers(sanitizeHistory(s.CloneHistory()))                               // T6 署名前缀投影（副本上——原文不带，Extra 携）
+	// T8 方案甲：缓存信封 + 水位后历史（dsh surface replace 的轻量对位——压
+	// 一次、后续 Run 免重摘要）。水位切片先于 sanitize（净化剥除会使索引漂移
+	//）；失锚（水位越界 = 落盘异常）fail-open 全量重放。原文不动——session
+	// 历史始终全量（保真锚定）。
+	hist := s.CloneHistory()
+	if env, wm, ok := m.loadCompactCache(s); ok && wm <= len(hist) {
+		tail := sanitizeHistory(hist[wm:])
+		hist = append([]*schema.Message{schema.UserMessage(env)}, tail...)
+	} else {
+		hist = sanitizeHistory(hist)
+	}
+	history := renderSpeakers(hist)                                                            // T6 署名前缀投影（副本上——原文不带，Extra 携）
 	iter, behaviors, err := m.runIter(runCtx, s, append(history, renderSpeakers(userMsgs)...)) // 当前轮消息同律投影
 	if err != nil {
 		m.emit(s, fn, contract.EvError, errToEvent(err, s))
@@ -1141,6 +1152,13 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 // 对子代理同样生效；应用包装在审批外层即单调收紧（透传保留审批，额外拒绝
 // 生效，豁免不可达）。nil ToolWrap / nil Hooks = 跳过该层，零变化。
 func (m *Manager) wrapFace(ts []contract.Tool, s *session.Session, mode string) []tool.BaseTool {
+	// T8 输出契约：装配期探测（mid 包装前——包装链类型不可穿透）、契约包装
+	// 成最内层（未实现契约的工具零变化）。§1.3-① 修订形态。
+	for i, t := range ts {
+		if oc, ok := t.(contract.OutputContract); ok {
+			ts[i] = &outputContractTool{Tool: t, oc: oc}
+		}
+	}
 	wrapped := hitl.WrapTools(ts, s, mode, m.Opt.Approval)
 	if m.Opt.ToolWrap != nil {
 		for i, t := range wrapped {
