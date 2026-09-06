@@ -5,6 +5,7 @@ package ui
 // 事件经 s.Record 直录（读面测试不需要跑引擎轮）。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,9 +21,12 @@ import (
 	"github.com/jumeng/einox/checkpoint"
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/engine"
+	"github.com/jumeng/einox/hitl"
 	"github.com/jumeng/einox/internal/tstore"
 	"github.com/jumeng/einox/llm"
+	"github.com/jumeng/einox/llmtest"
 	"github.com/jumeng/einox/session"
+	"github.com/jumeng/einox/tools"
 )
 
 // newTestServer 最小引擎装配（读面不触模型）+ 录三事件的会话。
@@ -201,5 +205,207 @@ func TestStaticPage(t *testing.T) {
 	h.ServeHTTP(rs, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rs.Code != http.StatusOK || !strings.Contains(rs.Body.String(), "会话回放") {
 		t.Fatalf("根路径应返回回放页，实得 %d", rs.Code)
+	}
+}
+
+// ── M2 交互面 ─────────────────────────────────────────────────────────────
+
+// newE2EServer 交互链装配：manual 档写工具 + llmtest 剧本（首调写工具调用、
+// 续调收口）——审批挂起→决议→续流全链的引擎侧。
+func newE2EServer(t *testing.T, cfg Config) (http.Handler, *session.Session) {
+	t.Helper()
+	st := tstore.New(t.TempDir())
+	fm := llmtest.New(
+		llmtest.Turn{ToolCalls: []llmtest.ToolCallSpec{{ID: "t1", Name: "write_tool", Args: "{}"}}},
+		llmtest.Turn{Text: "完成"},
+	).Factory()
+	m, err := engine.NewManager(session.NewRegistry(st), engine.Options{
+		Providers: func() []llm.ProviderSpec {
+			return []llm.ProviderSpec{{ID: "p", Kind: "openai", Enabled: true,
+				Models: []llm.ModelSpec{{ID: "m", Input: []string{"text"}, Priority: 100}}}}
+		},
+		Instruction: func(engine.SessionBrief) string { return "test" },
+		Tools: func(engine.SessionBrief) []contract.Tool {
+			wt, err := tools.InferTool("write_tool", "写桩", func(context.Context, struct{}) (map[string]any, error) {
+				return map[string]any{"ok": true}, nil
+			})
+			if err != nil {
+				t.Fatalf("InferTool: %v", err)
+			}
+			return []contract.Tool{wt}
+		},
+		NewModel: func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return fm(context.Background(), llm.ProviderSpec{}, llm.ModelSpec{}, "")
+		},
+		CheckPoints: func(operator, sid string) engine.CheckPointStore {
+			return checkpoint.NewCheckPointStore(st, operator, sid)
+		},
+		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
+		Approval:      hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	s := m.Registry().Create("张三", "交互", "manual", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateEnded)
+	h, err := New(m, cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return h, s
+}
+
+// decodeAs wire 往返载荷重解码（Data 经 JSON 后是 map，非具体契约类型）。
+func decodeAs(t *testing.T, data any, target any) {
+	t.Helper()
+	b, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("载荷重编码失败：%v", err)
+	}
+	if err := json.Unmarshal(b, target); err != nil {
+		t.Fatalf("载荷重解码失败：%v", err)
+	}
+}
+
+// postJSON 控制端点便捷面。
+func postJSON(t *testing.T, h http.Handler, path string, body any) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	rs := httptest.NewRecorder()
+	h.ServeHTTP(rs, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b)))
+	var out map[string]any
+	_ = json.Unmarshal(rs.Body.Bytes(), &out)
+	return rs, out
+}
+
+// pollEvents 轮询事件面直到条件满足（带界）。
+func pollEvents(t *testing.T, h http.Handler, sid string, cond func([]session.Event) bool, what string) []session.Event {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var evs []session.Event
+		getJSON(t, h, "/api/sessions/"+sid+"/events", &evs)
+		if cond(evs) {
+			return evs
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("等待超时：" + what)
+	return nil
+}
+
+// TestControlApprovalE2E M2 验收：起轮（带说话人）→ 审批挂起 → 页面决议
+// （带 decider）→ 续流收束 → 决议回执带 decider（T6 链一致）。
+func TestControlApprovalE2E(t *testing.T) {
+	h, s := newE2EServer(t, Config{})
+
+	// 起轮：张三说话（首见登记名册 + 当轮说话人）
+	rs, out := postJSON(t, h, "/api/sessions/"+s.SID+"/run", runReq{
+		Text: "写一下", SpeakerID: "u_zhang", SpeakerName: "张三"})
+	if rs.Code != http.StatusOK || out["started"] != true {
+		t.Fatalf("起轮应 started，实得 %d %v", rs.Code, out)
+	}
+	// 挂起：approval_request 到达（Requester=张三）
+	evs := pollEvents(t, h, s.SID, func(es []session.Event) bool {
+		for _, e := range es {
+			if e.Event == contract.EvApprovalRequest {
+				return true
+			}
+		}
+		return false
+	}, "审批挂起")
+	var req contract.ApprovalReq
+	for _, e := range evs {
+		if e.Event == contract.EvApprovalRequest {
+			decodeAs(t, e.Data, &req) // wire 往返后 Data 是 map——重解码取载荷
+		}
+	}
+	if req.RequesterID != "u_zhang" {
+		t.Fatalf("审批卡 Requester 应为张三，实得 %q", req.RequesterID)
+	}
+	// 运行中再发：转排队
+	rs, out = postJSON(t, h, "/api/sessions/"+s.SID+"/run", runReq{Text: "补充"})
+	if rs.Code != http.StatusOK || out["queued"] != true {
+		t.Fatalf("挂起期应转排队，实得 %d %v", rs.Code, out)
+	}
+	// 决议：李四点批（decider 落链）
+	rs, _ = postJSON(t, h, "/api/sessions/"+s.SID+"/approve", approveReq{
+		Approve: true, ItemID: req.Items[0].ItemID, DeciderID: "u_li", DeciderName: "李四"})
+	if rs.Code != http.StatusOK {
+		t.Fatalf("决议应放行，实得 %d：%s", rs.Code, rs.Body.String())
+	}
+	// 续流收束：session_end + 决议回执带 decider
+	evs = pollEvents(t, h, s.SID, func(es []session.Event) bool {
+		var end, dec bool
+		for _, e := range es {
+			if e.Event == contract.EvSessionEnd {
+				end = true
+			}
+			if e.Event == contract.EvApprovalDecision {
+				var d contract.DecisionOut
+				decodeAs(t, e.Data, &d)
+				if d.DeciderID == "u_li" {
+					dec = true
+				}
+			}
+		}
+		return end && dec
+	}, "续流收束+decider 回执")
+	// 名册：张三已登记（run 首见）
+	var ps []contract.Participant
+	getJSON(t, h, "/api/sessions/"+s.SID+"/participants", &ps)
+	if len(ps) != 1 || ps[0].ID != "u_zhang" {
+		t.Fatalf("名册应含张三：%+v", ps)
+	}
+}
+
+// TestApproveIdempotentLate 迟到决议 409（幂等——前端当已处理）。
+func TestApproveIdempotentLate(t *testing.T) {
+	h, s := newE2EServer(t, Config{})
+	s.SetState(session.StateEnded) // 无挂起
+	rs, _ := postJSON(t, h, "/api/sessions/"+s.SID+"/approve", approveReq{Approve: true})
+	if rs.Code != http.StatusConflict {
+		t.Fatalf("无挂起决议应 409，实得 %d", rs.Code)
+	}
+}
+
+// TestParticipantUpsert 名册端点：登记→查询→事件面 participant_update。
+func TestParticipantUpsert(t *testing.T) {
+	h, s := newTestServer(t, Config{})
+	rs, out := postJSON(t, h, "/api/sessions/"+s.SID+"/participants",
+		map[string]string{"id": "u_wang", "name": "王五"})
+	if rs.Code != http.StatusOK || out["kind"] != "joined" {
+		t.Fatalf("首见应 joined：%d %v", rs.Code, out)
+	}
+	var ps []contract.Participant
+	getJSON(t, h, "/api/sessions/"+s.SID+"/participants", &ps)
+	if len(ps) != 1 || ps[0].Name != "王五" {
+		t.Fatalf("名册应含王五：%+v", ps)
+	}
+	var evs []session.Event
+	getJSON(t, h, "/api/sessions/"+s.SID+"/events", &evs)
+	found := false
+	for _, e := range evs {
+		if e.Event == contract.EvParticipantUpdate {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("名册变更应落 participant_update 事件")
+	}
+}
+
+// TestControlAuthorize 控制面鉴权缝：403 拦截写操作。
+func TestControlAuthorize(t *testing.T) {
+	h, s := newE2EServer(t, Config{
+		Authorize: func(r *http.Request, owner, sid string) error {
+			return fmt.Errorf("只读访客")
+		},
+	})
+	for _, path := range []string{"/run", "/resume", "/stop", "/approve", "/answer"} {
+		rs, _ := postJSON(t, h, "/api/sessions/"+s.SID+path, map[string]any{})
+		if rs.Code != http.StatusForbidden {
+			t.Fatalf("POST %s 应 403，实得 %d", path, rs.Code)
+		}
 	}
 }

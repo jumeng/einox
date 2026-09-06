@@ -51,6 +51,7 @@ func New(m *engine.Manager, cfg Config) (http.Handler, error) {
 	mux.HandleFunc("GET /api/sessions", h.list)
 	mux.HandleFunc("GET /api/sessions/{sid}", h.detail)
 	mux.HandleFunc("GET /api/sessions/{sid}/events", h.events)
+	h.mountControl(mux)
 	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 	return mux, nil
 }

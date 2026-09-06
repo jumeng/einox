@@ -38,10 +38,22 @@
   .k-proc { background: #2a2438; color: #bb9af7; } .k-end { background: #2e2e2e; color: #a9b1d6; }
   .k-unknown { background: #2e2e2e; color: #5b647a; }
   #hint { color: #5b647a; padding: 30px; text-align: center; flex: 1; }
+  #bar input.ident { width: 90px; }
+  #bar label { color: #5b647a; font-size: 11px; }
+  #compose { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid #2a2e37; }
+  #compose input { flex: 1; background: #1a1d24; border: 1px solid #364156; color: #cdd3de; border-radius: 5px; padding: 6px 10px; font: inherit; }
+  #appcard { margin: 8px 12px; border: 1px solid #f7768e55; border-radius: 8px; padding: 10px; background: #2b2028; }
+  #appcard .t { color: #f7768e; margin-bottom: 6px; }
+  #appcard button { margin-right: 6px; padding: 4px 14px; border-radius: 5px; border: 1px solid #364156; background: #242a38; color: #cdd3de; cursor: pointer; font: inherit; }
+  #side .roster { margin-top: 12px; border-top: 1px solid #2a2e37; padding-top: 8px; }
+  #side .roster h2 { font-size: 11px; color: #5b647a; margin-bottom: 4px; }
+  #side .p { padding: 3px 6px; border-radius: 5px; cursor: pointer; }
+  #side .p:hover { background: #1f232c; }
 </style>
 </head>
 <body>
-  <div id="side"><h1>会话</h1><div id="sessions"></div></div>
+  <div id="side"><h1>会话</h1><div id="sessions"></div>
+    <div class="roster"><h2>参与者</h2><div id="roster"></div></div></div>
   <div id="main">
     <div id="bar">
       <button onclick="step(0)">⏮</button><button onclick="step(-1)">◀</button>
@@ -49,10 +61,18 @@
       <span id="pos"></span><span class="grow"></span>
       <input id="filter" placeholder="Kind 过滤（子串）" oninput="renderTl()">
       <button onclick="loadEvents()">刷新</button>
+      <label><input type="checkbox" id="live" onchange="toggleLive()"> 实时</label>
+      <label>身份</label><input id="whoId" class="ident" placeholder="id" oninput="saveIdent()">
+      <input id="whoName" class="ident" placeholder="名" oninput="saveIdent()">
     </div>
+    <div id="appcard" style="display:none"></div>
     <div id="body">
       <div id="tl"><div id="hint">左侧选择会话；数据 = 只读回放面（REST/SSE）</div></div>
       <div id="insp"><h3>事件检查器</h3><pre id="inspBody">选中时间轴事件查看载荷</pre></div>
+    </div>
+    <div id="compose">
+      <input id="msg" placeholder="发送消息（Enter）" onkeydown="if(event.key==='Enter')send()">
+      <button onclick="send()">发送</button>
     </div>
   </div>
 <script>
@@ -89,7 +109,80 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
 const domOf = kind => (DOMAINS.find(([, f]) => f(kind)) || [, "k-unknown"])[1];
 const sumOf = ev => { const f = SUMMARIES[ev.event]; return f ? f(ev.data || {}) : "（未知事件——软降级通用卡片）"; };
 
-let cur = null, events = [], cursor = 0, timer = null;
+let cur = null, events = [], cursor = 0, timer = null, es = null;
+
+// 身份（决议者/说话人——localStorage 持久；多参与者链的 UI 端）
+const ident = () => ({ id: $("whoId").value.trim(), name: $("whoName").value.trim() });
+function saveIdent() { localStorage.setItem("einox.ident", JSON.stringify(ident())); }
+(function restoreIdent() {
+  try { const v = JSON.parse(localStorage.getItem("einox.ident") || "{}");
+    $("whoId").value = v.id || ""; $("whoName").value = v.name || ""; } catch {}
+})();
+
+async function api(path, body) {
+  const rs = await fetch(path, body === undefined ? undefined : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!rs.ok) { const t = await rs.text(); alert(`${path} → ${rs.status}\n${t}`); return null; }
+  return rs.json();
+}
+
+// live：EventSource 增量追加（断线自动重连带 since 续传——协议天然对齐）
+function toggleLive() {
+  if (!$("live").checked) { if (es) es.close(); es = null; return; }
+  if (!cur) return;
+  const since = events.length ? events[events.length - 1].id : 0;
+  es = new EventSource(`/api/sessions/${cur}/events?live=1&since=${since}`);
+  es.onmessage = m => {
+    const ev = JSON.parse(m.data);
+    if (events.length && ev.id <= events[events.length - 1].id) return; // 去重
+    events.push(ev); cursor = events.length; renderTl(); showPos(); onEvent(ev);
+  };
+}
+
+async function send() {
+  if (!cur) return;
+  const { id, name } = ident(), text = $("msg").value.trim();
+  if (!text) return;
+  const r = await api(`/api/sessions/${cur}/run`,
+    { text, speaker_id: id || undefined, speaker_name: name || undefined });
+  if (r) { $("msg").value = ""; if (!$("live").checked) $("live").checked = true; toggleLive(); toggleLive(); }
+}
+
+// 审批交互：最新 approval_request 无后续决议即挂起——卡片给 批准/拒绝
+function onEvent(ev) {
+  if (/^approval_decision$|^approval_timeout$/.test(ev.event)) { renderAppcard(); return; }
+  if (ev.event === "approval_request") renderAppcard();
+}
+function renderAppcard() {
+  const card = $("appcard");
+  const lastReq = [...events].reverse().find(e => e.event === "approval_request");
+  if (!lastReq) { card.style.display = "none"; return; }
+  const settled = events.some(e => e.id > lastReq.id && (/^approval_(decision|timeout)/.test(e.event)));
+  if (settled) { card.style.display = "none"; return; }
+  const d = lastReq.data || {}, i = ident();
+  card.style.display = "";
+  card.innerHTML = `<div class="t">🔔 审批：${esc(d.tool || "?")}${d.requester_name ? "（" + esc(d.requester_name) + " 的动作）" : ""}${d.target_name ? " → 应由 " + esc(d.target_name) + " 决议" : ""}</div>
+    <button onclick="decide(true,${lastReq.id})">批准</button><button onclick="decide(false,${lastReq.id})">拒绝</button>
+    <span style="color:#5b647a;font-size:11px">决议者：${esc(i.name || i.id || "匿名")}</span>`;
+}
+async function decide(approve, reqID) {
+  const d = events.find(e => e.id === reqID)?.data || {}, i = ident();
+  const item = (d.items && d.items[0]) || {};
+  const r = await api(`/api/sessions/${cur}/approve`, {
+    approve, reason: "", item_id: item.item_id || "",
+    decider_id: i.id || undefined, decider_name: i.name || undefined });
+  if (r) renderAppcard();
+}
+
+// 名册：点击即取为身份
+async function loadRoster() {
+  if (!cur) { $("roster").innerHTML = ""; return; }
+  const ps = await (await fetch(`/api/sessions/${cur}/participants`)).json();
+  $("roster").innerHTML = (ps || []).map(p =>
+    `<div class="p" data-id="${esc(p.id)}" data-name="${esc(p.name)}">${esc(p.name || p.id)}${p.role ? "（" + esc(p.role) + "）" : ""}</div>`).join("") || '<div class="p" style="color:#5b647a">（空）</div>';
+  for (const el of $("roster").querySelectorAll(".p[data-id]"))
+    el.onclick = () => { $("whoId").value = el.dataset.id; $("whoName").value = el.dataset.name; saveIdent(); };
+}
 const $ = id => document.getElementById(id);
 
 async function loadSessions() {
@@ -102,14 +195,14 @@ async function loadSessions() {
     el.onclick = () => pick(el.dataset.sid);
 }
 async function pick(sid) {
-  cur = sid; cursor = 0;
+  cur = sid; cursor = 0; if (es) { es.close(); es = null; $("live").checked = false; } renderAppcard(); loadRoster();
   for (const el of $("sessions").children) el.classList.toggle("on", el.dataset.sid === sid);
   await loadEvents();
 }
 async function loadEvents() {
   if (!cur) return;
   const rs = await fetch(`/api/sessions/${cur}/events`);
-  events = await rs.json(); cursor = events.length; renderTl(); showPos();
+  events = await rs.json(); cursor = events.length; renderTl(); showPos(); renderAppcard();
 }
 function step(d) {
   if (!events.length) return;
