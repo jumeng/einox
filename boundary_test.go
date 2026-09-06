@@ -141,7 +141,10 @@ func TestInternalDependencyDirections(t *testing.T) {
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
-		t.Skipf("go list 失败（可能无网络/工具链受限）: %v", err)
+		// 失败即红不跳过：go list ./... 依赖已在构建期解析（能跑测试即可跑
+		// list），Skip 会让分层门禁在受限环境静默失效（第三轮审查 P3——
+		// 门禁要么真跑要么真红，没有静默通过态）。
+		t.Fatalf("go list 失败（依赖方向断言依赖它——环境需可解析模块）: %v", err)
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		pkg, imports, ok := strings.Cut(line, "|")

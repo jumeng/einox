@@ -92,9 +92,10 @@ m.FlushQueue(sess)          // 排队消息落回轮
 | 优雅停机收尾 | `reg.Drain(15 * time.Second)`——取消全部 running 会话并等收尾（终态+检查点+中断注记全落）；应用停机序 = HTTP Shutdown → Drain → store Close |
 | 确定性场景多 agent | `Topology{Kind, SubAgents}`（supervisor/deep；默认单 agent） |
 | 子代理限权 | `SubAgentsConfig{Tools: 白名单, DenyTools: 硬拒名单}`——交集或含全量面未同名 = 装配期报错（白名单写漏即暴露，fail-fast） |
-| 子代理结构化回传 | `SubAgentsConfig{Output: &SpawnOutput{Schema}}`（nil = 自由文本零变化；根形必须 object 构造期拒收）——子面注入 `spawn_submit`：校验失败信封回喂自纠、合法提交即收束（零空跑模型轮），canonical JSON 回父；未提交 = error 终态不静默降级 |
-| 工具输出契约 | 工具实现 `contract.OutputContract`（可选接口 `OutputSchema()+Render()`，未实现零变化）——装配期探测最内层包装：成功路径 schema 校验（required 在场）、Render 产出模型可见投影（大 JSON 工具只回喂渲染视图） |
-| 默认界面（web/TUI） | `ui.New(m, ui.Config{Authorize})` → http.Handler（回放+交互+live；应用不 import 不进构建）；`ui.TUI(m, sid)` 终端回放浏览器（进程内零协议层，SSH/loong64）。装配先例同 channels/ |
+| 子代理结构化回传 | `SubAgentsConfig{Output: &SpawnOutput{Schema}}`（nil = 自由文本零变化；根形必须 object，**NewManager 构造期拒收**）——子面注入 `spawn_submit`：校验失败信封回喂自纠、合法提交即收束（零空跑模型轮），canonical JSON 回父；未提交/自纠耗尽 = error 终态（带 partial 半成品）不静默降级 |
+| 工具输出契约 | 工具实现 `contract.OutputContract`（可选接口 `OutputSchema()+Render()`，未实现零变化）——装配期探测最内层包装：成功路径 schema 校验（required 在场，含嵌套 object/数组元递归）、Render 产出模型可见投影（大 JSON 工具只回喂渲染视图） |
+| 默认界面（web/TUI） | `ui.New(m, ui.Config{Authorize})` → http.Handler（回放+交互+live；应用不 import 不进构建）；`ui.TUI(m, sid)` 终端回放浏览器（进程内零协议层，SSH/loong64）。装配先例同 channels/。**Authorize nil = 含控制端点全开放——生产暴露必配鉴权缝** |
+| 消息分流（渠道/ui 共用） | `m.Dispatch(s, actor, text, atts, mode)`——空闲起轮（actor 无条件设当轮说话人，nil 清陈旧归属）/运行中转排队署名/首见名册登记；`ChannelGateway.Handle` 与 ui run 端点同源编排（返回 queued = 转排队） |
 | 基座件按需 | `ProcessTools` 只放你要的（时钟/网页抓取各自独立构造） |
 
 **沙箱装配**（OS 后端 = re-exec 哨兵协议——应用 main 需挂 `sandbox.RunHelper` 钩子，装配期经沙箱 Provider 探测，内核不可用启动告警；`SandboxProvider` 注入容器等后端时无哨兵依赖；部署前提与平台限制见 [05-sandbox.md](05-sandbox.md)）：

@@ -143,3 +143,44 @@ func TestOverflowNoShrinkReportsError(t *testing.T) {
 		t.Fatalf("应 error 收束，实得 %s", st)
 	}
 }
+
+// TestOverflowRetryRebuildFailsReportsRealError 重装配后 runIter 失败（如模型
+// 构造炸）：如实报真实原因（configError→CONFIG 卡）——不得吞错归因到旧
+// overflow 错误（第三轮审查 P2：原实现静默 return false，用户看到的是已过期
+// 的超窗错误卡，排障方向被误导）。
+func TestOverflowRetryRebuildFailsReportsRealError(t *testing.T) {
+	ok := &scriptedModel{}
+	om := &overflowModel{errs: []error{overflowErr()}, inner: ok}
+	n := 0
+	m := newSeamManager(t, func(o *Options) {
+		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			n++
+			if n >= 2 { // 二次 assemble（overflowRetry 的 runIter）失败——真实原因
+				return nil, &configError{"重装配时模型构造炸了"}
+			}
+			return om, nil
+		}
+	})
+	s := m.Registry().Create("张三", "重装失败", "plan", contract.UserPrefs{Model: "p/m"})
+	s.AppendHistory(sumHist(4, 8000)...)
+	s.SetState(session.StateRunning)
+
+	var evs []session.Event
+	m.Run(context.Background(), s, "继续", nil, func(e session.Event) { evs = append(evs, e) })
+	waitTitleFlight(t, s)
+
+	sawReal := false
+	for _, e := range evs {
+		if e.Event == contract.EvError {
+			if c, ok2 := e.Data.(contract.ErrorOut); ok2 && strings.Contains(c.Message, "重装配时模型构造炸了") {
+				sawReal = true
+			}
+		}
+	}
+	if !sawReal {
+		t.Fatalf("重装配失败应如实报真实原因（CONFIG 卡含构造错误），实得事件流：%v", evs)
+	}
+	if n := len(ok.inputs); n != 0 {
+		t.Fatalf("重装配失败不应有成功模型调用，实得 %d", n)
+	}
+}

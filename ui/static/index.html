@@ -110,6 +110,7 @@ const domOf = kind => (DOMAINS.find(([, f]) => f(kind)) || [, "k-unknown"])[1];
 const sumOf = ev => { const f = SUMMARIES[ev.event]; return f ? f(ev.data || {}) : "（未知事件——软降级通用卡片）"; };
 
 let cur = null, events = [], cursor = 0, timer = null, es = null;
+const $ = id => document.getElementById(id);
 
 // 身份（决议者/说话人——localStorage 持久；多参与者链的 UI 端）
 const ident = () => ({ id: $("whoId").value.trim(), name: $("whoName").value.trim() });
@@ -126,10 +127,12 @@ async function api(path, body) {
   return rs.json();
 }
 
-// live：EventSource 增量追加（断线自动重连带 since 续传——协议天然对齐）
+// live：EventSource 增量追加（断线自动重连；旧连接先关——重建不泄漏，
+// 浏览器同源 EventSource 上限 ~6）
 function toggleLive() {
   if (!$("live").checked) { if (es) es.close(); es = null; return; }
   if (!cur) return;
+  if (es) es.close();
   const since = events.length ? events[events.length - 1].id : 0;
   es = new EventSource(`/api/sessions/${cur}/events?live=1&since=${since}`);
   es.onmessage = m => {
@@ -145,7 +148,7 @@ async function send() {
   if (!text) return;
   const r = await api(`/api/sessions/${cur}/run`,
     { text, speaker_id: id || undefined, speaker_name: name || undefined });
-  if (r) { $("msg").value = ""; if (!$("live").checked) $("live").checked = true; toggleLive(); toggleLive(); }
+  if (r) { $("msg").value = ""; if (!$("live").checked) { $("live").checked = true; toggleLive(); } }
 }
 
 // 审批交互：最新 approval_request 无后续决议即挂起——卡片给 批准/拒绝
@@ -183,7 +186,6 @@ async function loadRoster() {
   for (const el of $("roster").querySelectorAll(".p[data-id]"))
     el.onclick = () => { $("whoId").value = el.dataset.id; $("whoName").value = el.dataset.name; saveIdent(); };
 }
-const $ = id => document.getElementById(id);
 
 async function loadSessions() {
   const rs = await fetch("/api/sessions");
@@ -217,8 +219,7 @@ function play() {
 function renderTl() {
   const f = $("filter").value.trim().toLowerCase();
   const shown = new Set(events.slice(0, cursor).filter(ev => !f || ev.event.includes(f)).map(ev => ev.id));
-  const sel = ev => ev.id === lastSel;
-  let lastSel = null;
+  const sel = ev => ev.id === lastSel; // 引用全局（inspect 维护）——重渲染保选中态
   const rows = events.map(ev => {
     const on = shown.has(ev.id);
     return `<div class="ev ${on ? "" : "dim"}${sel(ev) ? " on" : ""}" data-id="${ev.id}">

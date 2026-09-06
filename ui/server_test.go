@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -483,5 +484,166 @@ func TestRunClearsStaleTurnActor(t *testing.T) {
 				t.Fatal("匿名轮不得继承张三署名（turnActor 未清）")
 			}
 		}
+	}
+}
+
+// TestGapFill SSE 间隙补投决策（第三轮审查 P2 修复件——慢消费丢事件兜底，
+// 与 engine/channel.go 消费泵 snapshotBetween 同律）：返回水位与到达事件间
+// 的开区间事件。
+func TestGapFill(t *testing.T) {
+	snap := []session.Event{
+		{ID: 2, Event: "a"}, {ID: 4, Event: "b"}, {ID: 6, Event: "c"},
+	}
+	got := gapFill(snap, 1, 6)
+	if len(got) != 2 || got[0].ID != 2 || got[1].ID != 4 {
+		t.Fatalf("(1,6) 开区间应得 2、4，实得 %+v", got)
+	}
+	if got := gapFill(snap, 4, 6); len(got) != 0 {
+		t.Fatalf("(4,6) 无间隙应空，实得 %+v", got)
+	}
+	if got := gapFill(snap, 0, 7); len(got) != 3 {
+		t.Fatalf("(0,7) 应全量，实得 %d", len(got))
+	}
+}
+
+// ── SSE 慢消费兜底 e2e（第四轮审查 P2-1：补纯函数之外的循环接线回归）──────
+// 夹具 = 闸门式写面（gatedWriter）：Flush 需先取得一枚令牌、无令牌即阻塞——
+// 精确模拟慢消费客户端把 SSE 循环卡在写面的时刻；期间 Record 灌事件即触发
+// 订阅通道「缓冲 64 满即弃」的真实丢弃（session.go Record 扇出 default 分支）。
+
+// gatedWriter 令牌闸门写面：Write 即时落缓冲（事件可见），Flush 阻塞至有令牌。
+type gatedWriter struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	permits chan struct{}
+}
+
+func (g *gatedWriter) Header() http.Header { return http.Header{} }
+func (g *gatedWriter) WriteHeader(int)     {}
+func (g *gatedWriter) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.buf.Write(p)
+}
+func (g *gatedWriter) Flush() { <-g.permits } // close(permits) 后恒放行（全量放行态）
+func (g *gatedWriter) String() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.buf.String()
+}
+
+// sseIDsOf 解析已写出 SSE data: 行的事件 ID 序列（无洞/去重断言的数据面）。
+func sseIDsOf(raw string) []int {
+	var ids []int
+	for _, line := range strings.Split(raw, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev session.Event
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev) == nil {
+			ids = append(ids, ev.ID)
+		}
+	}
+	return ids
+}
+
+// runSSEWithGatedFlushes 经完整 mux 路由直驱 events 处理器（PathValue 生效），
+// 返回闸门写面与请求取消（收尾杀循环 goroutine——Done 分支退出并退订）。
+func runSSEWithGatedFlushes(t *testing.T, h http.Handler, sid string, permits chan struct{}) (*gatedWriter, context.CancelFunc) {
+	t.Helper()
+	gw := &gatedWriter{permits: permits}
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid+"/events?live=1&since=0", nil).WithContext(ctx)
+	go h.ServeHTTP(gw, req)
+	return gw, cancel
+}
+
+// waitSSEIDs 轮询写面直到收集到 want 个事件 ID（带界）。
+func waitSSEIDs(t *testing.T, gw *gatedWriter, want int) []int {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		ids := sseIDsOf(gw.String())
+		if len(ids) >= want {
+			return ids
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("SSE 应达 %d 事件，实得 %d：%q", want, len(ids), gw.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// assertContiguous 断言 ID 自 1 连续、无重复（水位去重的机器判据——无洞即恢复成立）。
+func assertContiguous(t *testing.T, ids []int) {
+	t.Helper()
+	for i, id := range ids {
+		if id != i+1 {
+			t.Fatalf("事件应连续无洞无重复：位 %d 实得 #%d（全序 %v）", i, id, ids)
+		}
+	}
+}
+
+// TestSSESlowConsumerGapFillE2E 慢消费兜底 e2e①：闸门卡住写面期间灌 90+1
+// 事件（订阅缓冲 64——必然溢出丢弃），预置 2 令牌让消费位确定性前进并阻塞；
+// 丢弃段之后仍有事件在缓冲在途——恢复后水位与到达事件间的间隙由快照补投
+// （gapFill）与节拍追赶共同收口，客户端视角 ID 连续无洞、终态不缺失。
+func TestSSESlowConsumerGapFillE2E(t *testing.T) {
+	h, s := newTestServer(t, Config{}) // 既有事件 1..3
+	permits := make(chan struct{}, 4096)
+	permits <- struct{}{} // 预置 2 令牌：无论 select 先走 ch 还是 tick，消费位
+	permits <- struct{}{} // 恰前进一两个事件后必阻塞在某个 Flush（令牌耗尽）
+	gw, cancel := runSSEWithGatedFlushes(t, h, s.SID, permits)
+	defer cancel()
+
+	// 同步锚：快照 1..3 已写出——Subscribe 先于以下 Record（灌入必进订阅通道）
+	waitSSEIDs(t, gw, 3)
+	for i := 0; i < 90; i++ { // 事件 4..93：64 缓冲 + ≤2 已消费 ⇒ ≥24 真实丢弃
+		s.Record(contract.EvTextDelta, contract.Delta{Delta: "x"})
+	}
+	ids := waitSSEIDs(t, gw, 4) // ≥4 ⟹ 处理器已阻塞在写面（令牌尽、缓冲有空位）
+	if n := len(ids); n > 6 {
+		t.Fatalf("闸门形态异常：阻塞前消费不应超过预置令牌数，实得 %d 事件", n)
+	}
+	s.Record(contract.EvSessionEnd, contract.SessionEnd{Summary: "尾部"}) // 事件 94：进缓冲（在途，触发间隙）
+	close(permits)                                                      // 全放行：排空 + 补投 + 节拍追赶
+
+	ids = waitSSEIDs(t, gw, 94)
+	assertContiguous(t, ids)
+	if ids[len(ids)-1] != 94 {
+		t.Fatalf("终态事件 94 应最终到达，末位实得 #%d", ids[len(ids)-1])
+	}
+}
+
+// TestSSESlowConsumerTickerCatchUpE2E 慢消费兜底 e2e②（尾部弃的节拍收口）：
+// 零令牌——处理器阻塞在快照后的首个 Flush、订阅通道零消费；灌 64 事件恰满
+// 缓冲后再灌 8 事件全部被弃（尾部丢弃、其后无到达事件可触发间隙检测）——
+// 恢复后这 8 个事件只能经 250ms 节拍追赶（EventsSince 快照）补达，终态不缺失。
+func TestSSESlowConsumerTickerCatchUpE2E(t *testing.T) {
+	h, s := newTestServer(t, Config{})   // 既有事件 1..3
+	permits := make(chan struct{}, 4096) // 零令牌：快照写完即阻塞在首个 Flush
+	gw, cancel := runSSEWithGatedFlushes(t, h, s.SID, permits)
+	defer cancel()
+
+	waitSSEIDs(t, gw, 3)      // 同步锚：Subscribe 已完成、处理器已卡在首个 Flush
+	for i := 0; i < 64; i++ { // 事件 4..67：恰满 64 缓冲（零消费——一个不弃）
+		s.Record(contract.EvTextDelta, contract.Delta{Delta: "x"})
+	}
+	for i := 0; i < 7; i++ { // 事件 68..74：满即弃（尾部丢弃段）
+		s.Record(contract.EvTextDelta, contract.Delta{Delta: "d"})
+	}
+	s.Record(contract.EvSessionEnd, contract.SessionEnd{Summary: "尾部"}) // 事件 75：同被弃——终态只能靠节拍收口
+	close(permits)                                                      // 全放行：ch 排空 4..67 后，68..75 无在途——唯 ticker 可补
+
+	ids := waitSSEIDs(t, gw, 75)
+	assertContiguous(t, ids)
+	var last session.Event
+	for _, line := range strings.Split(gw.String(), "\n") { // 终态事件确经节拍到达
+		if strings.HasPrefix(line, "data: ") {
+			_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &last)
+		}
+	}
+	if last.ID != 75 || last.Event != contract.EvSessionEnd {
+		t.Fatalf("末位应达终态事件 75（session_end），实得 #%d %s", last.ID, last.Event)
 	}
 }

@@ -34,8 +34,8 @@ type runReq struct {
 	Attachments []session.Attachment `json:"attachments,omitempty"`
 }
 
-// run 起轮/排队（ChannelGateway.Handle 同款编排：BeginRun 成功起轮，运行中/
-// 挂起转排队——SteerBy 带说话人；说话人首见登记名册，与渠道入站同律）。
+// run 起轮/排队（Manager.Dispatch——与 ChannelGateway.Handle 共用编排：
+// BeginRun 成功起轮，运行中/挂起转排队带说话人；说话人首见登记名册）。
 func (h *server) run(w http.ResponseWriter, r *http.Request) {
 	s := h.sessionOf(w, r)
 	if s == nil {
@@ -49,27 +49,19 @@ func (h *server) run(w http.ResponseWriter, r *http.Request) {
 	var actor *contract.Participant
 	if in.SpeakerID != "" {
 		actor = &contract.Participant{ID: in.SpeakerID, Name: in.SpeakerName}
-		s.UpsertParticipant(*actor)
 	}
 	mode := s.ModePublic()
 	if mode == "" {
 		mode = contract.ModeManual
 	}
-	for i := 0; i < 2; i++ { // 收束竞态重试一次（Handle 同款）
-		if s.BeginRun(mode) {
-			s.SetTurnActor(actor) // 无条件设：nil 清陈旧归属（审查 P1——匿名轮不得继承上轮身份）
-			// 执行体脱离请求生命周期（真实服务 handler 返回即取消请求 ctx——
-			// httptest 感知不到此差异；channel.go Handle 同款用 Background，实锚）
-			go h.m.Run(context.Background(), s, in.Text, in.Attachments, func(session.Event) {})
-			writeJSON(w, map[string]any{"ok": true, "started": true})
-			return
-		}
-		if s.SteerBy(actor, in.Text, in.Attachments, mode) {
-			writeJSON(w, map[string]any{"ok": true, "queued": true})
-			return
-		}
+	// 执行体脱离请求生命周期（真实服务 handler 返回即取消请求 ctx——
+	// httptest 感知不到此差异；Dispatch 内部用 Background，同 channel.go）。
+	queued, err := h.m.Dispatch(s, actor, in.Text, in.Attachments, mode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
 	}
-	http.Error(w, "起轮分流失败（会话状态竞态，可重试）", http.StatusConflict)
+	writeJSON(w, map[string]any{"ok": true, "started": !queued, "queued": queued})
 }
 
 func (h *server) resume(w http.ResponseWriter, r *http.Request) {

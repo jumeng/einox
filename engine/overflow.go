@@ -11,6 +11,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
@@ -28,9 +29,15 @@ func (m *Manager) pumpWithOverflow(runCtx context.Context, s *session.Session, f
 	if endState != session.StateError || rerr == nil {
 		return acc, endState
 	}
-	iter2, behaviors2, ok := m.overflowRetry(runCtx, s, fn, acc, behaviors)
+	iter2, behaviors2, rerr2, ok := m.overflowRetry(runCtx, s, fn, acc, behaviors)
 	if !ok {
-		m.emit(s, fn, contract.EvError, errCard(rerr))
+		if rerr2 != nil {
+			// 重装配失败：真实原因如实发卡（errToEvent 保 configError→CONFIG
+			// 分类）——旧 overflow 错误此时已非真相，发它会误导排障方向。
+			m.emit(s, fn, contract.EvError, errToEvent(rerr2, s))
+		} else {
+			m.emit(s, fn, contract.EvError, errCard(rerr)) // 口径降不下来等：如实报旧错
+		}
 		return acc, endState
 	}
 	acc, endState, rerr = m.pump(s, iter2, fn, m.estimateContext(s), behaviors2)
@@ -45,10 +52,12 @@ func (m *Manager) pumpWithOverflow(runCtx context.Context, s *session.Session, f
 // 尾段 + 任务锚）为本轮唯一输入重开。出站口径（shapedTokenCounter 消息面，
 // 与摘要通知卡同口径）未下降即放弃；裁掉前段全文经 transcript 外置（通知卡
 // 承诺可溯源）。通知卡复用 compaction 口径（零新 Kind——docs/03 软契约不变）。
+// 第四返回值非空 = 重装配后重新组装失败（runIter 错误——调用方以真实原因
+// 发卡，不再吞错归因到旧 overflow 错误）。
 func (m *Manager) overflowRetry(runCtx context.Context, s *session.Session, fn emitFn,
-	acc *runAccum, behaviors map[string]string) (*adk.AsyncIterator[*adk.AgentEvent], map[string]string, bool) {
+	acc *runAccum, behaviors map[string]string) (*adk.AsyncIterator[*adk.AgentEvent], map[string]string, error, bool) {
 	if s.Stopped() || runCtx.Err() != nil {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	if acc != nil {
 		acc.endAssistantMsg()
@@ -63,7 +72,7 @@ func (m *Manager) overflowRetry(runCtx context.Context, s *session.Session, fn e
 	before, _ := shapedTokenCounter(context.Background(), hist, nil)
 	after, _ := shapedTokenCounter(context.Background(), input, nil)
 	if after >= before {
-		return nil, nil, false // 单条巨消息即全部历史等形态：降不下来，重试必再炸
+		return nil, nil, nil, false // 单条巨消息即全部历史等形态：降不下来，重试必再炸
 	}
 	writeTranscript(m.reg.Store(), s, hist)
 	m.emit(s, fn, contract.EvHarnessNote, contract.HarnessNote{
@@ -74,7 +83,8 @@ func (m *Manager) overflowRetry(runCtx context.Context, s *session.Session, fn e
 	})
 	iter, behaviors, err := m.runIter(runCtx, s, input)
 	if err != nil {
-		return nil, nil, false
+		log.Printf("overflow: 重装配后重新组装失败（%s）：%v", s.SID, err)
+		return nil, nil, err, false
 	}
-	return iter, behaviors, true
+	return iter, behaviors, nil, true
 }

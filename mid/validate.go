@@ -29,8 +29,11 @@ import (
 
 // ValidateJSON 通用 schema 校验（T8 输出契约 / spawn 结构化回传共用）：与
 // 入参校验同子集纪律（type/enum/min/max/items/properties 递归），另校验
-// required 在场——输出 schema 是应用手写的显式声明，与入参「eino 反射必标
-// required」的豁免场景（2026-08-29 实锚裁决）不同。
+// required 在场——根层与嵌套（properties 子对象 / items 数组元）递归全覆盖
+// （值为 map/数组即深查，不要求子 schema 显式标 type——与 validateValue 同
+// 门槛）：输出 schema 是应用手写的显式声明，嵌套必填是自然形态；与入参
+// 「eino 反射必标 required」的豁免场景（2026-08-29 实锚裁决，入参面不校验
+// required——见 Validate 注释）不同。
 func ValidateJSON(sc *contract.Schema, data json.RawMessage) error {
 	if sc == nil {
 		return nil
@@ -47,19 +50,36 @@ func ValidateJSON(sc *contract.Schema, data json.RawMessage) error {
 	return nil
 }
 
-// requireValue required 字段在场校验（object 形；类型不符由 type 面报）。
+// requireValue required 字段在场校验（object 形递归：值为 map 即查 required
+// 并沿 properties 深查、数组沿 items 逐元深查——与 validateValue 同门槛，
+// 不要求子 schema 显式标 type:"object"；required 可深藏于未列 required 的
+// 子结构；类型不符由 validateValue 的 type 面报）。仅 ValidateJSON 消费——
+// 入参面豁免 required 的既有裁决不动。
 func requireValue(path string, v any, sc *contract.Schema) []string {
-	if len(sc.Required) == 0 || sc.Type != "object" {
-		return nil
-	}
-	obj, ok := v.(map[string]any)
-	if !ok {
+	if sc == nil {
 		return nil
 	}
 	var errs []string
-	for _, k := range sc.Required {
-		if _, has := obj[k]; !has {
-			errs = append(errs, fmt.Sprintf("%s.%s 是必填字段", path, k))
+	if obj, ok := v.(map[string]any); ok {
+		for _, k := range sc.Required {
+			if _, has := obj[k]; !has {
+				errs = append(errs, fmt.Sprintf("%s.%s 是必填字段", path, k))
+			}
+		}
+		names := make([]string, 0, len(sc.Properties))
+		for k := range sc.Properties {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			if item, has := obj[k]; has {
+				errs = append(errs, requireValue(path+"."+k, item, sc.Properties[k])...)
+			}
+		}
+	}
+	if arr, ok := v.([]any); ok && sc.Items != nil {
+		for i, item := range arr {
+			errs = append(errs, requireValue(fmt.Sprintf("%s[%d]", path, i), item, sc.Items)...)
 		}
 	}
 	return errs

@@ -158,25 +158,59 @@ func (b *bgSpawnTool) InvokableRun(ctx context.Context, args string, opts ...too
 	if json.Unmarshal([]byte(args), &in) == nil && in.Background {
 		return b.start(ctx, args)
 	}
-	// T8 结构化回传（同步档）：ctx 注入收束信号（穿透 agent_tool 全链），
-	// 返回面改写——合法提交回 canonical JSON，自然结束未提交按 error 终态
-	//（不静默降级为文本结论——dsh「无有效结构化输出即失败」形态）。
-	if b.cfg.Output != nil && b.cfg.Output.Schema != nil {
-		sig := &concludeSignal{}
-		out, err := b.inner.InvokableRun(withConcludeSignal(ctx, sig), args, opts...)
-		if err != nil {
-			return out, err
-		}
-		if v, ok := sig.result(); ok {
-			bv, _ := json.Marshal(map[string]any{"ok": true, "value": v})
-			return string(bv), nil
-		}
-		bv, _ := json.Marshal(map[string]any{
-			"ok": false, "stop_reason": "error",
-			"error": "子代理未提交结构化结论即结束（须以 spawn_submit 提交）"})
+	// 同步档：ctx 恒注入收束信号（partial 捕获供失败信封——captureModel 写，
+	// 非 Output 档 done 恒 false 仅用 partial 面）。T8 结构化回传档返回面改写：
+	// 合法提交回 canonical JSON（提交信号优先于错误分类——预算边缘已提交后
+	// 报错也以提交值收尾，与 bg 档同律）；自然结束未提交按 error 终态 + Partial
+	//（不静默降级为文本结论——dsh「无有效结构化输出即失败」形态）；子代理
+	// 运行失败（failFeed 信封）如实透传，Output 档自纠耗尽按 error 归因
+	//（§2.3-③：max_iterations 未提交 = 自纠耗尽，非真超轮次）。
+	sig := &concludeSignal{}
+	out, err := b.inner.InvokableRun(withConcludeSignal(ctx, sig), args, opts...)
+	if b.cfg.Output == nil || b.cfg.Output.Schema == nil {
+		return out, err // 自由文本档：信封由 spawnFailFeed 产（含 partial）
+	}
+	if v, ok := sig.result(); ok {
+		bv, _ := json.Marshal(map[string]any{"ok": true, "value": v})
 		return string(bv), nil
 	}
-	return b.inner.InvokableRun(ctx, args, opts...)
+	if err == nil && !isFailureEnvelope(json.RawMessage(out)) {
+		// 自然结束未提交：out 即末段 assistant 文本（agent_tool 终产物）；
+		// partial 非空才带（与 bg 档 finishSpawnBG 同形态——含前缀）
+		env := map[string]any{
+			"ok": false, "stop_reason": "error",
+			"error": "子代理未提交结构化结论即结束（须以 spawn_submit 提交）"}
+		if out != "" {
+			env["partial"] = "终止前最后一段输出：\n" + out
+		}
+		bv, _ := json.Marshal(env)
+		return string(bv), nil
+	}
+	if err == nil { // failFeed 失败信封：Output 档改写自纠耗尽归因（余保持）
+		return rewriteSyncExhaustion(out), nil
+	}
+	return out, err // 中断穿透/额度取消原样上抛（提交已在前置分支收尾）
+}
+
+// rewriteSyncExhaustion Output 档失败信封归因改写：max_tokens（轮次耗尽）在
+// 结构化回传契约下必为「未提交合法结论」（自纠耗尽）——按 §2.3-③ 改记
+// error，原错误详情保留；其余失败（aborted/error）与 partial 原样透传。
+func rewriteSyncExhaustion(out string) string {
+	var env map[string]any
+	if json.Unmarshal([]byte(out), &env) != nil {
+		return out
+	}
+	if sr, _ := env["stop_reason"].(string); sr != "max_tokens" {
+		return out
+	}
+	if emsg, _ := env["error"].(string); emsg != "" {
+		env["error"] = "结构化结论自纠耗尽（轮次预算内未提交合法结论）：" + emsg
+	} else {
+		env["error"] = "结构化结论自纠耗尽（轮次预算内未提交合法结论）"
+	}
+	env["stop_reason"] = "error"
+	bv, _ := json.Marshal(env)
+	return string(bv)
 }
 
 // start 后台派生入口：预检 → 注册 → go 执行体（额度获取在 goroutine 内）
@@ -421,7 +455,8 @@ func (m *Manager) offloadConclusion(s *session.Session, id, text string) string 
 // completion-announced-last 同款：通知可能同步开自续轮，其余观察者须已见
 // 终态）。notify=false 用于用户主动停止的取消（终态封口但不打扰）。
 // partial = 终止前最后一段 assistant 输出（失败信封附带——父模型拿到
-// 半成品可判断补做还是放弃；同步路径暂缺见 spawnFailFeed 注）。
+// 半成品可判断补做还是放弃；同步档经 captureModel 同语义供给，见
+// spawnFailFeed）。
 func (m *Manager) finishSpawnBG(s *session.Session, id, task, conclusion, partial string, failure error, notify bool) {
 	if s.Stopped() {
 		return // 已删除：磁盘零残留

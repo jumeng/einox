@@ -133,3 +133,46 @@ func mustTool(t *testing.T, sc *contract.Schema) contract.Tool {
 	w, _ := schemaOf(sc)
 	return w
 }
+
+// TestValidateJSONNestedRequired 输出面 required 递归（第三轮审查 P3 补齐）：
+// 嵌套 object 缺 required 与数组元素内缺 required 都必须报——输出 schema 是
+// 手写显式声明，嵌套必填是自然形态；入参面豁免裁决不动（Validate 不校验
+// required，含嵌套）。
+func TestValidateJSONNestedRequired(t *testing.T) {
+	sc := &contract.Schema{Type: "object", Required: []string{"rows", "meta"},
+		Properties: map[string]*contract.Schema{
+			"rows": {Type: "array", Items: &contract.Schema{Type: "object", Required: []string{"v"}}},
+			"meta": {Type: "object", Required: []string{"gen"},
+				Properties: map[string]*contract.Schema{"gen": {Type: "string"}}},
+		}}
+	err := ValidateJSON(sc, json.RawMessage(`{"rows":[{"v":1},{}],"meta":{}}`))
+	if err == nil || !strings.Contains(err.Error(), "meta.gen") || !strings.Contains(err.Error(), "rows[1].v") {
+		t.Fatalf("嵌套 required 缺失应逐路径报（meta.gen、rows[1].v），实得 %v", err)
+	}
+	if err := ValidateJSON(sc, json.RawMessage(`{"rows":[{"v":1}],"meta":{"gen":"x"}}`)); err != nil {
+		t.Fatalf("全在场应过：%v", err)
+	}
+	// required 深藏于未列 required 的子对象（外层只查 rows 在场，rows 元内查 v）
+	deep := &contract.Schema{Type: "object",
+		Properties: map[string]*contract.Schema{
+			"rows": {Type: "array", Items: &contract.Schema{Type: "object", Required: []string{"v"}}}}}
+	if err := ValidateJSON(deep, json.RawMessage(`{"rows":[{}]}`)); err == nil || !strings.Contains(err.Error(), "rows[0].v") {
+		t.Fatalf("深藏 required 应报：%v", err)
+	}
+	// 未显式标 type:"object" 的子结构同样深查（第四轮裁定：递归门槛与
+	// validateValue 对齐——map 值即查 required，不要求子 schema 标型）
+	untyped := &contract.Schema{Type: "object",
+		Properties: map[string]*contract.Schema{
+			"meta": {Required: []string{"gen"}, Properties: map[string]*contract.Schema{"gen": {Type: "string"}}}}}
+	if err := ValidateJSON(untyped, json.RawMessage(`{"meta":{}}`)); err == nil || !strings.Contains(err.Error(), "meta.gen") {
+		t.Fatalf("未标型子对象的 required 应深查：%v", err)
+	}
+	// 入参豁免不动：同 schema 作 Params、缺全部 required 仍直通工具
+	tool, hit := schemaOf(sc)
+	if _, err := Validate(tool).Invoke(context.Background(), json.RawMessage(`{"rows":[{}]}`)); err != nil {
+		t.Fatalf("入参面 required 豁免裁决不得被输出面改动破坏：%v", err)
+	}
+	if !*hit {
+		t.Fatal("豁免面合法调用应直达工具")
+	}
+}

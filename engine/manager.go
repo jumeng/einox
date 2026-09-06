@@ -280,6 +280,14 @@ func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
 	if err := tools.CheckTopDirs("WorkspaceProtect", opt.WorkspaceProtect); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}
+	// SpawnOutput.Schema 根形构造期拒收（设计 §2.3-③——纯静态配置不依赖
+	// 会话面，NewManager 即拒与 SessionToolsOff 的 fail-fast 同位；此前在
+	// 首轮 assemble 报 CONFIG 卡，拒收时点与设计措辞不符）。
+	if opt.SubAgents != nil && opt.SubAgents.Output != nil {
+		if sc := opt.SubAgents.Output.Schema; sc == nil || sc.Type != "object" {
+			return nil, fmt.Errorf("engine: SpawnOutput.Schema 根形必须为 object（结构化结论契约拒收）")
+		}
+	}
 	if opt.NewModel == nil {
 		opt.NewModel = llm.NewChatModel
 	}

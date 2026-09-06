@@ -478,6 +478,20 @@ func (s *Session) SnapshotEvents() []Event {
 	return append([]Event(nil), s.Events...)
 }
 
+// EventsSince 快照中 ID 大于 from 的事件（订阅通道满即弃的补投源——渠道
+// 消费泵的间隙补投/节拍追赶与 ui SSE 慢消费兜底同源共用，见 engine/channel.go）。
+func (s *Session) EventsSince(from int) []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Event
+	for _, ev := range s.Events {
+		if ev.ID > from {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
 // Record 追加事件（seq 自增；已停止会话不再记录——删除后磁盘零残留）。
 // 记录即扇出到旁观订阅（M5-2）。
 func (s *Session) Record(name string, data any) Event {

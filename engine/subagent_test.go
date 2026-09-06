@@ -18,8 +18,10 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/jumeng/einox/checkpoint"
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/hitl"
+	"github.com/jumeng/einox/internal/tstore"
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/tools"
@@ -811,9 +813,235 @@ func TestSpawnStructuredNoSubmit(t *testing.T) {
 	for _, msg := range fm.inputs[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, "未提交结构化结论") && strings.Contains(msg.Content, `"stop_reason":"error"`) {
 			found = true
+			// §2.3-③：自然结束未提交 → error + Partial（末段文本即 agent_tool
+			// 终产物；带前缀——与 bg 档 finishSpawnBG / 同步失败信封同形态）
+			if !strings.Contains(msg.Content, "终止前最后一段输出：") || !strings.Contains(msg.Content, "已处理。") {
+				t.Fatalf("未提交终态应带 partial（前缀+子代理末段输出）：%s", msg.Content)
+			}
 		}
 	}
 	if !found {
 		t.Fatalf("未提交应回 error 终态信封，实得 %+v", fm.inputs[1])
+	}
+}
+
+// TestNewManagerRejectsBadSpawnOutput SpawnOutput.Schema 根形构造期拒收
+// （第三轮审查裁决⑤：纯静态配置 NewManager 即拒——与 SessionToolsOff 的
+// fail-fast 同位；此前首轮 assemble 才报 CONFIG 卡，与设计「构造期」措辞不符）。
+func TestNewManagerRejectsBadSpawnOutput(t *testing.T) {
+	st := tstore.New(t.TempDir())
+	_, err := NewManager(session.NewRegistry(st), Options{
+		Providers: func() []llm.ProviderSpec {
+			return []llm.ProviderSpec{{ID: "p", Kind: "openai", Enabled: true,
+				Models: []llm.ModelSpec{{ID: "m", Input: []string{"text"}, Priority: 100}}}}
+		},
+		Instruction: func(SessionBrief) string { return "test" },
+		NewModel: func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return &scriptedModel{}, nil
+		},
+		CheckPoints:   func(operator, sid string) CheckPointStore { return checkpoint.NewCheckPointStore(st, operator, sid) },
+		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
+		SubAgents:     &SubAgentsConfig{Output: &SpawnOutput{Schema: &contract.Schema{Type: "array"}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "根形必须为 object") {
+		t.Fatalf("非 object 根形应构造期拒收，实得 %v", err)
+	}
+	// nil Schema 同拒
+	st2 := tstore.New(t.TempDir())
+	_, err = NewManager(session.NewRegistry(st2), Options{
+		Providers: func() []llm.ProviderSpec {
+			return []llm.ProviderSpec{{ID: "p", Kind: "openai", Enabled: true,
+				Models: []llm.ModelSpec{{ID: "m", Input: []string{"text"}, Priority: 100}}}}
+		},
+		Instruction: func(SessionBrief) string { return "test" },
+		NewModel: func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return &scriptedModel{}, nil
+		},
+		CheckPoints:   func(operator, sid string) CheckPointStore { return checkpoint.NewCheckPointStore(st2, operator, sid) },
+		WorkspaceRoot: func(owner, sid string) string { return st2.TmpDir() + "/ws/" + owner + "/" + sid },
+		SubAgents:     &SubAgentsConfig{Output: &SpawnOutput{}},
+	})
+	if err == nil {
+		t.Fatal("nil Schema 应构造期拒收")
+	}
+}
+
+// withBudget 临时收紧轮次预算（父/子共享全局 maxIterations——恢复必须成对）。
+func withBudget(t *testing.T, n int) {
+	t.Helper()
+	old := maxIterations
+	maxIterations = n
+	t.Cleanup(func() { maxIterations = old })
+}
+
+// TestSpawnStructuredSubmitWinsAtBudgetEdge 预算边缘提交信号优先（同步档，
+// 第三轮审查 P2——bg 档 73c63c8 已修，同步档原样上抛错误会丢弃已提交的
+// canonical 结论）：末轮合法提交后即便循环报 max_iterations 也以提交值收尾。
+func TestSpawnStructuredSubmitWinsAtBudgetEdge(t *testing.T) {
+	withBudget(t, 3)
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("c1", "spawn", `{"task":"统计","tools":"","expect":"数量"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	subStream := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n <= 2 { // 烧掉两轮（不合规提交），第 3 轮（预算末轮）才合法提交
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf(fmt.Sprintf("s%d", n), "spawn_submit", `{"wrong":"x"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+			tcOf("s3", "spawn_submit", `{"answer":"42"}`)}})
+	}}
+	n := 0
+	m, _ := newReductionManager(t, 0, nil, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n == 2 {
+			return subStream, nil
+		}
+		return fm, nil
+	}, func(o *Options) {
+		o.SubAgents = &SubAgentsConfig{Output: &SpawnOutput{Schema: &contract.Schema{
+			Type: "object", Required: []string{"answer"},
+			Properties: map[string]*contract.Schema{"answer": {Type: "string"}}}}}
+	})
+	s := m.Registry().Create("张三", "边缘", "auto", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	m.Run(context.Background(), s, "帮我查", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+
+	found := false
+	for _, msg := range fm.inputs[1] {
+		if msg.Role == schema.Tool && strings.Contains(msg.Content, `"answer":"42"`) && strings.Contains(msg.Content, `"ok":true`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("预算边缘合法提交应以提交值收尾（不因循环报错丢弃 canonical），实得 %+v", fm.inputs[1])
+	}
+}
+
+// TestSpawnStructuredExhaustionIsError 自纠耗尽归因（同步档，第三轮审查 M-3）：
+// Output 档轮次耗尽必为「未提交合法结论」——按设计 §2.3-③ 记 error + 自纠
+// 耗尽文案（非 max_tokens；bg 档同律）。
+func TestSpawnStructuredExhaustionIsError(t *testing.T) {
+	withBudget(t, 2)
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("c1", "spawn", `{"task":"统计","tools":"","expect":"数量"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	subStream := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+			tcOf(fmt.Sprintf("s%d", n), "spawn_submit", `{"wrong":"x"}`)}}) // 恒不合规至耗尽
+	}}
+	n := 0
+	m, _ := newReductionManager(t, 0, nil, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n == 2 {
+			return subStream, nil
+		}
+		return fm, nil
+	}, func(o *Options) {
+		o.SubAgents = &SubAgentsConfig{Output: &SpawnOutput{Schema: &contract.Schema{Type: "object", Required: []string{"answer"}}}}
+	})
+	s := m.Registry().Create("张三", "耗尽", "auto", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	m.Run(context.Background(), s, "帮我查", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+
+	found := false
+	for _, msg := range fm.inputs[1] {
+		if msg.Role == schema.Tool && strings.Contains(msg.Content, "自纠耗尽") {
+			found = true
+			if strings.Contains(msg.Content, `"stop_reason":"max_tokens"`) {
+				t.Fatalf("自纠耗尽应记 error 非 max_tokens：%s", msg.Content)
+			}
+			if !strings.Contains(msg.Content, `"stop_reason":"error"`) {
+				t.Fatalf("自纠耗尽 stop_reason 应为 error：%s", msg.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("自纠耗尽应显式归因（含文案与 stop_reason=error），实得 %+v", fm.inputs[1])
+	}
+}
+
+// errSecondModel 首调文本+工具调用、次调错误收流（同步 spawn partial 捕获面的
+// 夹具——captureModel 从真实模型输出累积末段文本）。
+type errSecondModel struct {
+	inputs [][]*schema.Message
+}
+
+func (e *errSecondModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("非流式", nil), nil
+}
+
+func (e *errSecondModel) Stream(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	e.inputs = append(e.inputs, append([]*schema.Message(nil), input...))
+	sr, sw := schema.Pipe[*schema.Message](2)
+	go func() {
+		defer sw.Close()
+		if len(e.inputs) == 1 {
+			sw.Send(&schema.Message{Role: schema.Assistant, Content: "半成品：勘察到一半",
+				ToolCalls: []schema.ToolCall{tcOf("s1", "read_tool", `{}`)}}, nil)
+			return
+		}
+		sw.Send(nil, errors.New("子代理模型炸了"))
+	}()
+	return sr, nil
+}
+
+// TestSpawnSyncFailurePartial 同步档失败信封 partial（设计 §2.3-① 补齐）：
+// captureModel 捕获末段 assistant 文本，failFeed 失败信封携带——父模型拿到
+// 半成品可判补做/放弃（bg 档 finishSpawnBG 同语义）。
+func TestSpawnSyncFailurePartial(t *testing.T) {
+	rt, _ := tools.InferTool("read_tool", "读桩", func(context.Context, struct{}) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("c1", "spawn", `{"task":"勘察","tools":"read_tool","expect":"清单"}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	sub := &errSecondModel{}
+	n := 0
+	m, _ := newReductionManager(t, 0, []contract.Tool{rt}, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		n++
+		if n == 2 {
+			return sub, nil
+		}
+		return fm, nil
+	}, func(o *Options) {
+		o.SubAgents = &SubAgentsConfig{Tools: []string{"read_tool"}}
+	})
+	s := m.Registry().Create("张三", "半成品", "auto", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	m.Run(context.Background(), s, "帮我勘察", nil, func(session.Event) {})
+	waitTitleFlight(t, s)
+
+	found := false
+	for _, msg := range fm.inputs[1] {
+		if msg.Role == schema.Tool && strings.Contains(msg.Content, "子代理执行失败") {
+			found = true
+			if !strings.Contains(msg.Content, "半成品：勘察到一半") {
+				t.Fatalf("失败信封应带 partial（末段 assistant 文本）：%s", msg.Content)
+			}
+			if !strings.Contains(msg.Content, `"stop_reason":"error"`) {
+				t.Fatalf("失败信封应带 stop_reason：%s", msg.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("父应收到失败信封，实得 %+v", fm.inputs[1])
 	}
 }

@@ -13,6 +13,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 
 	"github.com/cloudwego/eino/components/model"
@@ -28,11 +29,14 @@ type SpawnOutput struct {
 	Schema *contract.Schema
 }
 
-// concludeSignal 单次子代理运行的结构化收束信号（ctx 携带）。
+// concludeSignal 单次子代理运行的结构化收束信号（ctx 携带）。partial = 末段
+// assistant 文本（覆盖式，captureModel 写入——同步 spawn 失败信封的半成品
+// 依据，bg 档泵 lastText 同语义）。
 type concludeSignal struct {
-	mu    sync.Mutex
-	done  bool
-	value json.RawMessage
+	mu      sync.Mutex
+	done    bool
+	value   json.RawMessage
+	partial string
 }
 
 type concludeCtxKey struct{}
@@ -56,6 +60,78 @@ func (c *concludeSignal) result() (json.RawMessage, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.value, c.done
+}
+
+func (c *concludeSignal) setPartial(t string) {
+	c.mu.Lock()
+	c.partial = t
+	c.mu.Unlock()
+}
+
+func (c *concludeSignal) partialOf() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.partial
+}
+
+// captureModel 末段文本捕获包装（装配级常挂、状态全在 ctx 信号——共享实例
+// 并发安全）：真实模型的末段 assistant 文本覆盖式写入 sig.partial（工具调用
+// = 段边界）——同步 spawn 失败信封的 Partial 数据源（设计 §2.3-①；bg 档由
+// 泵 lastText 供给，本包装补齐同步档）。concludeModel 的合成消息不经此层
+// （拦截发生在更外层），不会污染末段。
+type captureModel struct {
+	model.BaseModel[*schema.Message]
+}
+
+func (c *captureModel) Generate(ctx context.Context, in []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	msg, err := c.BaseModel.Generate(ctx, in, opts...)
+	if sig := concludeSignalOf(ctx); sig != nil && err == nil && msg != nil && msg.Content != "" {
+		sig.setPartial(msg.Content)
+	}
+	return msg, err
+}
+
+func (c *captureModel) Stream(ctx context.Context, in []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	sr, err := c.BaseModel.Stream(ctx, in, opts...)
+	if err != nil {
+		return sr, err
+	}
+	sig := concludeSignalOf(ctx)
+	if sig == nil {
+		return sr, nil
+	}
+	out, sw := schema.Pipe[*schema.Message](2)
+	go func() { // 排空转推：段文本累积（工具调用即段边界），错误原样透传
+		defer sr.Close()
+		defer sw.Close()
+		var seg strings.Builder
+		flush := func() {
+			if seg.Len() > 0 {
+				sig.setPartial(seg.String())
+				seg.Reset()
+			}
+		}
+		for {
+			chunk, rerr := sr.Recv()
+			if rerr != nil {
+				flush()
+				sw.Send(nil, rerr)
+				return
+			}
+			if chunk != nil {
+				if chunk.Content != "" {
+					seg.WriteString(chunk.Content)
+				}
+				if len(chunk.ToolCalls) > 0 {
+					flush()
+				}
+			}
+			if sw.Send(chunk, nil) { // nil chunk 照样透传（忠实转发——消费方自判）
+				return // 读端已关闭：收线
+			}
+		}
+	}()
+	return out, nil
 }
 
 // concludeModel 收束感知模型包装（装配级套在 subCM 外，状态全在 ctx 信号——

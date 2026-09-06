@@ -265,12 +265,12 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 	subCM = llm.NewVisionModel(subCM, spec, m.Opt.ImageResolve)
 	subCM = llm.NewHistoryShapeModel(subCM, p.Kind)
 
-	// T8 结构化回传装配：根形校验 + 收束模型包装 + 提示词追加（submit 工具
-	// 在 buildSub 注面——ctx 信号机制见 spawnsubmit.go）
+	// T8 结构化回传装配：收束模型包装 + 提示词追加（submit 工具在 buildSub
+	// 注面——ctx 信号机制见 spawnsubmit.go）。Schema 根形校验在 NewManager
+	// 构造期（fail-fast 与 SessionToolsOff 同位）。captureModel 常挂：同步
+	// 档失败信封的 partial 数据源（无信号时零开销直通）。
+	subCM = &captureModel{BaseModel: subCM}
 	if cfg.Output != nil {
-		if cfg.Output.Schema == nil || cfg.Output.Schema.Type != "object" {
-			return nil, &configError{"SpawnOutput.Schema 根形必须为 object（结构化结论契约拒收）"}
-		}
 		subCM = &concludeModel{BaseModel: subCM}
 	}
 	instruction := subInstruction
@@ -382,13 +382,17 @@ func (f *spawnFailFeed) InvokableRun(ctx context.Context, args string, opts ...t
 	if errors.As(err, &sig) {
 		return "", err // 中断原样穿透（审批/提问续流链路）
 	}
-	// 终态细分随信封（stop_reason）；partial 暂缺——同步路径经 agent_tool
-	// 内部执行，子流不经过引擎面无从累积半成品（bg 档经泵 lastText 可供，
-	// 见 spawnbg.go finishSpawnBG——升级位：同步路径接内部事件转发累积）。
-	b, _ := json.Marshal(map[string]any{
+	// 终态细分随信封（stop_reason）；partial = captureModel 捕获的末段
+	// assistant 文本（设计 §2.3-①——同步档与 bg 档 finishSpawnBG 同语义，
+	// 父模型拿到半成品可判补做/放弃）。
+	env := map[string]any{
 		"ok": false, "error": "子代理执行失败：" + err.Error(),
 		"stop_reason": spawnStopReason(err),
-	})
+	}
+	if s := concludeSignalOf(ctx); s != nil && s.partialOf() != "" {
+		env["partial"] = "终止前最后一段输出：\n" + s.partialOf()
+	}
+	b, _ := json.Marshal(env)
 	return string(b), nil
 }
 

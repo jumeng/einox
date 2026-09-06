@@ -238,8 +238,7 @@ func (g *ChannelGateway) sessionOf(msg InboundMsg) (*session.Session, error) {
 }
 
 // Handle 入站消息分流：空闲（ended/error）起轮；运行中/挂起排队（Steer
-// ——轮内注入或决议续流后前置带回，不打断执行体）。分流两步 BeginRun/
-// Steer 间存在收束竞态，各重试一次；仍失败如实报错。执行体与既有自续轮
+// ——轮内注入或决议续流后前置带回，不打断执行体）。执行体与既有自续轮
 // 同款（go Run + noopEmit——出站统一走订阅面，不依赖 fn 生命周期）。
 func (g *ChannelGateway) Handle(msg InboundMsg) error {
 	if _, ok := g.cfgOf(msg.Channel); !ok {
@@ -252,21 +251,32 @@ func (g *ChannelGateway) Handle(msg InboundMsg) error {
 	var actor *contract.Participant // T6 身份链：发送者在册登记（首见 joined）
 	if msg.SpeakerID != "" {
 		actor = &contract.Participant{ID: msg.SpeakerID, Name: msg.SpeakerName}
-		s.UpsertParticipant(*actor)
 	}
-	mode := firstNonEmpty(msg.Mode, contract.ModeManual)
+	_, err = g.m.Dispatch(s, actor, msg.Text, msg.Attachments, firstNonEmpty(msg.Mode, contract.ModeManual))
+	return err
+}
+
+// Dispatch 入站轮次分流（渠道 Handle 与 ui 控制面 run 共用编排——单点维护
+// 竞态语义）：首见名册登记 → 空闲起轮（actor 无条件设为当轮说话人，nil 清
+// 陈旧归属——匿名轮不得继承上轮身份）→ 运行中/挂起转排队（SteerBy 署名）。
+// 分流两步 BeginRun/Steer 间存在收束竞态，各重试一次；仍失败如实报错。
+// 返回 queued = 转排队（false = 已起轮）。执行体脱离调用方生命周期
+// （context.Background + noopEmit——出站统一走订阅面）。
+func (m *Manager) Dispatch(s *session.Session, actor *contract.Participant, text string, atts []session.Attachment, mode string) (bool, error) {
+	if actor != nil && actor.ID != "" {
+		s.UpsertParticipant(*actor) // 首见登记（joined 落流——回放重建名册）
+	}
 	for i := 0; i < 2; i++ {
 		if s.BeginRun(mode) {
-			s.SetTurnActor(actor) // 当轮说话人（跨审批中断保留；无条件设——
-			// nil 清陈旧归属，审查 P1：仅 actor!=nil 设会使匿名轮继承上轮身份）
-			go g.m.Run(context.Background(), s, msg.Text, msg.Attachments, noopEmit)
-			return nil
+			s.SetTurnActor(actor)
+			go m.Run(context.Background(), s, text, atts, noopEmit)
+			return false, nil
 		}
-		if s.SteerBy(actor, msg.Text, msg.Attachments, mode) {
-			return nil // 排队署名（运行中注入/下轮前置均带 Speaker）
+		if s.SteerBy(actor, text, atts, mode) {
+			return true, nil // 排队署名（运行中注入/下轮前置均带 Speaker）
 		}
 	}
-	return errors.New("engine: 渠道消息分流失败（会话状态竞态，可重发）")
+	return false, errors.New("engine: 消息分流失败（会话状态竞态，可重发）")
 }
 
 // ErrNoPendingDecision 无挂起决议可恢复（已续流/超时翻转/并发迟到——幂等
@@ -485,8 +495,8 @@ func (g *ChannelGateway) pump(b *channelBind, sink ChannelSink) {
 // snapshotBetween 事件快照的 (from, to) 开区间切片（间隙补投源）。
 func (b *channelBind) snapshotBetween(from, to int) []session.Event {
 	var out []session.Event
-	for _, ev := range b.s.SnapshotEvents() {
-		if ev.ID > from && ev.ID < to {
+	for _, ev := range b.s.EventsSince(from) {
+		if ev.ID < to {
 			out = append(out, ev)
 		}
 	}
@@ -496,12 +506,7 @@ func (b *channelBind) snapshotBetween(from, to int) []session.Event {
 // catchUp 静默追赶：快照中水位之后的全部事件（尾部被弃的收口路径），
 // 推进水位（调用方串行——pump 单 goroutine 持有）。
 func (b *channelBind) catchUp() []session.Event {
-	var out []session.Event
-	for _, ev := range b.s.SnapshotEvents() {
-		if ev.ID > b.lastID {
-			out = append(out, ev)
-		}
-	}
+	out := b.s.EventsSince(b.lastID)
 	if len(out) > 0 {
 		b.lastID = out[len(out)-1].ID
 	}

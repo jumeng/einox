@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/jumeng/einox/engine"
 	"github.com/jumeng/einox/session"
@@ -139,18 +140,46 @@ func (h *server) events(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	fl.Flush()
+	// 慢消费兜底（与 engine/channel.go 消费泵同律——订阅通道缓冲 64 满即弃）：
+	// ①到达事件与水位有间隙 → 快照补投（gapFill）；②250ms 节拍追赶——被弃的
+	// 是尾部事件时无「下一事件」触发间隙检测，由节拍收口（终态不缺失）。
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case ev := <-ch:
-			if ev.ID > last {
-				writeSSE(w, ev)
-				last = ev.ID
-				fl.Flush()
+			if ev.ID == 0 || ev.ID <= last {
+				continue
 			}
+			for _, miss := range gapFill(s.EventsSince(last), last, ev.ID) {
+				writeSSE(w, miss)
+				last = miss.ID
+			}
+			writeSSE(w, ev)
+			last = ev.ID
+			fl.Flush()
+		case <-tick.C:
+			for _, miss := range s.EventsSince(last) {
+				writeSSE(w, miss)
+				last = miss.ID
+			}
+			fl.Flush()
 		}
 	}
+}
+
+// gapFill 间隙补投决策（纯函数）：快照切片中 (last, evID) 开区间的事件——
+// 到达事件证明水位与它之间有被弃事件（订阅满即弃），按序补投在前。
+func gapFill(snap []session.Event, last, evID int) []session.Event {
+	var out []session.Event
+	for _, e := range snap {
+		if e.ID > last && e.ID < evID {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // sessionOf 单会话寻址 + 鉴权缝（owner 从注册表解析——不可经 URL 伪造）。
