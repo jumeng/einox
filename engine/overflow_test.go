@@ -59,7 +59,7 @@ func overflowErr() error {
 func TestOverflowRecoversWithTrimmedInput(t *testing.T) {
 	ok := &scriptedModel{}
 	om := &overflowModel{errs: []error{overflowErr()}, inner: ok}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return om, nil
 		}
@@ -72,11 +72,11 @@ func TestOverflowRecoversWithTrimmedInput(t *testing.T) {
 	m.Run(context.Background(), s, "继续", nil, func(e session.Event) { evs = append(evs, e) })
 	waitTitleFlight(t, s)
 
-	if n := len(ok.inputs); n != 1 {
+	if n := len(ok.inputsOf()); n != 1 {
 		t.Fatalf("重试后应恰一次成功调用，实得 %d", n)
 	}
 	var joined strings.Builder
-	for _, msg := range ok.inputs[0] {
+	for _, msg := range ok.inputsOf()[0] {
 		joined.WriteString(msgTextOf(msg))
 	}
 	all := joined.String()
@@ -113,7 +113,7 @@ func TestOverflowRecoversWithTrimmedInput(t *testing.T) {
 func TestOverflowNoShrinkReportsError(t *testing.T) {
 	ok := &scriptedModel{}
 	om := &overflowModel{errs: []error{overflowErr()}, inner: ok}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return om, nil
 		}
@@ -125,7 +125,7 @@ func TestOverflowNoShrinkReportsError(t *testing.T) {
 	m.Run(context.Background(), s, strings.Repeat("巨", 40000), nil, func(e session.Event) { evs = append(evs, e) })
 	waitTitleFlight(t, s)
 
-	if n := len(ok.inputs); n != 0 {
+	if n := len(ok.inputsOf()); n != 0 {
 		t.Fatalf("口径无从下降不应重试，实得 %d 次成功调用", n)
 	}
 	sawOverflowCard := false
@@ -152,7 +152,7 @@ func TestOverflowRetryRebuildFailsReportsRealError(t *testing.T) {
 	ok := &scriptedModel{}
 	om := &overflowModel{errs: []error{overflowErr()}, inner: ok}
 	n := 0
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			n++
 			if n >= 2 { // 二次 assemble（overflowRetry 的 runIter）失败——真实原因
@@ -180,7 +180,7 @@ func TestOverflowRetryRebuildFailsReportsRealError(t *testing.T) {
 	if !sawReal {
 		t.Fatalf("重装配失败应如实报真实原因（CONFIG 卡含构造错误），实得事件流：%v", evs)
 	}
-	if n := len(ok.inputs); n != 0 {
+	if n := len(ok.inputsOf()); n != 0 {
 		t.Fatalf("重装配失败不应有成功模型调用，实得 %d", n)
 	}
 }

@@ -1,6 +1,6 @@
 package engine
 
-// 记忆三通道回归（findings/2026-08-29-memory-three-channel-design.md）：
+// 记忆三通道回归（定案《2026-08-29-memory-three-channel-design》（工作区档案，不入库））：
 // 拉 recall——引擎级（检索命中/owner 隔离/排除自身/列表/装配开关）+ 单元级
 // （投影边界/digest 渲染/截断续读/缺页）；写 TurnEpilogue——自然收束触
 // 发、错误轮不触发、panic 兜底。推通道由 agentsmd_test.go 覆盖。
@@ -57,13 +57,13 @@ func recallTurn(t *testing.T, m *Manager, userMsg, args string) (string, *script
 	if s.StateOf() != session.StateEnded {
 		t.Fatalf("应正常收线：%s", s.StateOf())
 	}
-	return strings.Join(toolMsgOf(fm.inputs[len(fm.inputs)-1]), "\n"), fm
+	return strings.Join(toolMsgOf(lastInput(fm)), "\n"), fm
 }
 
 // TestRecallSearchHitIsolation 检索模式：消息投影命中、owner 隔离（李四
 // 不可见）、未命中会话不出现。
 func TestRecallSearchHitIsolation(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) { o.Recall = true })
+	m := newTestManager(t, func(o *Options) { o.Recall = true })
 	seedPersisted(t, m, "张三", "部署一个服务", "部署脚本复盘",
 		schema.UserMessage("帮我写部署脚本 deploy.sh"),
 		schema.AssistantMessage("已生成部署脚本", nil))
@@ -85,7 +85,7 @@ func TestRecallSearchHitIsolation(t *testing.T) {
 
 // TestRecallListModeExcludeSelf 列表模式（query 空）：返回历史会话、排除自身。
 func TestRecallListModeExcludeSelf(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) { o.Recall = true })
+	m := newTestManager(t, func(o *Options) { o.Recall = true })
 	seedPersisted(t, m, "张三", "旧任务A", "旧会话甲")
 	seedPersisted(t, m, "张三", "旧任务B", "旧会话乙")
 
@@ -101,7 +101,7 @@ func TestRecallListModeExcludeSelf(t *testing.T) {
 // TestRecallAssemblyToggle opt-in 开关：默认不装配——recall 调用走幻觉兜底
 // 信封（「不存在」，双重验证 #1 兜底）；开后在场由检索/列表用例引擎级证明。
 func TestRecallAssemblyToggle(t *testing.T) {
-	m := newSeamManager(t, nil) // 默认关
+	m := newTestManager(t, nil) // 默认关
 	seedPersisted(t, m, "张三", "旧任务A", "旧会话甲")
 	joined, _ := recallTurn(t, m, "问", `{"query":"旧会话"}`)
 	if !strings.Contains(joined, "不存在") {
@@ -145,7 +145,7 @@ func TestRecallMatchProjection(t *testing.T) {
 // TestRecallDeepReadTruncateOffset 深读：digest 逐轮结构与工具名、截断标记、
 // offset 续读、缺页报错、owner 隔离。
 func TestRecallDeepReadTruncateOffset(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) { o.Recall = true })
+	m := newTestManager(t, func(o *Options) { o.Recall = true })
 	s := m.Registry().Create("张三", "深读任务", "auto", contract.UserPrefs{Model: "p/m"})
 	s.SetTitle("深读标题")
 	// 多条 500 字消息（单条截 500）：总 digest 撑过 4000 字截断阈值
@@ -194,7 +194,7 @@ func head(s string, n int) string {
 
 // TestRecallLimitBounds limit 越界拒绝（>20 / 负数），边界值 20 放行。
 func TestRecallLimitBounds(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) { o.Recall = true })
+	m := newTestManager(t, func(o *Options) { o.Recall = true })
 	s := m.Registry().Create("张三", "当前", "auto", contract.UserPrefs{Model: "p/m"})
 	rt, err := newRecallTool(m.Registry(), s)
 	if err != nil {
@@ -213,7 +213,7 @@ func TestRecallLimitBounds(t *testing.T) {
 // TestRecallHitCountSortPriority 命中度优先于新近：先落盘（较老）的双字段
 // 命中会话排在后落盘（较新）的单字段命中会话之前。
 func TestRecallHitCountSortPriority(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) { o.Recall = true })
+	m := newTestManager(t, func(o *Options) { o.Recall = true })
 	seedPersisted(t, m, "张三", "部署KEY老任务", "老双KEY") // Task+Title 双命中（较老）
 	seedPersisted(t, m, "张三", "别的主题", "新单KEY")     // 仅 Title 单命中（较新）
 	joined, _ := recallTurn(t, m, "查", `{"query":"KEY"}`)
@@ -230,7 +230,7 @@ func TestRecallHitCountSortPriority(t *testing.T) {
 func TestTurnEpilogueFiresOnNaturalEnd(t *testing.T) {
 	var mu sync.Mutex
 	var got []TurnEndSummary
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.TurnEpilogue = func(sum TurnEndSummary) {
 			mu.Lock()
 			got = append(got, sum)
@@ -263,7 +263,7 @@ func TestTurnEpilogueNotOnErrorAndPanicSafe(t *testing.T) {
 	var fired int
 	var mu sync.Mutex
 	newM := func(hook func(TurnEndSummary), fm llm.ModelFactory) *Manager {
-		return newSeamManager(t, func(o *Options) {
+		return newTestManager(t, func(o *Options) {
 			o.TurnEpilogue = func(sum TurnEndSummary) {
 				mu.Lock()
 				fired++

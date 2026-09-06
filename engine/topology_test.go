@@ -169,11 +169,11 @@ func TestTopologySubFailFeed(t *testing.T) {
 		if s.StateOf() != session.StateEnded {
 			t.Fatalf("%s：子 agent 恒败不得杀父运行，终态 %s", kind, s.StateOf())
 		}
-		if len(fm.inputs) < 2 {
-			t.Fatalf("%s：主模型应至少两调（派发+收口），实得 %d", kind, len(fm.inputs))
+		if len(fm.inputsOf()) < 2 {
+			t.Fatalf("%s：主模型应至少两调（派发+收口），实得 %d", kind, len(fm.inputsOf()))
 		}
 		var joined strings.Builder
-		for _, msg := range fm.inputs[len(fm.inputs)-1] {
+		for _, msg := range lastInput(fm) {
 			joined.WriteString(msgTextOf(msg))
 		}
 		if !strings.Contains(joined.String(), "子代理执行失败") {

@@ -3,13 +3,14 @@ package engine
 // H2 spawn 子代理回归：端到端隔离（子输入=单条 user 零父历史、结论经 tool
 // 结果进父窗口、子过程零进父历史）/ 白名单硬筛 + 失败显式回传（子调白名单
 // 外工具 → 子运行报错 → errFeed JSON 回喂父、父运行不炸）。
-// 细化方案 = findings/2026-08-26-h2-spawn-plan.md。
+// 细化方案 = 定案《2026-08-26-h2-spawn-plan》（工作区档案，不入库）。
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,17 +59,17 @@ func TestSpawnEndToEndIsolation(t *testing.T) {
 	m.Run(context.Background(), s, "帮我勘察", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	if len(sub.inputs) != 1 {
-		t.Fatalf("子代理应恰一次模型调用（Generate 路径），实得 %d", len(sub.inputs))
+	if len(sub.inputsOf()) != 1 {
+		t.Fatalf("子代理应恰一次模型调用（Generate 路径），实得 %d", len(sub.inputsOf()))
 	}
 	// 子输入 = 独立上下文（adk 给子模型前插 system 指令——末条才是任务载荷
 	// user；零父历史）
-	si := sub.inputs[0]
+	si := sub.inputsOf()[0]
 	if len(si) > 2 || si[len(si)-1].Role != schema.User || !strings.Contains(si[len(si)-1].Content, "勘察仓库并统计文件") {
 		t.Fatalf("子输入应为 [system?] + 单条 user 载荷（独立上下文），实得 %d 条", len(si))
 	}
 	// 父第 2 调可见 spawn tool 结果（结论内联父窗口）
-	over := toolMsgOf(fm.inputs[len(fm.inputs)-1])
+	over := toolMsgOf(lastInput(fm))
 	found := false
 	for _, c := range over {
 		if strings.Contains(c, "子代理结论") {
@@ -125,7 +126,7 @@ func TestSpawnWhitelistMissSelfCorrects(t *testing.T) {
 	if s.StateOf() != session.StateEnded {
 		t.Fatalf("白名单失配不得杀父运行，终态 %s", s.StateOf())
 	}
-	over := toolMsgOf(fm.inputs[len(fm.inputs)-1]) // 父收口前最后一调（genTitle 走 Generate 不入 inputs）
+	over := toolMsgOf(lastInput(fm)) // 父收口前最后一调（genTitle 走 Generate 不入 inputs）
 	selfCorrected, leaked := false, false
 	for _, c := range over {
 		if strings.Contains(c, "子完成") {
@@ -179,7 +180,7 @@ func TestSpawnSubErrorFailFeed(t *testing.T) {
 	if s.StateOf() != session.StateEnded {
 		t.Fatalf("子失败不得杀父运行，终态 %s", s.StateOf())
 	}
-	over := toolMsgOf(fm.inputs[len(fm.inputs)-1])
+	over := toolMsgOf(lastInput(fm))
 	found := false
 	for _, c := range over {
 		if strings.Contains(c, "子代理执行失败") {
@@ -303,12 +304,21 @@ func TestSpawnEmitEventsForwarded(t *testing.T) {
 // recGenModel 记录输入、恒回固定文本的子/摘要模型（Generate 路径专用——
 // scriptedModel.Generate 不记录，避免 genTitle 调用混入计数）。
 type recGenModel struct {
+	mu     sync.Mutex
 	reply  string
 	inputs [][]*schema.Message
 }
 
+func (r *recGenModel) inputsOf() [][]*schema.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]*schema.Message(nil), r.inputs...)
+}
+
 func (r *recGenModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	r.mu.Lock()
 	r.inputs = append(r.inputs, append([]*schema.Message(nil), input...))
+	r.mu.Unlock()
 	return schema.AssistantMessage(r.reply, nil), nil
 }
 
@@ -327,12 +337,17 @@ func (r *recGenModel) Stream(ctx context.Context, in []*schema.Message, o ...mod
 // scriptedModel——工厂按模型键分叉：spawn 子模型键与父相同，需按调用序分派）。
 // inputs 记录各次入参（幻觉兜底信封断言面）。
 type toolCallOnceModel struct {
+	mu     sync.Mutex
 	call   string
 	done   bool
 	inputs [][]*schema.Message
 }
 
-func (t *toolCallOnceModel) inputsOf() [][]*schema.Message { return t.inputs }
+func (t *toolCallOnceModel) inputsOf() [][]*schema.Message {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([][]*schema.Message(nil), t.inputs...)
+}
 
 func (t *toolCallOnceModel) factory(parent *scriptedModel) llm.ModelFactory {
 	n := 0
@@ -346,11 +361,16 @@ func (t *toolCallOnceModel) factory(parent *scriptedModel) llm.ModelFactory {
 }
 
 func (t *toolCallOnceModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	t.mu.Lock()
 	t.inputs = append(t.inputs, append([]*schema.Message(nil), input...))
-	if t.done {
+	first := len(t.inputs) == 1 && !t.done
+	if !t.done {
+		t.done = true
+	}
+	t.mu.Unlock()
+	if !first {
 		return schema.AssistantMessage("子完成", nil), nil
 	}
-	t.done = true
 	return schema.AssistantMessage("", []schema.ToolCall{tcOf("sc1", t.call, `{}`)}), nil
 }
 
@@ -365,7 +385,7 @@ func (t *toolCallOnceModel) Stream(ctx context.Context, in []*schema.Message, o 
 	return sr, nil
 }
 
-// --- H4-1 并行 spawn 三测（方案 = findings/2026-08-26-h4-parallel-aggregation-plan.md）---
+// --- H4-1 并行 spawn 三测（方案 = 定案《2026-08-26-h4-parallel-aggregation-plan》（工作区档案，不入库））---
 
 // probeModel 并发探针子模型：Generate 在途计数 + 驻留窗口，maxCur 记录
 // 同时在途峰值（并发重叠断言数据面）；replies 按调用序轮转取文（两次
@@ -453,7 +473,7 @@ func TestSpawnConcurrentOverlap(t *testing.T) {
 	if p.maxCur.Load() != 2 {
 		t.Fatalf("双 spawn 应并发执行（同时在途峰值 2），实得 %d", p.maxCur.Load())
 	}
-	over := toolMsgOf(fm.inputs[len(fm.inputs)-1])
+	over := toolMsgOf(lastInput(fm))
 	for _, want := range []string{"甲区", "乙区"} {
 		found := false
 		for _, c := range over {
@@ -480,7 +500,7 @@ func TestSpawnSemaphoreSerializes(t *testing.T) {
 	if p.maxCur.Load() != 1 {
 		t.Fatalf("MaxConcurrent=1 应串行执行（在途峰值 1），实得 %d", p.maxCur.Load())
 	}
-	over := toolMsgOf(fm.inputs[len(fm.inputs)-1])
+	over := toolMsgOf(lastInput(fm))
 	nHit := 0
 	for _, c := range over {
 		if strings.Contains(c, "子结论") {
@@ -580,7 +600,7 @@ func TestSpawnPartialFailure(t *testing.T) {
 	if s.StateOf() != session.StateEnded {
 		t.Fatalf("一败一成不得杀父运行，终态 %s", s.StateOf())
 	}
-	over := toolMsgOf(fm.inputs[len(fm.inputs)-1])
+	over := toolMsgOf(lastInput(fm))
 	hasOK, hasFail := false, false
 	for _, c := range over {
 		if strings.Contains(c, "子结论：勘察成功") {
@@ -700,18 +720,18 @@ func TestSpawnStructuredSubmitSuccess(t *testing.T) {
 	m.Run(context.Background(), s, "帮我查", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	if got := len(subStream.inputs); got != 1 {
+	if got := len(subStream.inputsOf()); got != 1 {
 		t.Fatalf("子模型应恰一次调用（提交即收束零空跑），实得 %d", got)
 	}
 	// 父第二轮输入：spawn 工具结果 = canonical JSON 信封
 	found := false
-	for _, msg := range fm.inputs[1] {
+	for _, msg := range fm.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, `"answer":"42"`) && strings.Contains(msg.Content, `"ok":true`) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("父应收到 canonical 结论信封，实得 %+v", fm.inputs[1])
+		t.Fatalf("父应收到 canonical 结论信封，实得 %+v", fm.inputsOf()[1])
 	}
 }
 
@@ -756,12 +776,12 @@ func TestSpawnStructuredSelfCorrect(t *testing.T) {
 	m.Run(context.Background(), s, "帮我查", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	if got := len(subStream.inputs); got != 2 {
+	if got := len(subStream.inputsOf()); got != 2 {
 		t.Fatalf("子模型应恰两次调用（失败回喂一次+合法提交收束），实得 %d", got)
 	}
 	// 首提的失败信封须达子模型（第二轮输入含修正提示）
 	corrected := false
-	for _, msg := range subStream.inputs[1] {
+	for _, msg := range subStream.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, "不符合 schema") && strings.Contains(msg.Content, "answer") {
 			corrected = true
 		}
@@ -770,7 +790,7 @@ func TestSpawnStructuredSelfCorrect(t *testing.T) {
 		t.Fatal("校验失败信封应回喂子模型自纠（含必填字段名）")
 	}
 	found := false
-	for _, msg := range fm.inputs[1] {
+	for _, msg := range fm.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, `"answer":"7"`) {
 			found = true
 		}
@@ -810,7 +830,7 @@ func TestSpawnStructuredNoSubmit(t *testing.T) {
 	waitTitleFlight(t, s)
 
 	found := false
-	for _, msg := range fm.inputs[1] {
+	for _, msg := range fm.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, "未提交结构化结论") && strings.Contains(msg.Content, `"stop_reason":"error"`) {
 			found = true
 			// §2.3-③：自然结束未提交 → error + Partial（末段文本即 agent_tool
@@ -821,7 +841,7 @@ func TestSpawnStructuredNoSubmit(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("未提交应回 error 终态信封，实得 %+v", fm.inputs[1])
+		t.Fatalf("未提交应回 error 终态信封，实得 %+v", fm.inputsOf()[1])
 	}
 }
 
@@ -914,13 +934,13 @@ func TestSpawnStructuredSubmitWinsAtBudgetEdge(t *testing.T) {
 	waitTitleFlight(t, s)
 
 	found := false
-	for _, msg := range fm.inputs[1] {
+	for _, msg := range fm.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, `"answer":"42"`) && strings.Contains(msg.Content, `"ok":true`) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("预算边缘合法提交应以提交值收尾（不因循环报错丢弃 canonical），实得 %+v", fm.inputs[1])
+		t.Fatalf("预算边缘合法提交应以提交值收尾（不因循环报错丢弃 canonical），实得 %+v", fm.inputsOf()[1])
 	}
 }
 
@@ -957,7 +977,7 @@ func TestSpawnStructuredExhaustionIsError(t *testing.T) {
 	waitTitleFlight(t, s)
 
 	found := false
-	for _, msg := range fm.inputs[1] {
+	for _, msg := range fm.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, "自纠耗尽") {
 			found = true
 			if strings.Contains(msg.Content, `"stop_reason":"max_tokens"`) {
@@ -969,13 +989,14 @@ func TestSpawnStructuredExhaustionIsError(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("自纠耗尽应显式归因（含文案与 stop_reason=error），实得 %+v", fm.inputs[1])
+		t.Fatalf("自纠耗尽应显式归因（含文案与 stop_reason=error），实得 %+v", fm.inputsOf()[1])
 	}
 }
 
 // errSecondModel 首调文本+工具调用、次调错误收流（同步 spawn partial 捕获面的
 // 夹具——captureModel 从真实模型输出累积末段文本）。
 type errSecondModel struct {
+	mu     sync.Mutex
 	inputs [][]*schema.Message
 }
 
@@ -984,11 +1005,14 @@ func (e *errSecondModel) Generate(_ context.Context, _ []*schema.Message, _ ...m
 }
 
 func (e *errSecondModel) Stream(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	e.mu.Lock()
 	e.inputs = append(e.inputs, append([]*schema.Message(nil), input...))
+	first := len(e.inputs) == 1
+	e.mu.Unlock()
 	sr, sw := schema.Pipe[*schema.Message](2)
 	go func() {
 		defer sw.Close()
-		if len(e.inputs) == 1 {
+		if first {
 			sw.Send(&schema.Message{Role: schema.Assistant, Content: "半成品：勘察到一半",
 				ToolCalls: []schema.ToolCall{tcOf("s1", "read_tool", `{}`)}}, nil)
 			return
@@ -1030,7 +1054,7 @@ func TestSpawnSyncFailurePartial(t *testing.T) {
 	waitTitleFlight(t, s)
 
 	found := false
-	for _, msg := range fm.inputs[1] {
+	for _, msg := range fm.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, "子代理执行失败") {
 			found = true
 			if !strings.Contains(msg.Content, "半成品：勘察到一半") {
@@ -1042,6 +1066,6 @@ func TestSpawnSyncFailurePartial(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("父应收到失败信封，实得 %+v", fm.inputs[1])
+		t.Fatalf("父应收到失败信封，实得 %+v", fm.inputsOf()[1])
 	}
 }

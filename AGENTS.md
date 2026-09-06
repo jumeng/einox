@@ -14,7 +14,7 @@ einox 是通用 agent 基座库——三层栈 eino（LLM 框架）→ einox（a
 应用 ─→ contract 及各机制包公开面 ─→ engine / llm / tools …（基座内部）─→ eino / eino-ext
 ```
 
-- `contract/` 是对应用的唯一契约面，零 eino 类型；eino 只在基座内部被消费（engine / llm / einoext）
+- `contract/` 是对应用的类型契约面，零 eino 类型；完整装配面 = contract 类型 + 各机制包公开 API（`engine.Options` 组装根、`session.Registry/Store`、`llm.ProviderSpec/ModelFactory`）。eino 组件拓扑的消费限于 engine / llm / einoext；`eino/schema` 类型系统在更广的基座内部（session / hitl / tools / skills）使用——红线是 contract 零 eino（boundary_test 机器守卫）
 - 一次运行的通路：`Manager.Run` 驱动 adk ReAct 循环（eino 模型组件调 LLM）→ 引擎把流翻译为 `contract.Event` → `Session.Record` 落会话记录 + emit 回调实时扇出；自然收束可经 `FinalGate` 门循环回灌重跑（可选——判据归应用，见 docs/03）；挂起交互（`Suspend`）转引擎 Interrupt，经 `Resume` 续流
 - 工具装配链（组装期逐层包装，由内向外）：业务工具 → mid validate / errFeed / guard → hitl 审批包装 → `ToolWrap`（应用包装缝，nil 不挂——只能收紧不能放宽）→ `Hooks`（订阅式钩子，nil 不挂——Pre 可否决/Post 观察）→ einoext 桥（eino ParamsOneOf；幻觉工具名兜底信封回喂 + panic 单点收敛）；会话域件可经 `SessionToolsOff` 按族裁剪（todo/ask/plan/fs/cmd/patch，未知名构造期即拒）
 - 会话态归 `session`（Registry / Session / 快照 / 排队消息 / Fork·ForkAt 分叉 / Side 辅助对话——side 继承父历史快照、工作区共享父域）；检查点经 `engine.CheckPointStore`；工具面路径圈进会话工作区
@@ -25,7 +25,7 @@ einox 是通用 agent 基座库——三层栈 eino（LLM 框架）→ einox（a
 
 - 构建：`go build ./...`
 - 交叉编译（改动平台分支文件 `_linux/_windows/_darwin` 或构建标签时必跑；CI 有同款矩阵门）：`GOOS=windows go build ./... && GOOS=linux go build ./...`——注意编译门只证可构建，平台分支的语义同步靠评审核对共享逻辑的各平台变体
-- 测试：`go test ./...`（提交前应全绿；沙箱相关包按平台构建标签分流，非目标平台自动跳过）
+- 测试：`go test ./...`（提交前应全绿；沙箱相关包按平台构建标签分流，非目标平台自动跳过）；CI 对 engine/session/channels/ui 跑 `-race`——并发改动本地也应过 `go test -race ./engine/ ./session/`
 - 引擎与工具循环的测试使用 `llmtest` 假模型，不依赖真实模型端点
 
 ## 架构约定

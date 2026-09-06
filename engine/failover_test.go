@@ -46,7 +46,7 @@ func (b *brokenModel) count() int { b.mu.Lock(); defer b.mu.Unlock(); return b.c
 // newFailoverManager 双模型装配（p/m 主 + p/f 备）+ FallbackModels 降级链。
 func newFailoverManager(t *testing.T, main, fb model.BaseModel[*schema.Message]) *Manager {
 	t.Helper()
-	return newSeamManager(t, func(o *Options) {
+	return newTestManager(t, func(o *Options) {
 		o.Providers = func() []llm.ProviderSpec {
 			return []llm.ProviderSpec{{
 				ID: "p", Kind: "openai", Enabled: true,
@@ -136,7 +136,7 @@ func TestFailoverFatalNoSwitch(t *testing.T) {
 // fbCount scriptedModel 调用数（inputs 长度——其自身无锁，测试内串行断言）。
 func fbCount(m model.BaseModel[*schema.Message]) int {
 	if sm, ok := m.(*scriptedModel); ok {
-		return len(sm.inputs)
+		return len(sm.inputsOf())
 	}
 	return 0
 }

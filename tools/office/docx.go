@@ -233,7 +233,7 @@ func (h *helper) readDocx(_ context.Context, in readDocxIn) (map[string]any, err
 	if f == nil {
 		return fail("非 docx 结构（缺 word/document.xml）")
 	}
-	rc, err := f.Open()
+	rc, err := openCapped(f)
 	if err != nil {
 		return fail("读取失败：" + err.Error())
 	}

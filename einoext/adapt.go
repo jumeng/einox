@@ -12,7 +12,6 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
-	"github.com/eino-contrib/jsonschema"
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/tools"
@@ -42,15 +41,7 @@ var _ tool.InvokableTool = (*adaptTool)(nil)
 
 func (a *adaptTool) Info(context.Context) (*schema.ToolInfo, error) {
 	ci := a.t.Info()
-	ti := &schema.ToolInfo{Name: ci.Name, Desc: ci.Desc}
-	if ci.Params != nil {
-		if b, err := json.Marshal(ci.Params); err == nil {
-			var js jsonschema.Schema
-			if json.Unmarshal(b, &js) == nil {
-				ti.ParamsOneOf = schema.NewParamsOneOfByJSONSchema(&js)
-			}
-		}
-	}
+	ti := &schema.ToolInfo{Name: ci.Name, Desc: ci.Desc, ParamsOneOf: tools.ParamsOf(ci.Params)}
 	return ti, nil
 }
 
@@ -109,15 +100,7 @@ func (b *bridgedTool) Info() *contract.ToolInfo {
 	if err != nil || info == nil {
 		return &contract.ToolInfo{}
 	}
-	ci := &contract.ToolInfo{Name: info.Name, Desc: info.Desc}
-	if js, err := info.ParamsOneOf.ToJSONSchema(); err == nil && js != nil {
-		if raw, err := json.Marshal(js); err == nil {
-			var sc contract.Schema
-			if json.Unmarshal(raw, &sc) == nil {
-				ci.Params = &sc
-			}
-		}
-	}
+	ci := &contract.ToolInfo{Name: info.Name, Desc: info.Desc, Params: tools.SchemaOf(info.ParamsOneOf)}
 	return ci
 }
 
@@ -126,7 +109,7 @@ func (b *bridgedTool) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 	if err != nil {
 		// 上游组件的参数反序列化错误常裹多层 Go 噪声（结构体名/包装链），
 		// 统一经 ModelArgError 翻译为模型可行动文案（errors.As 穿透 %w）
-		return nil, tools.ModelArgError(err)
+		return nil, contract.ModelArgError(err)
 	}
 	return json.RawMessage(out), nil
 }

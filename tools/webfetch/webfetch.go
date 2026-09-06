@@ -132,9 +132,7 @@ func run(ctx context.Context, cfg Config, in fetchIn) (map[string]any, error) {
 	return out, nil
 }
 
-func fail(msg string) (map[string]any, error) {
-	return map[string]any{"ok": false, "error": msg}, nil // 回喂模型自纠
-}
+func fail(msg string) (map[string]any, error) { return tools.Fail(msg), nil } // 信封单点（tools.Fail——审查 P2-11）
 
 // extractMarkdown HTML → 正文 markdown：去脚本样式与页面框架件（nav/footer/
 // aside/header），优先 main/article 容器；块级元素映射 markdown，行内保留

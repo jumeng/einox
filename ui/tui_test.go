@@ -1,14 +1,17 @@
 package ui
 
 // TUI 交互模型回归（M3）：过滤/光标有界与视窗跟随、live 追加去重跟尾、
-// Kind 摘要（T6 身份字段）与域分类、未知 Kind 软降级。渲染与终端 IO 不测
-//（人工验收面——SSH 步进）。
+// Kind 摘要（T6 身份字段）与域分类、未知 Kind 软降级、渲染级回归（安全审查
+// 2026-09-06：检查器切片越界曾在「渲染不测」的盲区下带病发布——out 改注入
+// 面后渲染可测）。
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/tstore"
 	"github.com/jumeng/einox/session"
 )
 
@@ -126,5 +129,91 @@ func TestTuiSummaryTypedPayload(t *testing.T) {
 	if got := tuiSummary(session.Event{ID: 3, Event: "tool_call",
 		Data: contract.ToolCall{Tool: "write_tool"}}); got != "调用 write_tool" {
 		t.Fatalf("typed 直喂摘要应工作：%q", got)
+	}
+}
+
+// TestTuiEventVocabularyReconciliation 事件词表对账（审查 P1-3）：TUI 与
+// web 回放页（ui/static/index.html 的 DOMAINS/SUMMARIES）两份手写实现维护
+// 同一份词表，曾各自漂移——本测试锁 Go 侧口径，contract 新增事件后 TUI 漏配
+// 即失败。Go 反射无法枚举包级常量，清单手工维护：与 contract/event.go 的
+// Ev* 常量全集同步（新增常量须同步补本清单、tuiDomainOf/tuiSummary 及
+// index.html 两侧词表）；计数守卫逼清单随常量增删同步。
+func TestTuiEventVocabularyReconciliation(t *testing.T) {
+	doms := map[string]tuiDomain{ // 域分类口径 = index.html DOMAINS 同款
+		contract.EvTextDelta: domGen, contract.EvThinkingDelta: domGen, contract.EvUsage: domGen,
+		contract.EvToolCall: domTool, contract.EvToolResult: domTool,
+		contract.EvApprovalRequest: domHitl, contract.EvApprovalDecision: domHitl, contract.EvApprovalTimeout: domHitl,
+		contract.EvAskRequest: domHitl, contract.EvAskDecision: domHitl, contract.EvAskTimeout: domHitl, contract.EvAskIgnored: domHitl,
+		contract.EvPlanRequest: domHitl, contract.EvPlanDecision: domHitl, contract.EvPlanTimeout: domHitl,
+		contract.EvSteerQueued: domSteer, contract.EvSteerUpdated: domSteer, contract.EvSteerRemoved: domSteer,
+		contract.EvSteerInjected: domSteer, contract.EvSteerReordered: domSteer,
+		contract.EvNotifyQueued: domSteer, contract.EvNotifyInjected: domSteer,
+		contract.EvUserMessage: domSteer, contract.EvParticipantUpdate: domSteer,
+		contract.EvTodoUpdate: domProc, contract.EvHarnessNote: domProc, contract.EvSubAgent: domProc,
+		contract.EvModelChange: domProc, contract.EvTransportRetry: domProc,
+		contract.EvSessionEnd: domEnd, contract.EvError: domEnd, contract.EvInterrupted: domEnd,
+	}
+	if len(doms) != 32 { // contract/event.go 现有 Ev* 常量恰 32 个；增删即失败逼同步
+		t.Fatalf("词表清单应 32 项（与 contract/event.go 的 Ev* 常量数一致），实得 %d", len(doms))
+	}
+	for kind, dom := range doms {
+		if got := tuiDomainOf(kind); got != dom {
+			t.Errorf("词表事件 %s 域分类应 %v 实 %v", kind, dom, got)
+		}
+		if s := tuiSummary(mkev(1, kind, nil)); s == "（未知事件——软降级通用行）" {
+			t.Errorf("词表事件 %s 摘要落软降级通用行（tuiSummary 需补）", kind)
+		}
+	}
+	// 真正未知的软降级路径仍可达（非词表名——封闭词表外的兜底行为不变）
+	if tuiDomainOf("future_kind") != domUnknown {
+		t.Fatal("非词表名域应为 unknown")
+	}
+}
+
+// TestTuiRenderInspectorSmallPayload 渲染级回归（安全审查 2026-09-06 P1）：
+// 24 行终端开检查器、载荷行数少于可用高度——修复前 strings.Split(...)[:9]
+// 越界 panic（[:cap>len]）。
+func TestTuiRenderInspectorSmallPayload(t *testing.T) {
+	reg := session.NewRegistry(tstore.New(t.TempDir()))
+	s := reg.Create("张三", "任务", "auto", contract.UserPrefs{})
+	s.Record(contract.EvTextDelta, contract.Delta{Delta: "hi"}) // 载荷 3 行 < 可用 9 行
+	var buf strings.Builder
+	app := &tuiApp{s: s, width: 80, height: 24,
+		out: func(str string) { buf.WriteString(str) }}
+	app.model.events = s.SnapshotEvents()
+	app.model.inspOpen = true
+	app.render() // 修复前此处 panic：slice bounds out of range
+	if !strings.Contains(buf.String(), "#1") {
+		t.Fatal("检查器应渲染选中事件头")
+	}
+	// 小终端（8 行）同样安全
+	small := &tuiApp{s: s, width: 40, height: 8, out: func(string) {}}
+	small.model.events = s.SnapshotEvents()
+	small.model.inspOpen = true
+	small.render()
+}
+
+// TestTuiFilterUTF8AcrossReads 过滤输入跨读 UTF-8（安全审查 2026-09-06）：
+// 键盘泵每次读 ≤8 字节，CJK rune 被切在边界时逐字节拼接产替换符——现按
+// rune 消费（不完整前缀留待下一批）；退格按 rune 截尾。
+func TestTuiFilterUTF8AcrossReads(t *testing.T) {
+	app := &tuiApp{width: 80, height: 24, out: func(string) {}}
+	app.model.filterIn = true
+	app.key([]byte{0xe4}) // 「中」首字节（不完整前缀）
+	app.key([]byte{0xb8}) // 次字节
+	if app.model.filter != "" {
+		t.Fatalf("不完整前缀不应进过滤器：%q", app.model.filter)
+	}
+	app.key([]byte{0xad}) // 尾字节 → 「中」
+	if app.model.filter != "中" {
+		t.Fatalf("跨读拼出完整 rune 应进过滤器：%q", app.model.filter)
+	}
+	app.key([]byte{0xe4, 0xb8, 0xad, 0xff}) // 完整 rune + 坏字节
+	if app.model.filter != "中中" {
+		t.Fatalf("坏字节应丢弃、完整 rune 照收：%q", app.model.filter)
+	}
+	app.key([]byte{0x7f}) // 退格按 rune 截
+	if app.model.filter != "中" {
+		t.Fatalf("退格应按 rune 截尾：%q", app.model.filter)
 	}
 }

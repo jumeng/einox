@@ -56,6 +56,40 @@ func zipFile(r *zip.Reader, name string) *zip.File {
 	return nil
 }
 
+// maxZipEntryBytes 单个 zip 条目解压读取上限（zip 炸弹防御——小压缩包可藏
+// GB 级 XML，安全审查 2026-09-06：解压器无上限即内存放大面；超限报错不静默
+// 截断——截断的 XML 会以「成功但缺内容」形态误导模型）。
+const maxZipEntryBytes = 64 << 20
+
+// openCapped 打开 zip 条目并施加解压字节上限（读超限返回错误）。
+func openCapped(f *zip.File) (io.ReadCloser, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	return &cappedRC{rc: rc, left: maxZipEntryBytes}, nil
+}
+
+// cappedRC 解压字节限流读取（超限 Read 返回错误——xml 解码器向上传播）。
+type cappedRC struct {
+	rc   io.ReadCloser
+	left int64
+}
+
+func (c *cappedRC) Read(p []byte) (int, error) {
+	if c.left <= 0 {
+		return 0, fmt.Errorf("zip 条目解压超上限 %d 字节（疑似压缩炸弹，读取已中止）", maxZipEntryBytes)
+	}
+	if int64(len(p)) > c.left {
+		p = p[:c.left]
+	}
+	n, err := c.rc.Read(p)
+	c.left -= int64(n)
+	return n, err
+}
+
+func (c *cappedRC) Close() error { return c.rc.Close() }
+
 // xmlNode 通用节点树（丢命名空间只留局部名；data = 元素内直接字符数据）。
 type xmlNode struct {
 	local    string

@@ -76,6 +76,11 @@ func TestIsSafeReadCommand(t *testing.T) {
 		`{"command":"git status"}`,
 		`{"command":"git diff HEAD~1"}`,
 		`{"command":"go version"}`,
+		`{"command":"find . -type f -name '*.go'"}`,
+		`{"command":"git branch"}`,
+		`{"command":"git branch -a"}`,
+		`{"command":"git tag"}`,
+		`{"command":"git remote -v"}`,
 	}
 	for _, a := range safe {
 		if !IsSafeReadCommand(a) {
@@ -93,6 +98,17 @@ func TestIsSafeReadCommand(t *testing.T) {
 		`{"command":"sudo ls"}`,
 		`{}`,
 		`bad json`,
+		// 写型形态显式不豁免（安全审查 2026-09-06：白名单曾按子命令名/程序名放行）
+		`{"command":"find . -name '*.log' -delete"}`,
+		`{"command":"find . -fprint=/tmp/x"}`,
+		`{"command":"find . -exec rm {} +"}`,
+		`{"command":"tree -o out.txt"}`,
+		`{"command":"git branch -D main"}`,
+		`{"command":"git branch newbranch"}`, // 位置参数 = 建分支
+		`{"command":"git tag v1.0"}`,         // 位置参数 = 打 tag
+		`{"command":"git tag -d v1.0"}`,
+		`{"command":"git remote add origin https://x"}`,
+		`{"command":"git remote rename a b"}`,
 	}
 	for _, a := range unsafe {
 		if IsSafeReadCommand(a) {
@@ -154,7 +170,7 @@ func TestBackgroundTasks(t *testing.T) {
 }
 
 // TestDockerEnvRetired EINO_RUN_DOCKER env 魔法开关退役（批次 C，设计真源
-// findings/2026-08-29-assembly-seams-design.md §4）：旧开关不再有任何效果
+// 定案《2026-08-29-assembly-seams-design》（工作区档案，不入库） §4）：旧开关不再有任何效果
 // ——容器形态正规化为 sandbox.DockerProvider 经 Config.SandboxProvider 注入
 // （argv 映射测试归 sandbox/docker_test.go）。
 func TestDockerEnvRetired(t *testing.T) {

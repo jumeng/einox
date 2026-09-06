@@ -36,13 +36,15 @@ type Config struct {
 }
 
 // Serve 便捷档：构造 + 阻塞监听（独立端口跑回放面；优雅停机归应用——
-// http.Server 自行包装可加）。
+// http.Server 自行包装可加）。ReadHeaderTimeout 防慢连接资源占用（裸
+// ListenAndServe 的零值 Server 无超时——安全审查 2026-09-06）。
 func Serve(m *engine.Manager, cfg Config, addr string) error {
 	h, err := New(m, cfg)
 	if err != nil {
 		return err
 	}
-	return http.ListenAndServe(addr, h)
+	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 15 * time.Second}
+	return srv.ListenAndServe()
 }
 
 // New 构造服务（读面 + M2 控制面同包装配——control.go）。端点：GET /api/sessions?owner=（列表，空 = 全量）；
@@ -73,18 +75,29 @@ type server struct {
 }
 
 func (h *server) list(w http.ResponseWriter, r *http.Request) {
-	owner := r.URL.Query().Get("owner")
+	// owner 过滤走「在册身份查表」而非路径派生（安全审查 2026-09-06：
+	// ?owner= 此前直达存储层 users/<op>/ 路径构造——查询参数现在只用于与
+	// 服务端枚举的在册用户精确比较，进 List 的值恒来自 ListUsers 枚举，
+	// 请求原文不再触达任何路径构造；session.ValidOwner 与存储层围栏保留
+	// 为纵深）。无匹配（未知/非法形态/暂未落盘）= 空清单。
+	q := r.URL.Query().Get("owner")
 	if h.cfg.Authorize != nil {
-		if err := h.cfg.Authorize(r, owner, ""); err != nil {
+		if err := h.cfg.Authorize(r, q, ""); err != nil {
 			http.Error(w, "无权访问："+err.Error(), http.StatusForbidden)
 			return
 		}
 	}
 	var items []session.SessionListItem
-	if owner != "" {
-		items = h.m.Registry().List(owner)
-	} else {
+	if q == "" {
 		items = h.m.Registry().ListAll() // admin 视图（缝内裁剪）
+	} else {
+		items = []session.SessionListItem{} // 无匹配保持 [] wire 形态（与 List 空态一致）
+		for _, u := range h.m.Registry().Store().ListUsers() {
+			if u == q {
+				items = h.m.Registry().List(u)
+				break
+			}
+		}
 	}
 	writeJSON(w, items)
 }

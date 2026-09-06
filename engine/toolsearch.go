@@ -15,3 +15,17 @@ type ToolSearchPolicy struct {
 	// （ask_user/todo_write/submit_plan 等会话域件与高频件留常驻是装配纪律）。
 	DynamicTools []string
 }
+
+// dynamicToolSet 动态名单集合（nil 安全——无策略/空名单返回 nil，nil map 索引
+// 恒 false 即「全量常驻」）。estimateContext 计费豁免与 assemble 两处分流
+// 共用同一名单源——曾三处各写循环，名单口径漂移即预算与装配面失配。
+func dynamicToolSet(pol *ToolSearchPolicy) map[string]bool {
+	if pol == nil || len(pol.DynamicTools) == 0 {
+		return nil
+	}
+	dyn := make(map[string]bool, len(pol.DynamicTools))
+	for _, n := range pol.DynamicTools {
+		dyn[n] = true
+	}
+	return dyn
+}

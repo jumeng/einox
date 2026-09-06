@@ -123,7 +123,9 @@ func TestGoldenCompaction(t *testing.T) {
 }
 
 // TestGoldenApprovalSuspendResume 审批挂起-恢复：manual 档写工具中断 → 聚合
-// 审批卡 → 批准 → Resume 续流执行 → 正常收束。
+// 审批卡 → 经网关 Approve 批准（回执真实落流）→ 续流执行 → 正常收束。
+// 决议不走直调 SetDecisionFor 旁路——golden 回放里审批卡停在待审态；经
+// Approve 落 approval_decision（含逐项 Items），回放可重建终态。
 func TestGoldenApprovalSuspendResume(t *testing.T) {
 	wt, _ := tools.InferTool("write_tool", "写桩", func(context.Context, struct{}) (map[string]any, error) {
 		return map[string]any{"ok": true}, nil
@@ -136,9 +138,7 @@ func TestGoldenApprovalSuspendResume(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m, _ := newRunManager(t, []contract.Tool{wt}, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
-		return fm, nil
-	})
+	m, _ := newRunManager(t, []contract.Tool{wt}, factoryOf(fm))
 	s := m.Registry().Create("张三", "审批", "manual", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
 	var card *contract.ApprovalReq
@@ -152,11 +152,25 @@ func TestGoldenApprovalSuspendResume(t *testing.T) {
 	if card == nil {
 		t.Fatal("manual 档写工具应中断挂起发审批卡")
 	}
-	for _, it := range card.Items {
-		s.SetDecisionFor(it.ItemID, contract.ApprovalDecision{Approve: true})
+	// itemID 空 = 合并卡全批：逐项登记 + 一次回执与续流（Approve 内部
+	// go Resume——等收口后再取快照）
+	if err := m.Channels().Approve(s.SID, "", nil, contract.ApprovalDecision{Approve: true}); err != nil {
+		t.Fatalf("决议回写应成功：%v", err)
 	}
-	m.Resume(context.Background(), s, func(session.Event) {})
+	waitFor(t, "决议续流应收束", func() bool { return s.StateOf() == session.StateEnded })
 	waitTitleFlight(t, s)
+	// 决议回执逐项齐备（merged 卡全批场景 items 数 = 项数）
+	var items []contract.ItemDecisionOut
+	for _, ev := range s.SnapshotEvents() {
+		if ev.Event == contract.EvApprovalDecision {
+			if d, ok := ev.Data.(contract.DecisionOut); ok {
+				items = d.Items
+			}
+		}
+	}
+	if len(items) != len(card.Items) {
+		t.Fatalf("approval_decision 逐项回执应 = 项数（%d），实得 %d", len(card.Items), len(items))
+	}
 	checkGolden(t, "approval", goldenNormalize(t, s, ""))
 }
 
@@ -196,7 +210,7 @@ func TestGoldenSubagentSpawn(t *testing.T) {
 // 验过 → 正常收束。
 func TestGoldenFinalGateRefeed(t *testing.T) {
 	calls := 0
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return &scriptedModel{}, nil
 		}

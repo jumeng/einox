@@ -30,7 +30,7 @@ import (
 // 子区保留、其余照清（scriptedModel 一轮纯文本收尾 → StateEnded →
 // wipeWorkspace——v0.4.0 起豁免须显式声明，基座不预设目录名）。
 func TestTaskEndWipeKeepsDeclaredDirs(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) { o.WorkspaceKeep = []string{"repos"} })
+	m := newTestManager(t, func(o *Options) { o.WorkspaceKeep = []string{"repos"} })
 	s := m.Registry().Create("张三", "编码", "manual", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
 

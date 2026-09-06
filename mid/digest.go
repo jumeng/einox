@@ -9,22 +9,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-)
 
-// truncateRunes 截断加省略号。
-func truncateRunes(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}
+	"github.com/jumeng/einox/internal/strutil"
+)
 
 // ArgsDigest 审批卡参数摘要：JSON 展开为「k: v, …」人类可读——数组取首项
 // title/name 与数量，对象省略。非 JSON 原样截断 120 runes。
 func ArgsDigest(args string) string {
 	var m map[string]any
 	if json.Unmarshal([]byte(args), &m) != nil || len(m) == 0 {
-		return truncateRunes(args, 120)
+		return strutil.Truncate(args, 120)
 	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -35,7 +29,7 @@ func ArgsDigest(args string) string {
 	for _, k := range keys {
 		parts = append(parts, k+": "+ValueDigest(m[k]))
 	}
-	return truncateRunes(strings.Join(parts, ", "), 120)
+	return strutil.Truncate(strings.Join(parts, ", "), 120)
 }
 
 // ValueDigest 值摘要：字符串/布尔/数字原样（截 40）；数组取首项 title/name
@@ -43,7 +37,7 @@ func ArgsDigest(args string) string {
 func ValueDigest(v any) string {
 	switch x := v.(type) {
 	case string:
-		return truncateRunes(x, 40)
+		return strutil.Truncate(x, 40)
 	case bool:
 		return fmt.Sprintf("%v", x)
 	case float64:
@@ -53,7 +47,7 @@ func ValueDigest(v any) string {
 			if om, ok := x[0].(map[string]any); ok {
 				for _, key := range []string{"title", "name", "id"} {
 					if s, ok := om[key].(string); ok && s != "" {
-						return fmt.Sprintf("「%s」等 %d 项", truncateRunes(s, 24), n)
+						return fmt.Sprintf("「%s」等 %d 项", strutil.Truncate(s, 24), n)
 					}
 				}
 			}
@@ -84,21 +78,21 @@ func ToolArgsDigest(args string) string {
 	}
 	var m map[string]any
 	if json.Unmarshal([]byte(args), &m) != nil || len(m) == 0 {
-		return truncateRunes(args, 60) // 非 JSON（罕见）原样截断
+		return strutil.Truncate(args, 60) // 非 JSON（罕见）原样截断
 	}
 	if len(m) == 1 {
 		for _, v := range m {
-			return truncateRunes(ValueDigest(v), 60)
+			return strutil.Truncate(ValueDigest(v), 60)
 		}
 	}
 	for _, k := range argsPrimaryKeys {
 		if v, ok := m[k]; ok {
-			if s := truncateRunes(ValueDigest(v), 60); s != "" && s != "{…}" {
+			if s := strutil.Truncate(ValueDigest(v), 60); s != "" && s != "{…}" {
 				return s
 			}
 		}
 	}
-	return truncateRunes(ArgsDigest(args), 60)
+	return strutil.Truncate(ArgsDigest(args), 60)
 }
 
 // resultLabels 结果数组字段 → 中文量词（计数语义「N 个需求」形态）。
@@ -115,7 +109,7 @@ var resultLabels = []struct{ key, label string }{
 //   - preview = 原始内容头 400 字（展开查看用；全文不进事件流——大结果会撑爆）
 func ToolResultDigest(content string) (ok bool, digest, preview string) {
 	content = strings.TrimSpace(content)
-	preview = truncateRunes(content, 400)
+	preview = strutil.Truncate(content, 400)
 
 	var m map[string]any
 	if json.Unmarshal([]byte(content), &m) != nil {
@@ -127,7 +121,7 @@ func ToolResultDigest(content string) (ok bool, digest, preview string) {
 			if e, has := m["error"]; has && e != nil {
 				msg = fmt.Sprint(e)
 			}
-			return false, truncateRunes(msg, 120), preview
+			return false, strutil.Truncate(msg, 120), preview
 		}
 	}
 	// run_command 约定：ok=true + 非零 exit_code = 命令失败（信封不翻 false）
@@ -137,7 +131,7 @@ func ToolResultDigest(content string) (ok bool, digest, preview string) {
 			if s, ok := m["note"].(string); ok && s != "" {
 				d += "：" + s
 			}
-			return false, truncateRunes(d, 120), preview
+			return false, strutil.Truncate(d, 120), preview
 		}
 	}
 	var parts []string
@@ -178,7 +172,7 @@ func countLabel(items []any, label string) string {
 	if om, ok := items[0].(map[string]any); ok {
 		for _, key := range []string{"title", "name", "id", "path"} {
 			if s, ok := om[key].(string); ok && strings.TrimSpace(s) != "" {
-				s = truncateRunes(s, 24)
+				s = strutil.Truncate(s, 24)
 				if n == 1 {
 					return "「" + s + "」"
 				}

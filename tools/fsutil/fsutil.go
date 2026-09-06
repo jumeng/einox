@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -85,26 +86,15 @@ type helper struct {
 	protect []string // 写保护区顶层目录名（空 = delete_file 不设栏）
 }
 
-// resolveUnder 指定根内路径解析（防穿越：Join 清洗 .. 后逃出 root 必须显式拒绝）。
-func resolveUnder(root, p string) (string, error) {
-	if p == "" || p == "." {
-		return root, nil
-	}
-	a := filepath.Join(root, filepath.FromSlash(p))
-	rel, err := filepath.Rel(root, a)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("路径越界（仅限工作区内）：%s", p)
-	}
-	return a, nil
-}
-
 // resolve 路径解析：spill/ 前缀 → 外置域（会话持久，跨轮取回），其余 → 工作区。
+// 圈禁判定与 office/applypatch/extwire 同源（tools.ResolveUnder 单点——审查
+// P1-5 四份两算法收口）。
 func (h *helper) resolve(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if h.spill != "" && (p == "spill" || strings.HasPrefix(p, "spill/")) {
-		return resolveUnder(h.spill, strings.TrimPrefix(strings.TrimPrefix(p, "spill"), "/"))
+		return tools.ResolveUnder(h.spill, strings.TrimPrefix(strings.TrimPrefix(p, "spill"), "/"))
 	}
-	return resolveUnder(h.root, p)
+	return tools.ResolveUnder(h.root, p)
 }
 
 // maxLineWidth 单行截断放宽上限（外置工具结果多为单行 JSON，3 万字符量级
@@ -144,16 +134,21 @@ func (h *helper) readFile(_ context.Context, in readFileIn) (map[string]any, err
 	if limit < 1 {
 		limit = 2000
 	}
-	var lines []string
+	// 窗口式扫描（安全审查 2026-09-06：此前先整读全文件进内存再切片——
+	// 数百 MB 日志会打爆进程；现只保留窗口内行，内存 O(offset 区间) 而非 O(文件)）
+	var kept []string
+	total := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 8*1024*1024) // 外置结果单行可达 MB 级
 	for sc.Scan() {
-		lines = append(lines, sc.Text())
+		total++
+		if total >= offset && total < offset+limit {
+			kept = append(kept, sc.Text())
+		}
 	}
 	if err := sc.Err(); err != nil {
 		return fail("读取失败：" + err.Error())
 	}
-	total := len(lines)
 	if offset > total {
 		return fail(fmt.Sprintf("offset=%d 超出总行数 %d", offset, total))
 	}
@@ -169,13 +164,12 @@ func (h *helper) readFile(_ context.Context, in readFileIn) (map[string]any, err
 		lineWidth = maxLineWidth
 	}
 	var b strings.Builder
-	for i := offset; i <= end; i++ {
-		line := lines[i-1]
+	for i, line := range kept {
 		if r := len([]rune(line)); r > lineWidth {
 			line = string([]rune(line)[:lineWidth]) +
 				fmt.Sprintf("…（单行截断：本行共 %d 字符——传 line_width 放宽，上限 %d）", r, maxLineWidth)
 		}
-		fmt.Fprintf(&b, "%6d→%s\n", i, line)
+		fmt.Fprintf(&b, "%6d→%s\n", offset+i, line)
 	}
 	out := map[string]any{
 		"ok": true, "path": in.Path,
@@ -212,8 +206,27 @@ func (h *helper) listDir(_ context.Context, in listDirIn) (map[string]any, error
 		Size int64  `json:"size"`
 	}
 	var dirs, files []entry
+	underSpill := h.spill != "" && full != h.root &&
+		(full == h.spill || strings.HasPrefix(full, h.spill+string(filepath.Separator)))
 	for _, d := range des {
-		rel, _ := filepath.Rel(h.root, filepath.Join(full, d.Name()))
+		// 条目路径：工作区列表相对工作区根；spill 外置域列表带 spill/ 虚拟
+		// 前缀（安全审查 2026-09-06：此前统一 Rel 工作区根，spill 条目输出
+		// ../sessions/<sid>/… 形态——回喂路径不可解析，read_file 无法寻址）
+		j := filepath.Join(full, d.Name())
+		var rel string
+		if underSpill {
+			r, err := filepath.Rel(h.spill, j)
+			if err != nil {
+				r = d.Name()
+			}
+			rel = path.Join("spill", r)
+		} else {
+			r, err := filepath.Rel(h.root, j)
+			if err != nil {
+				r = d.Name()
+			}
+			rel = r
+		}
 		e := entry{Name: d.Name(), Path: filepath.ToSlash(rel), Dir: d.IsDir()}
 		if !d.IsDir() {
 			if info, err := d.Info(); err == nil {
@@ -355,13 +368,6 @@ func grepFile(p, rel string, re *regexp.Regexp) []hit {
 	return hits
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 type deleteIn struct {
 	Path      string `json:"path"`
 	Recursive bool   `json:"recursive"` // 目录整删须显式
@@ -390,6 +396,4 @@ func (h *helper) deleteFile(_ context.Context, in deleteIn) (map[string]any, err
 	return map[string]any{"ok": true, "deleted": in.Path, "was_dir": st.IsDir()}, nil
 }
 
-func fail(msg string) (map[string]any, error) {
-	return map[string]any{"ok": false, "error": msg}, nil // 回喂模型自纠（errFeed 语义）
-}
+func fail(msg string) (map[string]any, error) { return tools.Fail(msg), nil } // 信封单点（tools.Fail——审查 P2-11）

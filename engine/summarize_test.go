@@ -3,7 +3,7 @@ package engine
 // H3 summarization 回归：触发+压缩（主模型输入=摘要视图、原文不可见）+
 // 防超窗修剪（摘要输入裁预算内、user 边界起）+ 保真锚定（session 历史原文
 // 不动）+ transcript 落域；清窗兜底（摘要模型恒败 → 尾段新窗、运行不炸）。
-// 方案 = findings/2026-08-26-h3-summarization-plan.md。
+// 方案 = 定案《2026-08-26-h3-summarization-plan》（工作区档案，不入库）。
 
 import (
 	"context"
@@ -55,15 +55,15 @@ func TestSummarizeTriggersAndFidelity(t *testing.T) {
 	m.Run(context.Background(), s, "最新指示：继续推进", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	if len(sub.inputs) != 1 {
-		t.Fatalf("摘要模型应恰一次调用，实得 %d", len(sub.inputs))
+	if len(sub.inputsOf()) != 1 {
+		t.Fatalf("摘要模型应恰一次调用，实得 %d", len(sub.inputsOf()))
 	}
-	if len(parent.inputs) != 1 {
-		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputs))
+	if len(parent.inputsOf()) != 1 {
+		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputsOf()))
 	}
 	// 摘要输入：防超窗——最老轮被裁、最新轮在场、摘要指令在场
 	var joined strings.Builder
-	for _, m2 := range sub.inputs[0] {
+	for _, m2 := range sub.inputsOf()[0] {
 		joined.WriteString(msgTextOf(m2))
 	}
 	all := joined.String()
@@ -75,7 +75,7 @@ func TestSummarizeTriggersAndFidelity(t *testing.T) {
 	}
 	// 主模型输入：摘要视图——旧轮原文不可见、摘要文本在场
 	var mainJoined strings.Builder
-	for _, m2 := range parent.inputs[0] {
+	for _, m2 := range parent.inputsOf()[0] {
 		mainJoined.WriteString(msgTextOf(m2))
 	}
 	mainAll := mainJoined.String()
@@ -141,10 +141,10 @@ func TestSummarizeFallbackClearsWindow(t *testing.T) {
 	}
 	// 主模型输入 = 尾段新窗：仅最后 user（本轮消息），旧轮原文不可见
 	//（parent.inputs 只含主模型调用——genFail 的 Generate 恒败且不记录输入）
-	if len(parent.inputs) != 1 {
-		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputs))
+	if len(parent.inputsOf()) != 1 {
+		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputsOf()))
 	}
-	mainIn := parent.inputs[0]
+	mainIn := parent.inputsOf()[0]
 	joined := strings.Builder{}
 	for _, m2 := range mainIn {
 		joined.WriteString(msgTextOf(m2))
@@ -206,11 +206,11 @@ func TestSummarizeFallbackTaskAnchor(t *testing.T) {
 	if s.StateOf() != session.StateEnded {
 		t.Fatalf("清窗兜底不得杀运行，终态 %s", s.StateOf())
 	}
-	if len(parent.inputs) != 1 {
-		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputs))
+	if len(parent.inputsOf()) != 1 {
+		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputsOf()))
 	}
 	joined := strings.Builder{}
-	for _, m2 := range parent.inputs[0] {
+	for _, m2 := range parent.inputsOf()[0] {
 		joined.WriteString(msgTextOf(m2))
 	}
 	all := joined.String()
@@ -247,11 +247,11 @@ func TestSummarizeFallbackAnchorNoTodo(t *testing.T) {
 	m.Run(context.Background(), s, "新任务", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	if len(parent.inputs) != 1 {
-		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputs))
+	if len(parent.inputsOf()) != 1 {
+		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputsOf()))
 	}
 	joined := strings.Builder{}
-	for _, m2 := range parent.inputs[0] {
+	for _, m2 := range parent.inputsOf()[0] {
 		joined.WriteString(msgTextOf(m2))
 	}
 	all := joined.String()
@@ -287,11 +287,11 @@ func TestSummarizeFallbackAnchorExternalTodo(t *testing.T) {
 	m.Run(context.Background(), s, "继续", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	if len(parent.inputs) != 1 {
-		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputs))
+	if len(parent.inputsOf()) != 1 {
+		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputsOf()))
 	}
 	joined := strings.Builder{}
-	for _, m2 := range parent.inputs[0] {
+	for _, m2 := range parent.inputsOf()[0] {
 		joined.WriteString(msgTextOf(m2))
 	}
 	all := joined.String()
@@ -336,11 +336,11 @@ func TestSummarizeSmallWindowSkillsBudget(t *testing.T) {
 	if s.StateOf() != session.StateEnded {
 		t.Fatalf("运行应收口，终态 %s", s.StateOf())
 	}
-	if len(sub.inputs) != 1 {
-		t.Fatalf("钳制预算下摘要应恰一次（不逐调用重摘要），实得 %d", len(sub.inputs))
+	if len(sub.inputsOf()) != 1 {
+		t.Fatalf("钳制预算下摘要应恰一次（不逐调用重摘要），实得 %d", len(sub.inputsOf()))
 	}
 	var joined strings.Builder
-	for _, m2 := range parent.inputs[0] {
+	for _, m2 := range parent.inputsOf()[0] {
 		joined.WriteString(msgTextOf(m2))
 	}
 	if strings.Contains(joined.String(), "AAAAAA") {
@@ -379,14 +379,14 @@ func TestSummarizerFailoverChain(t *testing.T) {
 	if s.StateOf() != session.StateEnded {
 		t.Fatalf("降级承接后应收口（不清窗不外抛），终态 %s", s.StateOf())
 	}
-	if len(sub.inputs) != 1 {
-		t.Fatalf("降级模型应恰承接一次摘要，实得 %d", len(sub.inputs))
+	if len(sub.inputsOf()) != 1 {
+		t.Fatalf("降级模型应恰承接一次摘要，实得 %d", len(sub.inputsOf()))
 	}
-	if len(parent.inputs) != 1 {
-		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputs))
+	if len(parent.inputsOf()) != 1 {
+		t.Fatalf("主模型应恰一次调用，实得 %d", len(parent.inputsOf()))
 	}
 	var joined strings.Builder
-	for _, m2 := range parent.inputs[0] {
+	for _, m2 := range parent.inputsOf()[0] {
 		joined.WriteString(msgTextOf(m2))
 	}
 	if !strings.Contains(joined.String(), "降级链摘要文本") {
@@ -473,14 +473,14 @@ func TestSummarizeConvergenceRejectsGiantSummary(t *testing.T) {
 	m.Run(context.Background(), s, "继续", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	if len(sub.inputs) != 1 {
-		t.Fatalf("摘要模型应恰一次调用（finalize 错误不重试），实得 %d", len(sub.inputs))
+	if len(sub.inputsOf()) != 1 {
+		t.Fatalf("摘要模型应恰一次调用（finalize 错误不重试），实得 %d", len(sub.inputsOf()))
 	}
-	if len(parent.inputs) != 1 {
-		t.Fatalf("主模型应恰一次调用（清窗后续跑），实得 %d", len(parent.inputs))
+	if len(parent.inputsOf()) != 1 {
+		t.Fatalf("主模型应恰一次调用（清窗后续跑），实得 %d", len(parent.inputsOf()))
 	}
 	var joined strings.Builder
-	for _, m2 := range parent.inputs[0] {
+	for _, m2 := range parent.inputsOf()[0] {
 		joined.WriteString(msgTextOf(m2))
 	}
 	all := joined.String()
@@ -506,7 +506,7 @@ func TestCompactCacheSkipsResummarize(t *testing.T) {
 	// summaryCalls：sub 输入中真正携带摘要指令的调用数（摘要模型专有形态）
 	summaryCalls := func() int {
 		c := 0
-		for _, in := range sub.inputs {
+		for _, in := range sub.inputsOf() {
 			j := ""
 			for _, msg := range in {
 				j += msgTextOf(msg)
@@ -541,7 +541,7 @@ func TestCompactCacheSkipsResummarize(t *testing.T) {
 		t.Fatalf("二次 Run 应零摘要请求（缓存续用），实得 %d", summaryCalls())
 	}
 	run2 := ""
-	for _, in := range sub.inputs {
+	for _, in := range sub.inputsOf() {
 		j := ""
 		for _, msg := range in {
 			j += msgTextOf(msg)

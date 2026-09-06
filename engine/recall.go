@@ -1,7 +1,7 @@
 package engine
 
-// recall 跨会话检索工具（记忆拉通道，findings/2026-08-29-memory-three-channel-
-// design.md §1）：三模式按入参分派——sid 精确深读 > query 关键词检索 > 空
+// recall 跨会话检索工具（记忆拉通道，2026-08-29 三通道记忆设计 §1）：
+// 三模式按入参分派——sid 精确深读 > query 关键词检索 > 空
 // 最近列表。授权五律（dsh session-query 对位）：①owner 域（经 session.Store
 // 的 operator 定位，A 检索不到 B）；②恒排除当前会话（防自匹配）；③有界
 // （limit≤20 / 扫描最近 50 会话 / digest 头截 4000 rune + offset 续读）；
@@ -15,12 +15,14 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/strutil"
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/tools"
 )
@@ -110,7 +112,7 @@ func recallScan(st session.Store, owner, self, query string, limit int) (any, er
 		item := map[string]any{
 			"sid": r.d.SID, "title": title,
 			"updated_at": r.d.UpdatedAt.Format("2006-01-02 15:04"),
-			"summary":    truncateRunes(firstNonEmpty(r.d.Summary, r.d.Task), recallSummaryRunes),
+			"summary":    strutil.Truncate(firstNonEmpty(r.d.Summary, r.d.Task), recallSummaryRunes),
 		}
 		if len(r.fields) > 0 {
 			item["hit"] = strings.Join(r.fields, ",")
@@ -135,7 +137,7 @@ func recallMatch(d *session.PersistedDigest, query string) []string {
 			return
 		}
 		if capRunes > 0 {
-			text = truncateRunes(text, capRunes)
+			text = strutil.Truncate(text, capRunes)
 		}
 		if strings.Contains(foldText(text), q) {
 			fields[name] = true
@@ -217,13 +219,13 @@ func renderDigest(d *session.PersistedDigest) string {
 		switch m.Role {
 		case schema.User:
 			flushTools()
-			fmt.Fprintf(&b, "[用户] %s\n", truncateRunes(msgTextOf(m), recallMsgRunes))
+			fmt.Fprintf(&b, "[用户] %s\n", strutil.Truncate(msgTextOf(m), recallMsgRunes))
 		case schema.Assistant:
 			if m.Content != "" {
-				fmt.Fprintf(&b, "[助手] %s\n", truncateRunes(m.Content, 300))
+				fmt.Fprintf(&b, "[助手] %s\n", strutil.Truncate(m.Content, 300))
 			}
 			for _, tc := range m.ToolCalls {
-				if !containsStr(turnTools, tc.Function.Name) {
+				if !slices.Contains(turnTools, tc.Function.Name) {
 					turnTools = append(turnTools, tc.Function.Name)
 				}
 			}
@@ -236,15 +238,6 @@ func renderDigest(d *session.PersistedDigest) string {
 // foldText 大小写折叠 + 空白折叠（字面匹配语义：空白串视为单个空格）。
 func foldText(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
-}
-
-func containsStr(xs []string, x string) bool {
-	for _, v := range xs {
-		if v == x {
-			return true
-		}
-	}
-	return false
 }
 
 func firstNonEmpty(a, b string) string {

@@ -1,6 +1,6 @@
 package engine
 
-// 优化方案（findings/2026-08-30-optimization-plan.md）评审修订版的行为回归：
+// 优化方案（定案《2026-08-30-optimization-plan》（工作区档案，不入库））评审修订版的行为回归：
 // A1 Resume 入口整备（重复/并发双 Resume 拒绝 + 执行期 running 可见）
 // A4 模型能力门控（NoToolCalls 组装期 fail fast）
 // A6 Drain 优雅停机收尾

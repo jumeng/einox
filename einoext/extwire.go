@@ -41,6 +41,7 @@ import (
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/tools"
 )
 
 // localOperator commandline.Operator 的本地实现（工作区限定：读写与命令
@@ -52,16 +53,14 @@ type localOperator struct{ root string }
 
 // abs 归一并校验 containment。filepath.Join 会把 ".." 清洗进结果路径——
 // Join(root, "../../etc") 结果逃出 root，必须以 Rel 显式拒绝（P0 安全修复）。
+// abs 圈禁 + 绝对化（圈禁判定与 fsutil/office/applypatch 同源——tools.
+// ResolveUnder 单点，审查 P1-5；本地算子返回绝对路径供直读）。
 func (o *localOperator) abs(p string) (string, error) {
-	a, err := filepath.Abs(filepath.Join(o.root, p))
+	under, err := tools.ResolveUnder(o.root, p)
 	if err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(o.root, a)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("路径越界（仅限工作区 %s 内）：%s", o.root, p)
-	}
-	return a, nil
+	return filepath.Abs(under)
 }
 
 func (o *localOperator) ReadFile(_ context.Context, path string) (string, error) {

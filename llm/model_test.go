@@ -1,18 +1,23 @@
 package llm
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/jumeng/einox/contract"
+)
 
 // TestNormalizeEffort 档位归一表测：四档原样 + 旧值/空值/未知归一。
 // 旧值来自升级前用户偏好与存量会话快照（on/off 二值时代）。
 func TestNormalizeEffort(t *testing.T) {
+	// 归一权威已迁 contract（审查 P3-3）——经 llm 测试仍在 llm 包锚定语义。
 	cases := map[string]string{
 		"off": "off", "low": "low", "high": "high", "max": "max", // 四档原样（off 2026-08-31 回归）
-		"on":  "max",                                   // 旧「开」= enabled+effort max
-		"":    "low", "medium": "low", "xhigh": "low", // 缺省/未知 → 默认低档
+		"on": "max",                                  // 旧「开」= enabled+effort max
+		"":   "low", "medium": "low", "xhigh": "low", // 缺省/未知 → 默认低档
 	}
 	for in, want := range cases {
-		if got := NormalizeEffort(in); got != want {
-			t.Errorf("NormalizeEffort(%q) = %q，应为 %q", in, got, want)
+		if got := contract.NormalizeEffort(in); got != want {
+			t.Errorf("contract.NormalizeEffort(%q) = %q，应为 %q", in, got, want)
 		}
 	}
 }
@@ -101,5 +106,36 @@ func TestSamplingOf(t *testing.T) {
 	}
 	if temp, topP = samplingOf(ModelSpec{Temperature: &tp}); temp == nil || topP != nil {
 		t.Fatalf("单项声明应只发该项：%v %v", temp, topP)
+	}
+}
+
+// TestFlattenModelsPriorityOrder（安全审查 2026-09-06）：平铺按 priority
+// 降序、同优先级稳定保清单序——「priority 序」注释此前零排序兑现，
+// ResolveCurrent 的「回退第一模型」拿到的是配置切片序。
+func TestFlattenModelsPriorityOrder(t *testing.T) {
+	ps := []ProviderSpec{
+		{ID: "a", Kind: "openai", Enabled: true, Models: []ModelSpec{
+			{ID: "low1", Priority: 10},
+			{ID: "same1", Priority: 50},
+		}},
+		{ID: "b", Kind: "openai", Enabled: true, Models: []ModelSpec{
+			{ID: "top", Priority: 100},
+			{ID: "same2", Priority: 50},
+		}},
+		{ID: "off", Kind: "openai", Models: []ModelSpec{{ID: "gone", Priority: 999}}},
+	}
+	got := FlattenModels(ps)
+	keys := make([]string, len(got))
+	for i, m := range got {
+		keys[i] = m.Key
+	}
+	want := []string{"b/top", "a/same1", "b/same2", "a/low1"}
+	if len(keys) != len(want) {
+		t.Fatalf("禁用 provider 应排除：实得 %v", keys)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("应按 priority 降序（同优先级稳定保清单序）：实得 %v 期望 %v", keys, want)
+		}
 	}
 }

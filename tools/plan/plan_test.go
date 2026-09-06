@@ -1,6 +1,6 @@
 package plan
 
-// submit_plan 行为回归（findings/2026-08-25 定稿语义）：校验拒空/限长；
+// submit_plan 行为回归（定案《2026-08-25》 定稿语义）：校验拒空/限长；
 // auto 档写完即走不挂起；plan/manual 档挂起（Suspend 载 PlanCard）；恢复流
 // 三分叉——批准（plan 档授权任务期 GrantTask / manual 档不授权）、拒绝
 //（原因回喂）、无决议（fail-closed 作废）。

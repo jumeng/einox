@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/jumeng/einox/contract"
 )
 
 type argNestIn struct {
@@ -88,7 +90,7 @@ func TestModelArgErrorPassthrough(t *testing.T) {
 	}
 	raw := json.RawMessage(`{"code":123}`)
 	wrapped := json.Unmarshal(raw, &v)
-	tr := ModelArgError(fmt.Errorf("extract argument fail: %w", wrapped))
+	tr := contract.ModelArgError(fmt.Errorf("extract argument fail: %w", wrapped))
 	if tr == nil || !strings.Contains(tr.Error(), "code 应为字符串") || !strings.Contains(tr.Error(), "实得数字") {
 		t.Fatalf("包装链应穿透翻译：%v", tr)
 	}

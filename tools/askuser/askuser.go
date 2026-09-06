@@ -114,6 +114,4 @@ func run(ctx context.Context, cfg Config, in askIn) (map[string]any, error) {
 	return nil, &contract.Suspend{Info: info, State: askState{Info: info}}
 }
 
-func fail(msg string) (map[string]any, error) {
-	return map[string]any{"ok": false, "error": msg}, nil // 回喂模型自纠（errFeed 语义）
-}
+func fail(msg string) (map[string]any, error) { return tools.Fail(msg), nil } // 信封单点（tools.Fail——审查 P2-11）

@@ -1,7 +1,7 @@
 package engine
 
 // ToolHooks 回归：Pre 否决（信封回喂不终止轮）/ Post 观察载荷 / panic
-// 防护 / nil 钩子零变化 / 真实运行挂点。失败语义见 findings/2026-09-05。
+// 防护 / nil 钩子零变化 / 真实运行挂点。失败语义见 定案《2026-09-05》。
 
 import (
 	"context"
@@ -136,7 +136,7 @@ func TestHooksFireInRealRun(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "已完成。"})
 	}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{tool} }
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil

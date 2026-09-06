@@ -12,41 +12,29 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"github.com/jumeng/einox/checkpoint"
 	"github.com/jumeng/einox/contract"
-	"github.com/jumeng/einox/internal/tstore"
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
 
-// newVisionRunManager 图片链路测试引擎（模型声明 image 输入 + 引用解析注入）。
+// newVisionRunManager 图片链路测试引擎（模型声明 image 输入 + 引用解析注入——
+// newTestManager 基座 + 视觉差异项）。
 func newVisionRunManager(t *testing.T, imageInput bool, resolve llm.ImageResolver, fm llm.ModelFactory) *Manager {
 	t.Helper()
-	st := tstore.New(t.TempDir())
 	input := []string{"text"}
 	if imageInput {
 		input = append(input, "image")
 	}
-	reg := session.NewRegistry(st)
-	m, err := NewManager(reg, Options{
-		Providers: func() []llm.ProviderSpec {
+	return newTestManager(t, func(o *Options) {
+		o.Providers = func() []llm.ProviderSpec {
 			return []llm.ProviderSpec{{
 				ID: "p", Kind: "openai", Enabled: true,
 				Models: []llm.ModelSpec{{ID: "m", Input: input, Priority: 100}},
 			}}
-		},
-		Instruction: func(SessionBrief) string { return "test" },
-		NewModel:    fm,
-		CheckPoints: func(operator, sid string) CheckPointStore {
-			return checkpoint.NewCheckPointStore(st, operator, sid)
-		},
-		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
-		ImageResolve:  resolve,
+		}
+		o.NewModel = fm
+		o.ImageResolve = resolve
 	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	return m
 }
 
 // TestRunImageAttachmentResolved 含图附件经引擎与包装两层：Run 构造引用 part，
@@ -67,12 +55,11 @@ func TestRunImageAttachmentResolved(t *testing.T) {
 		{Name: "shot.png", Path: "docs/shot.png", IsImage: true},
 	}, func(session.Event) {})
 	waitTitleFlight(t, s)
-	inner.mu.Lock()
-	defer inner.mu.Unlock()
-	if len(inner.inputs) == 0 {
+	ins := inner.inputsOf()
+	if len(ins) == 0 {
 		t.Fatal("模型未被调用")
 	}
-	last := inner.inputs[0][len(inner.inputs[0])-1]
+	last := ins[0][len(ins[0])-1]
 	if last.Role != schema.User || len(last.UserInputMultiContent) != 2 {
 		t.Fatalf("末条应为双 part 用户消息（文本 + 图）：%+v", last)
 	}
@@ -107,9 +94,7 @@ func TestRunImageGateTextModel(t *testing.T) {
 		mu.Unlock()
 	})
 	waitTitleFlight(t, s)
-	inner.mu.Lock()
-	calls := len(inner.inputs)
-	inner.mu.Unlock()
+	calls := len(inner.inputsOf())
 	if calls != 0 {
 		t.Fatalf("门禁拒绝后模型不应被调用，实得 %d 次", calls)
 	}

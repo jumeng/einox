@@ -9,9 +9,7 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strconv"
@@ -21,16 +19,15 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/dynamictool/toolsearch"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 
-	"encoding/json"
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/einoext"
 	"github.com/jumeng/einox/hitl"
 	"github.com/jumeng/einox/llm"
-	"github.com/jumeng/einox/mid"
 	"github.com/jumeng/einox/sandbox"
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/skills"
@@ -288,6 +285,18 @@ func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
 			return nil, fmt.Errorf("engine: SpawnOutput.Schema 根形必须为 object（结构化结论契约拒收）")
 		}
 	}
+	// Topology.Kind 构造期即拒（与 SessionToolsOff/SpawnOutput.Schema
+	// 的 fail-fast 同位——纯静态配置不依赖会话面；此前拖到首轮 assemble 才
+	// 报 CONFIG 卡，同类校验时点不一致，审查 P2-17。空 Kind 同拒：Topology
+	// 非 nil 即装配意图，零值形态必在 assemble 报错——无「合法空档」，安全
+	// 审查 2026-09-06 补齐）。
+	if opt.Topology != nil {
+		switch opt.Topology.Kind {
+		case TopologySupervisor, TopologyDeep:
+		default:
+			return nil, fmt.Errorf("engine: 未知的拓扑形态 %q（supervisor|deep）", opt.Topology.Kind)
+		}
+	}
 	if opt.NewModel == nil {
 		opt.NewModel = llm.NewChatModel
 	}
@@ -332,90 +341,6 @@ func (m *Manager) emit(s *session.Session, fn emitFn, name string, data any) {
 	fn(ev)
 }
 
-// runAccum 本轮输出累积（流式 chunk 拼装）。msgs = 轮内完整消息序列
-// （assistant 分段 + tool 结果，入史真源）；text/thinking 另做整轮聚合
-// （标题生成路径用）。超长工具结果截断归 reduction 中间件（出站即截 8192
-// +外置换指针，事件泵收到的已是截断版——单一截断面，2026-08-26 退役
-// 既有 newSpiller 双重截断）。
-type runAccum struct {
-	text      string // 整轮文本聚合（标题生成路径用）
-	segText   string // 当前 assistant 段缓冲
-	segThink  string
-	toolCalls []schema.ToolCall // 当前段 tool_calls 缓冲
-	tcSlots   map[int]int       // 流式分片槽：Index 锚 → toolCalls 位
-	msgs      []*schema.Message // 轮内消息序列（历史回传用）
-}
-
-func (a *runAccum) addText(t string) {
-	a.text += t
-	a.segText += t
-}
-
-func (a *runAccum) addThinking(t string) { a.segThink += t }
-
-// addToolResult 工具结果入序列（react 顺序：位于其 assistant 段之后）。
-// 入史供下轮续聊；截断/外置归 reduction 中间件（此处零加工）。
-func (a *runAccum) addToolResult(callID, content string) {
-	if callID == "" {
-		return
-	}
-	a.msgs = append(a.msgs, schema.ToolMessage(content, callID))
-}
-
-// addToolCall 流式 tool call 分片归并（OpenAI 协议：首片原子带 id/name，
-// 续片仅 arguments 增量、以 Index 为锚——eino 引擎侧同语义归并后才执行）。
-// 不归并则历史 tool call 参数为空，下轮回传被 omitempty 省略 arguments 键，
-// 供应商 400 missing field `arguments`。
-func (a *runAccum) addToolCall(tc schema.ToolCall) {
-	if tc.Index == nil { // 非分片形态（完整调用）：直接追加
-		a.toolCalls = append(a.toolCalls, tc)
-		return
-	}
-	if pos, ok := a.tcSlots[*tc.Index]; ok {
-		m := &a.toolCalls[pos]
-		if tc.ID != "" {
-			m.ID = tc.ID
-		}
-		if tc.Type != "" {
-			m.Type = tc.Type
-		}
-		if tc.Function.Name != "" {
-			m.Function.Name = tc.Function.Name
-		}
-		m.Function.Arguments += tc.Function.Arguments
-		return
-	}
-	a.toolCalls = append(a.toolCalls, tc)
-	if a.tcSlots == nil {
-		a.tcSlots = map[int]int{}
-	}
-	a.tcSlots[*tc.Index] = len(a.toolCalls) - 1
-}
-
-// endAssistantMsg 单条 assistant 流结束：段封账入序列（空段跳过），清段缓冲
-// 与分片槽（同轮多条 assistant 消息 Index 各自独立编号，槽不跨消息复用）。
-func (a *runAccum) endAssistantMsg() {
-	defer func() {
-		a.segText, a.segThink, a.toolCalls, a.tcSlots = "", "", nil, nil
-	}()
-	if a.segText == "" && a.segThink == "" && len(a.toolCalls) == 0 {
-		return
-	}
-	m := &schema.Message{Role: schema.Assistant, Content: a.segText, ReasoningContent: a.segThink}
-	if len(a.toolCalls) > 0 {
-		m.ToolCalls = a.toolCalls
-	}
-	a.msgs = append(a.msgs, m)
-}
-
-// discardSeg 丢弃当前半截段（网络容错 ② 重连路径：失败尝试的半截增量已被
-// 事件层实时转发，adk 在模型调用边界内重启本次调用——本段不入史）。text
-// 同步回卷：addText 同步追加保证整轮聚合尾部恒等于本段文本（TrimSuffix 安全）。
-func (a *runAccum) discardSeg() {
-	a.text = strings.TrimSuffix(a.text, a.segText)
-	a.segText, a.segThink, a.toolCalls, a.tcSlots = "", "", nil, nil
-}
-
 // finishOf 状态收尾闭包（终态落盘）。
 func (m *Manager) finishOf(s *session.Session) func(string) {
 	return func(state string) {
@@ -427,272 +352,27 @@ func (m *Manager) finishOf(s *session.Session) func(string) {
 	}
 }
 
-// ctxEstimates 上下文分类估算（usage 事件的分类三项来源；每轮 Run 计算一次）。
-// messages = 整形后出站口径（H8-1）；saved = 原始口径与整形口径差额（整形
-// 节省注记——reasoning 剥离 + 空壳剔除的量化，不含 reduction 外置/摘要）。
-type ctxEstimates struct{ instruction, tools, messages, saved int }
-
-// estTokens 无分词器的字符启发式：CJK ≈ 1 token/字，其余 ≈ 1/4。
-func estTokens(s string) int {
-	cjk, other := 0, 0
-	for _, r := range s {
-		if r >= 0x2e80 {
-			cjk++
-		} else {
-			other++
-		}
-	}
-	return cjk + other/4
-}
-
-// estimateContext 上下文分类估算（Run 在泵前已把本轮用户消息入史——中断保险，
-// CloneHistory 天然含本轮，无须另计）。工具面口径（B1 补齐）：业务面 + 进程件
-// + 会话域件 + recall + spawn，名+描述+参数 schema JSON 均计——会话域件恒
-// 常驻故须计入（此前全漏）；toolsearch 名单内工具不计（动态装载正是瘦身
-// 手段，只有常驻面计费；分流与 assemble 同源名单）。
-func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
-	brief := m.briefOf(s)
-	est := ctxEstimates{instruction: estTokens(m.Opt.Instruction(brief))}
-	dyn := map[string]bool{}
-	if pol := m.Opt.ToolSearchPolicy; pol != nil {
-		for _, n := range pol.DynamicTools {
-			dyn[n] = true
-		}
-	}
-	addFace := func(ts []contract.Tool) {
-		for _, t := range ts {
-			if info := t.Info(); info != nil && !dyn[info.Name] {
-				est.tools += estTokens(info.Name) + estTokens(info.Desc) + schemaTokens(info.Params)
-			}
-		}
-	}
-	if m.Opt.Tools != nil {
-		addFace(m.Opt.Tools(brief)) // 会话面：随 Owner/SID 裁剪后的真实业务面
-	}
-	if m.Opt.ProcessTools != nil {
-		addFace(m.Opt.ProcessTools())
-	}
-	if sts, err := m.sessionTools(s); err == nil { // 会话域件实际面（族裁剪后）；构造失败随 assemble 报，此处不计
-		addFace(sts)
-	}
-	if m.Opt.Recall {
-		if rt, err := newRecallTool(m.reg, s); err == nil {
-			addFace([]contract.Tool{rt})
-		}
-	}
-	if m.Opt.SubAgents != nil { // spawn 面走静态估算（构造工具本体需建模板 agent——重）
-		est.tools += estTokens(spawnToolName) + estTokens(spawnDesc) + spawnSchemaTokens()
-	}
-	// H8-1 口径：est_messages = 整形后出站视图（真实发送面——与 H1 TokenCounter
-	// 同规则函数 llm.ShapeMessages）；saved = 原始口径差额（「整形节省」注记）。
-	history := s.CloneHistory()
-	msgTok := func(msg *schema.Message) int {
-		n := estTokens(msgTextOf(msg)) + estTokens(msg.ReasoningContent) + 8 // 8 ≈ 角色开销
-		for _, tc := range msg.ToolCalls {
-			n += estTokens(tc.Function.Name) + estTokens(tc.Function.Arguments)
-		}
-		return n
-	}
-	for _, msg := range llm.ShapeMessages(history) {
-		est.messages += msgTok(msg)
-	}
-	for _, msg := range history {
-		est.saved += msgTok(msg)
-	}
-	est.saved -= est.messages
-	return est
-}
-
-// schemaTokens 参数 schema 的 JSON 形估算（nil = 0；marshal 失败容错 0——
-// 估算是治理信号不是精确账）。
-func schemaTokens(sc *contract.Schema) int {
-	if sc == nil {
-		return 0
-	}
-	if b, err := json.Marshal(sc); err == nil {
-		return estTokens(string(b))
-	}
-	return 0
-}
-
-// emitUsage 流末 usage chunk 到达即发（每轮模型调用一次，react 多轮后值
-// 覆盖——最后一条 = 最终上下文规模）。Record 落事件流 → 刷新回放可恢复。
-// spawnID 非空 = 子代理面用量上卷（B2：估算四项传零——子面无 estimateContext；
-// 消费侧按 SpawnID 归组聚合）。
-func (m *Manager) emitUsage(s *session.Session, fn emitFn, u *schema.TokenUsage, est ctxEstimates, spawnID string) {
-	if u == nil || u.PromptTokens <= 0 {
-		return
-	}
-	m.emit(s, fn, contract.EvUsage, contract.UsageOut{
-		PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens,
-		TotalTokens:    u.TotalTokens,
-		SpawnID:        spawnID,
-		EstInstruction: est.instruction, EstTools: est.tools, EstMessages: est.messages,
-		EstSaved: est.saved, // 整形节省注记（H8-1；原始-整形差额，>0 才有意义）
-	})
-}
-
-// envContextBudget env 覆盖的常驻上下文预算（0 = 未设；显式 Options 值优先）。
-var envContextBudget int
-
-// contextBudgetOf 生效预算（显式 Options 值优先，次 env；0 = 关）。
-func (m *Manager) contextBudgetOf() int {
-	if m.Opt.ContextBudget > 0 {
-		return m.Opt.ContextBudget
-	}
-	return envContextBudget
-}
-
-// checkContextBudget 常驻面超限告警（B1）：Instruction+常驻工具面合计超线即发
-// harness_note（Kind: budget）+ 日志，不阻断运行（大工具面配 toolsearch 就是
-// 合法超标场景）；会话内只发一次——判定扫 Events 既有同 Kind note（免持久化
-// 标记位：Reattach 后 Events 恢复即含旧告警，跨重启天然不重发；盘面重建的
-// Data 是 map 形态，两形态同判）。
-func (m *Manager) checkContextBudget(s *session.Session, fn emitFn, est ctxEstimates) {
-	budget := m.contextBudgetOf()
-	if budget <= 0 {
-		return
-	}
-	resident := est.instruction + est.tools
-	if resident <= budget {
-		return
-	}
-	for _, ev := range s.SnapshotEvents() {
-		if ev.Event != contract.EvHarnessNote {
-			continue
-		}
-		switch d := ev.Data.(type) {
-		case contract.HarnessNote:
-			if d.Kind == "budget" {
-				return
-			}
-		case map[string]any:
-			if d["kind"] == "budget" {
-				return
-			}
-		}
-	}
-	m.emit(s, fn, contract.EvHarnessNote, contract.HarnessNote{
-		Kind:  "budget",
-		Title: "常驻上下文超预算",
-		Detail: fmt.Sprintf("Instruction ≈%d + 常驻工具面 ≈%d = ≈%d token，超预算线 %d（estTokens 启发式口径；瘦身：精简工具描述 / SessionToolsOff 裁族 / ToolSearchPolicy 动态装载）",
-			est.instruction, est.tools, resident, budget),
-	})
-	log.Printf("einox: 会话 %s 常驻上下文 ≈%d token 超预算 %d（instruction %d + tools %d）",
-		s.SID, resident, budget, est.instruction, est.tools)
-}
-
-// msgTextOf 消息文本（多模态消息 Content 为空——文本只进 text part，估算回退
-// 读 parts）。
-func msgTextOf(m *schema.Message) string {
-	if len(m.UserInputMultiContent) == 0 {
-		return m.Content
-	}
-	var b strings.Builder
-	for _, p := range m.UserInputMultiContent {
-		if p.Type == schema.ChatMessagePartTypeText {
-			b.WriteString(p.Text)
-		}
-	}
-	return b.String()
-}
-
-// sanitizeHistory 历史回传防御（深拷贝副本上修复——会话真源不动，仅本轮
-// 回传视图生效；① ② ③ 剔除后返回新序列）：
-// ① 空 arguments 的 tool call 经 openai 序列化 omitempty 会整个省略 arguments
-// 键，严格供应商直接 400。分片归并修复前落盘的存量脏历史在此自愈——回灌 "{}"。
-// ② 悬空 tool_calls：assistant 带 tool_calls 后必须紧跟每个 tool_call_id 的
-// tool 消息，缺失即 400。存量脏历史自愈——剥离未应答项（部分应答保留已应答
-// 项，消息文本保留）。
-// ③ 空 assistant 消息剔除：错误轮次落盘的空 final 回传即 400；纯悬空
-// tool_calls 剥离后变空的消息一并剔除（须在②之后）。
-// ④ 孤儿 tool 消息剔除：tool 消息前无带对应 tool_call 的 assistant——回传
-// 即 400。
-func sanitizeHistory(msgs []*schema.Message) []*schema.Message {
-	// 深拷贝改写：源切片与 persist 的持锁 marshal 共享同批 *Message（CloneHistory
-	// 浅拷贝），锁外原地改写 ToolCalls/Arguments 构成竞态——在副本上改写零共享。
-	msgs = cloneMsgs(msgs)
-	for _, m := range msgs {
-		for i := range m.ToolCalls {
-			if m.ToolCalls[i].Function.Arguments == "" {
-				m.ToolCalls[i].Function.Arguments = "{}"
-			}
-		}
-	}
-	for i := 0; i < len(msgs); i++ {
-		m := msgs[i]
-		if m.Role != schema.Assistant || len(m.ToolCalls) == 0 {
-			continue
-		}
-		answered := map[string]bool{}
-		for j := i + 1; j < len(msgs) && msgs[j].Role == schema.Tool; j++ {
-			answered[msgs[j].ToolCallID] = true
-		}
-		kept := m.ToolCalls[:0]
-		for _, tc := range m.ToolCalls {
-			if answered[tc.ID] {
-				kept = append(kept, tc)
-			}
-		}
-		if len(kept) == 0 {
-			m.ToolCalls = nil
-		} else {
-			m.ToolCalls = kept
-		}
-	}
-	out := msgs[:0]
-	for _, m := range msgs {
-		if m.Role == schema.Assistant && m.Content == "" && m.ReasoningContent == "" && len(m.ToolCalls) == 0 {
-			continue
-		}
-		out = append(out, m)
-	}
-	// ④ 孤儿 tool 消息剔除（前无带对应 tool_call 的 assistant）；须在②③后
-	//（剥悬空/剔空都可能制造新孤儿）。
-	kept := out[:0]
-	open := map[string]bool{}
-	for _, m := range out {
-		switch m.Role {
-		case schema.Assistant:
-			clear(open)
-			for _, tc := range m.ToolCalls {
-				open[tc.ID] = true
-			}
-		case schema.Tool:
-			if !open[m.ToolCallID] {
-				continue
-			}
-			delete(open, m.ToolCallID)
-		default:
-			clear(open)
-		}
-		kept = append(kept, m)
-	}
-	return kept
-}
-
-// cloneMsgs 消息浅层组拷贝（消息值拷贝 + ToolCalls 切片拷贝——后续改写
-// ToolCalls 元素不触共享底数组；Content 等标量字段值语义天然隔离）。
-func cloneMsgs(msgs []*schema.Message) []*schema.Message {
-	out := make([]*schema.Message, len(msgs))
-	for i, m := range msgs {
-		cp := *m
-		if len(m.ToolCalls) > 0 {
-			cp.ToolCalls = append([]schema.ToolCall(nil), m.ToolCalls...)
-		}
-		if len(m.Extra) > 0 { // T6：Extra map 一层拷贝——map 共享引用会被 sanitizeHistory 原地改写竞态（值只读不深拷，与 Messages 浅层纪律同款）
-			cp.Extra = make(map[string]any, len(m.Extra))
-			for k, v := range m.Extra {
-				cp.Extra[k] = v
-			}
-		}
-		out[i] = &cp
-	}
-	return out
-}
-
 // Run 执行一轮会话（同步阻塞至本轮结束/中断/错误；事件写出经 fn 回调）。
 // 调用方前置：State 已置 running；审批中断时本方法置 pending_approval 返回。
+// beginTurn 轮执行体装配（Run/Resume 共用——曾两处逐字复制：新增一个 ctx
+// 携带值漏改一处即续流路径行为分叉，恰落在审批续流这类测试最难覆盖面上）。
+// 契约值注入（工具层审计主体 = 当轮说话人——Run 起新轮、Resume 跨审批中断
+// 保留；文件变更记录；读图门禁；failover live 转发面）+ cancel 登记 + 收尾
+// （cancel / 摘登记 / RunFinished）。
+func (m *Manager) beginTurn(ctx context.Context, s *session.Session, fn emitFn) (context.Context, func()) {
+	runCtx, cancel := context.WithCancel(ctx)
+	runCtx = contract.WithOperator(runCtx, m.operatorOf(s))
+	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
+	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s))
+	runCtx = withEmitFn(runCtx, fn)
+	s.SetCancel(cancel)
+	return runCtx, func() {
+		cancel()
+		s.SetCancel(nil)
+		s.RunFinished()
+	}
+}
+
 // steering 排队兜底：上轮运行中排队的消息前置并入本轮输入。
 func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, atts []session.Attachment, fn emitFn) {
 	s.ClearTurnGrant()
@@ -741,17 +421,8 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 		s.SetTurnUserMsg(strings.Join(disp, "\n\n"))
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	runCtx = contract.WithOperator(runCtx, m.operatorOf(s)) // 工具层审计主体 = 当轮说话人（T6；回退 Owner 零变化）
-	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
-	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s)) // 读图工具门禁：会话模型明示能力
-	runCtx = withEmitFn(runCtx, fn)                               // failover 切换事件的 live 转发面
-	s.SetCancel(cancel)
-	defer func() {
-		cancel()
-		s.SetCancel(nil)
-		s.RunFinished()
-	}()
+	runCtx, endTurn := m.beginTurn(ctx, s, fn)
+	defer endTurn()
 
 	finish := m.finishOf(s)
 
@@ -770,6 +441,11 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 	iter, behaviors, err := m.runIter(runCtx, s, append(history, renderSpeakers(userMsgs)...)) // 当前轮消息同律投影
 	if err != nil {
 		m.emit(s, fn, contract.EvError, errToEvent(err, s))
+		// 中断保险同律（审查 P2-13）：装配失败（CONFIG 类——未配模型/不在清单/
+		// 构造失败）也保提问脉络——user_message 事件已落流而历史缺消息，用户
+		// 修好配置发「继续」时模型上下文里没有原问题。
+		s.AppendHistory(userMsgs...)
+		m.reg.Persist(s)
 		finish(session.StateError)
 		return
 	}
@@ -792,27 +468,18 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 func (m *Manager) Resume(ctx context.Context, s *session.Session, fn emitFn) {
 	stopApprovalTimer(s.SID)
 	if !s.BeginResume() {
-		m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: "SERVER",
+		m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: contract.ErrCodeServer,
 			Message: "会话无挂起可恢复（可能已被并发恢复或超时翻转）"})
 		return
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	runCtx = contract.WithOperator(runCtx, m.operatorOf(s)) // T6 当轮说话人（跨审批中断保留——Requester/审计连续）
-	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
-	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s))
-	runCtx = withEmitFn(runCtx, fn) // failover 切换事件的 live 转发面
-	s.SetCancel(cancel)
-	defer func() {
-		cancel()
-		s.SetCancel(nil)
-		s.RunFinished()
-	}()
+	runCtx, endTurn := m.beginTurn(ctx, s, fn)
+	defer endTurn()
 
 	finish := m.finishOf(s)
 	iter, behaviors, err := m.resumeIter(runCtx, s)
 	if err != nil {
-		m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: "SERVER", Message: "审批恢复失败：" + err.Error()})
+		m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: contract.ErrCodeServer, Message: "审批恢复失败：" + err.Error()})
 		finish(session.StateError)
 		return
 	}
@@ -825,12 +492,14 @@ func (m *Manager) Resume(ctx context.Context, s *session.Session, fn emitFn) {
 // 打断——排队消息随决议 Resume 注入）；等待有界：执行体不响应取消时 false
 // 让位（调用方报错，用户可重试或显式停止）。
 func (m *Manager) FlushQueue(s *session.Session) bool {
-	if s.StateOf() != session.StateRunning {
+	if s.StateOf() != session.StateRunning || s.Stopped() {
 		return false
 	}
 	s.MarkFlush()
 	s.CancelRun()
 	deadline := time.Now().Add(15 * time.Second)
+	retry := time.NewTimer(500 * time.Millisecond) // 复用 timer（每 500ms 新建 time.After 属卫生债）
+	defer retry.Stop()
 	exited := false
 	for !exited {
 		done := s.RunDone()
@@ -840,25 +509,26 @@ func (m *Manager) FlushQueue(s *session.Session) bool {
 		select {
 		case <-done:
 			exited = true
-		case <-time.After(500 * time.Millisecond):
+		case <-retry.C:
 			if time.Now().After(deadline) {
 				s.TakeFlushMark() // 让位：清残留标记（后续停止事件的形态不受污染）
 				return false
 			}
 			s.CancelRun() // 重发取消（执行体起跑竞态：cancel 尚未挂上的窗口兜底）
+			retry.Reset(500 * time.Millisecond)
 		}
 	}
 	// 自然收尾竞争（打断前已自行结束）：旧执行体不走中断路径，清残留标记；
 	// 等待期间排队消息被删空则无事可做——打断已发生，交正常发消息续聊
 	s.TakeFlushMark()
-	if s.QueueLen() == 0 {
+	if s.QueueLen() == 0 || s.Stopped() { // 停止竞态窗（Delete 并发）：不起死会话的空轮
 		return false
 	}
 	if !s.BeginRun("") {
 		return false
 	}
 	s.SetTurnActor(nil) // 系统接管轮：清陈旧说话人（排队消息自带 per-message 署名；operator 回退 Owner）
-	go m.Run(context.Background(), s, "", nil, func(session.Event) {})
+	go m.Run(context.Background(), s, "", nil, noopEmit)
 	return true
 }
 
@@ -875,17 +545,6 @@ func (m *Manager) turnEpilogue(s *session.Session) {
 		Owner: s.Owner, SID: s.SID, Title: s.TitleOf(), Task: s.TaskOf(),
 		Summary: s.SummaryOf(), Files: s.FileChangesSnapshot(), EndedAt: time.Now(),
 	})
-}
-
-// hasAssistant 历史中是否已有 assistant 终态（首轮判定——用户消息自 Run
-// 开头即入史，不能再以「历史为空」判首轮）。
-func hasAssistant(msgs []*schema.Message) bool {
-	for _, m := range msgs {
-		if m.Role == schema.Assistant {
-			return true
-		}
-	}
-	return false
 }
 
 // settleTurn 轮次收尾：自然结束 → 历史追加 + session_end + 终态落盘；
@@ -984,6 +643,26 @@ func init() {
 	}
 }
 
+// newShapedModel 会话模型构造链（FindSpec → NewModel → Vision → HistoryShape）
+// ——H1 出站整形口径（vision 图片引用解析/驱逐 + reasoning 剥离）在主模型/
+// 子代理/摘要/拓扑子/降级链五面同一包装序：单一实现防漂移（曾五处各写）。
+// what = 错误文案主体（「模型」「子代理模型」「摘要模型」…）；effort 由调用方
+// 持快照传入（PUT settings 并发写——不裸读 s.Model）。spec 回传（assemble 的
+// NoToolCalls 能力门控消费；其余调用方忽略）。
+func (m *Manager) newShapedModel(ctx context.Context, key, effort, what string) (model.BaseModel[*schema.Message], llm.ModelSpec, error) {
+	p, spec, ok := llm.FindSpec(m.Opt.Providers(), key)
+	if !ok {
+		return nil, spec, &configError{what + "不在可用清单内：" + key}
+	}
+	cm, err := m.Opt.NewModel(ctx, p, spec, effort)
+	if err != nil {
+		return nil, spec, &configError{what + "构造失败：" + err.Error()}
+	}
+	cm = llm.NewVisionModel(cm, spec, m.Opt.ImageResolve)
+	cm = llm.NewHistoryShapeModel(cm, p.Kind)
+	return cm, spec, nil
+}
+
 // assemble 模型解析 + agent 组装 + runner 构造（Run/Resume 共用）。
 func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatModelAgent, *adk.Runner, map[string]string, error) {
 	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发——本轮组装口径统一）
@@ -991,17 +670,14 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	if len(llm.FlattenModels(providers)) == 0 {
 		return nil, nil, nil, &configError{"未配置模型供应商——请先在模型页选择厂家并填 API Key 添加"}
 	}
-	p, spec, found := llm.FindSpec(providers, ms.Model)
-	if !found {
+	if _, _, found := llm.FindSpec(providers, ms.Model); !found {
 		return nil, nil, nil, &configError{"模型不在可用清单内：" + ms.Model + "（模型页检查配置）"}
 	}
 	s.NoteModelCall(ms.Model) // 调用边界比对：与上次实际调用不同才落切换注记（选择器切换不落）
-	cm, err := m.Opt.NewModel(ctx, p, spec, ms.Effort)
+	cm, spec, err := m.newShapedModel(ctx, ms.Model, ms.Effort, "模型")
 	if err != nil {
-		return nil, nil, nil, &configError{"模型构造失败：" + err.Error()}
+		return nil, nil, nil, err
 	}
-	cm = llm.NewVisionModel(cm, spec, m.Opt.ImageResolve) // 图片引用解析/驱逐/门禁（请求边界）
-	cm = llm.NewHistoryShapeModel(cm, p.Kind)             // reasoning 出站整形（请求边界，H1①）
 	agConf := &adk.ChatModelAgentConfig{
 		Instruction:         m.Opt.Instruction(m.briefOf(s)),
 		Model:               cm,
@@ -1054,10 +730,7 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	// 自动追加。应用不注入 Policy = 全量常驻，零变化。
 	var searchMW adk.ChatModelAgentMiddleware
 	if pol := m.Opt.ToolSearchPolicy; pol != nil && len(face) > 0 {
-		dyn := map[string]bool{}
-		for _, n := range pol.DynamicTools {
-			dyn[n] = true
-		}
+		dyn := dynamicToolSet(pol)
 		staticFace := make([]tool.BaseTool, 0, len(face))
 		var dynamicFace []tool.BaseTool
 		for _, t := range face {
@@ -1091,11 +764,8 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		}
 		var dyn map[string]bool
 		if pol := m.Opt.ToolSearchPolicy; pol != nil {
-			dyn = make(map[string]bool, len(pol.DynamicTools))
-			for _, n := range pol.DynamicTools {
-				dyn[n] = true
-				known = append(known, n)
-			}
+			dyn = dynamicToolSet(pol)
+			known = append(known, pol.DynamicTools...)
 		}
 		tc := adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
 			Tools: face, UnknownToolsHandler: newUnknownToolHandler(known, dyn),
@@ -1178,9 +848,11 @@ func (m *Manager) wrapFace(ts []contract.Tool, s *session.Session, mode string) 
 }
 
 // imageCapableOf 会话模型是否声明图片输入（read_image 工具门禁——当前路由
-// 明示能力才放行，对齐官方 harness 的路由能力断言：未知即拒）。
+// 明示能力才放行，对齐官方 harness 的路由能力断言：未知即拒）。持锁快照
+// （PUT settings 随时写并发——与 assemble/briefOf 同纪律，不裸读 s.Model）。
 func (m *Manager) imageCapableOf(s *session.Session) bool {
-	_, spec, ok := llm.FindSpec(m.Opt.Providers(), s.Model.Model)
+	ms := s.ModelSnapshot()
+	_, spec, ok := llm.FindSpec(m.Opt.Providers(), ms.Model)
 	return ok && llm.SupportsImage(spec)
 }
 
@@ -1226,470 +898,4 @@ func (m *Manager) modelRetryConfig() *adk.ModelRetryConfig {
 			return &adk.RetryDecision{Retry: true} // 退避走 eino 默认（指数+抖动）
 		},
 	}
-}
-
-// errToEvent 错误分类（CONFIG/SERVER/AUTH/RATE_LIMIT/TRANSPORT）。
-func errToEvent(err error, s *session.Session) contract.ErrorOut {
-	if s.Stopped() {
-		return contract.ErrorOut{}
-	}
-	var ce *configError
-	if errors.As(err, &ce) {
-		return contract.ErrorOut{Code: "CONFIG", Message: ce.msg}
-	}
-	return errCard(err)
-}
-
-// unwrapRetryExhausted 展开重试耗尽（分类/文案落点回到末次真实错误）。
-func unwrapRetryExhausted(err error) error {
-	var re *adk.RetryExhaustedError
-	if errors.As(err, &re) {
-		return re.LastErr
-	}
-	return err
-}
-
-// emitTransportRetry 重连通知（WillRetryError 的 0 基失败序 → 1 基重连序）。
-// 耗尽前的最后一次失败信号不发通知——错误卡随后即到，避免「N+1/N」越界提示。
-func (m *Manager) emitTransportRetry(s *session.Session, fn emitFn, wr *adk.WillRetryError) {
-	if n := wr.RetryAttempt + 1; n <= llm.MaxRetries {
-		m.emit(s, fn, contract.EvTransportRetry, contract.TransportRetry{Attempt: n, Max: llm.MaxRetries})
-	}
-}
-
-// errCard 分类驱动的错误卡（网络容错 ③）：重试耗尽先展开末次真实错误；
-// 文案 = 分类器中文信息（含重试注记）。
-func errCard(err error) contract.ErrorOut {
-	var re *adk.RetryExhaustedError
-	if errors.As(err, &re) {
-		c := llm.Classify(re.LastErr)
-		return contract.ErrorOut{Code: c.Code, Message: truncateRunes(
-			fmt.Sprintf("%s（已自动重试 %d 次）", c.Message, re.TotalRetries), 200)}
-	}
-	c := llm.Classify(err)
-	return contract.ErrorOut{Code: c.Code, Message: truncateRunes(c.Message, 200)}
-}
-
-// pump 事件泵：迭代 runner 事件 → 契约事件分类（Run/Resume 共用）。
-// 返回 (本轮累积, 终态, 终态模型错误)：StatePendingApproval = 审批挂起
-// （调用方不收尾）；endState 空 = 静默收线（停止/断连）。est = 上下文分类
-// 估算（usage 事件用）。第三返回值非空 ⟺ OVERFLOW 类终态错误且未发卡
-// （其余终态错误就地发卡后归零——超窗裁决权在上层 pumpWithOverflow）。
-func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEvent], fn emitFn, est ctxEstimates, behaviors map[string]string) (*runAccum, string, error) {
-	acc := &runAccum{}
-	endState := session.StateEnded
-	subCalls := map[string]string{} // 子代理 callID → 工具名（EvSubAgent tool_result 契约语义=工具名，配对回填）
-	for {
-		ev, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if ev.Err != nil {
-			if s.Stopped() {
-				return nil, "", nil // 删除：静默（磁盘零残留）
-			}
-			if errors.Is(ev.Err, context.Canceled) {
-				m.interruptUnlessStopped(s, fn) // 断连/停止：中断收尾
-				return nil, "", nil
-			}
-			var wr *adk.WillRetryError
-			if errors.As(ev.Err, &wr) {
-				// 网络容错 ②：重试在途（Generate 路径的事件化形态——流式路径
-				// 的半截处理在 handleOutput）：非故障，通知 + 继续泵
-				m.emitTransportRetry(s, fn, wr)
-				continue
-			}
-			// 轮次耗尽：不是故障是预算——历史已入史（中断保险），发消息即可以
-			// 全新预算接续；裸抛 NodeRunError 用户无从知道能继续
-			if errors.Is(ev.Err, adk.ErrExceedMaxIterations) {
-				m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: "SERVER", Message: fmt.Sprintf(
-					"本轮模型调用轮次已达上限（%d）——任务暂停而非失败，发送消息（如「继续」）即可接续执行",
-					maxIterations)})
-				endState = session.StateError
-				break
-			}
-			// 超窗：不在泵面发卡——交 pumpWithOverflow 裁剪重装配裁决
-			//（rerr 非空 ⟺ 超窗未发卡；其余终态错误就地发卡后归零）
-			if llm.Classify(unwrapRetryExhausted(ev.Err)).Code == llm.CodeOverflow {
-				return acc, session.StateError, ev.Err
-			}
-			m.emit(s, fn, contract.EvError, errCard(ev.Err))
-			endState = session.StateError
-			break
-		}
-		if ev.Action != nil && ev.Action.Interrupted != nil {
-			// ask_user 提问中断（askuser 工具发起）：发 ask_user_request → 挂起态
-			// 落盘 → 流收线（answer 端点 Resume 续流）——与审批同通道。
-			if card, ok := askCardOf(ev.Action.Interrupted); ok && card.Question != "" {
-				askID := newAskID()
-				timeoutAt := time.Now().Add(ApprovalTimeout())
-				m.emit(s, fn, contract.EvAskRequest, contract.AskReq{
-					AskID: askID, Question: card.Question, Options: card.Options,
-					AllowMulti: card.AllowMulti, AllowFreeText: card.AllowFreeText, TimeoutAt: timeoutAt,
-				})
-				s.SetPendingApproval(askID)
-				// 挂起轮已产出段先入史（与审批同因：批准后 Resume 的 tool 结果
-				// 须接在其后才是完整序列）
-				acc.endAssistantMsg()
-				if len(acc.msgs) > 0 {
-					s.AppendHistory(acc.msgs...)
-				}
-				m.startApprovalTimer(s, askID, timeoutAt, "ask")
-				m.finishOf(s)(session.StatePendingApproval)
-				return acc, session.StatePendingApproval, nil
-			}
-			// 计划提交中断（plan 工具发起）：发 plan_request → 挂起态落盘 → 流
-			// 收线（approve 端点按 pending_kind=plan 分叉回执，Resume 续流）。
-			// 文档已由工具先落盘（跨重启在盘），此处只挂起等审批。
-			if card, ok := planCardOf(ev.Action.Interrupted); ok && card.Task != "" {
-				planID := newPlanID()
-				timeoutAt := time.Now().Add(ApprovalTimeout())
-				m.emit(s, fn, contract.EvPlanRequest, contract.PlanReq{
-					PlanID: planID, Task: card.Task, Summary: card.Summary, Steps: card.Steps,
-					Risks: card.Risks, Path: card.Path, Seq: card.Seq, Mode: card.Mode, TimeoutAt: timeoutAt,
-				})
-				s.ClearTaskGrant() // 新计划提交 = 任务改向，旧任务期授权作废（批准后重新授予）
-				s.SetPendingApproval(planID)
-				acc.endAssistantMsg()
-				if len(acc.msgs) > 0 {
-					s.AppendHistory(acc.msgs...)
-				}
-				m.startApprovalTimer(s, planID, timeoutAt, "plan")
-				m.finishOf(s)(session.StatePendingApproval)
-				return acc, session.StatePendingApproval, nil
-			}
-			// 审批中断（写工具 wrapper 发起）：聚合发一卡（H4-2 合并决议——一轮
-			// 并行写调用的全部审批上下文收进一张 EvApprovalRequest N 项）→ 挂起态
-			// 落盘 → 流收线（approve 端点批量决议 Resume 续流）。checkpoint 已由
-			// runner 保存。
-			if cards := approvalCardsOf(ev.Action.Interrupted); len(cards) > 0 {
-				appID := newApprovalID()
-				timeoutAt := time.Now().Add(ApprovalTimeout())
-				req := contract.ApprovalReq{ApprovalID: appID, TimeoutAt: timeoutAt}
-				// T6 审批身份链：谁的动作（当轮说话人；回退 Owner ID——
-				//「问谁」路由与审计「这条指令谁下的」的数据前提）
-				if a := s.TurnActorOf(); a != nil {
-					req.RequesterID, req.RequesterName = a.ID, a.Name
-				} else {
-					req.RequesterID = s.Owner
-				}
-				// T6 路由：问谁（应用判据裁决；目标随卡 + 入 pending target）
-				s.SetPendingTarget("")
-				if m.Opt.ApprovalRouter != nil {
-					if tgt := m.Opt.ApprovalRouter(m.briefOf(s), req); tgt != nil && tgt.ID != "" {
-						req.TargetID, req.TargetName = tgt.ID, tgt.Name
-						s.SetPendingTarget(tgt.ID)
-					}
-				}
-				ids := make([]string, 0, len(cards))
-				for _, c := range cards {
-					ids = append(ids, c.ItemID)
-					req.Items = append(req.Items, contract.ApprovalItem{
-						ItemID: c.ItemID, Tool: c.Tool, Action: c.Action, Plan: c.Plan,
-						PlanMode: c.PlanMode, Note: c.Note, Diff: c.Diff,
-						RequesterID: req.RequesterID, RequesterName: req.RequesterName, // T6 逐项署名（同轮同 actor）
-					})
-				}
-				// 顶层旧字段 = 首项镜像（旧回放/旧前端按 N=1 单卡渲染——兼容）
-				req.Tool, req.Action, req.Plan = cards[0].Tool, cards[0].Action, cards[0].Plan
-				req.PlanMode, req.Note, req.Diff = cards[0].PlanMode, cards[0].Note, cards[0].Diff
-				m.emit(s, fn, contract.EvApprovalRequest, req)
-				s.SetPendingApproval(appID)
-				s.SetPendingItems(ids) // 超时批量拒 / 端点覆盖校验依据
-				// 挂起轮已产出段（assistant(tool_calls)）先入史——批准后 Resume 的
-				// tool 结果接在其后才是完整序列；丢弃则批准结果成孤儿 tool 消息，
-				// 续聊回传即 400。超时无人续：悬空 tool_calls 由 sanitizeHistory 剥离。
-				acc.endAssistantMsg()
-				if len(acc.msgs) > 0 {
-					s.AppendHistory(acc.msgs...)
-				}
-				m.startApprovalTimer(s, appID, timeoutAt, "approval")
-				m.finishOf(s)(session.StatePendingApproval)
-				return acc, session.StatePendingApproval, nil
-			}
-		}
-		// H8-2 全量转发档：子代理内部事件（AgentName 非空 = 子 agent——父
-		// agent 除 supervisor 形态外不命名，spawn 与拓扑子 agent 均在内；
-		// supervisorMainName 是主 agent 本体（transfer 转回寻址用），排除后
-		// 其输出仍走父主流/父历史；ToolsConfig.EmitInternalEvents 开启时
-		// agent_tool 转发到父流）翻译为 EvSubAgent 只读流——不进父上下文/
-		// 主流（官方注释实证：转发件不入父 runSession；非空名一并拦截，堵
-		// 拓扑子事件落穿误入父历史）。
-		if m.subEventsOn() && ev.AgentName != "" && ev.AgentName != supervisorMainName &&
-			ev.Action == nil && ev.Output != nil && ev.Output.MessageOutput != nil {
-			m.emitSubAgent(s, fn, ev.AgentName, subCalls, ev.Output.MessageOutput, "", nil)
-			continue
-		}
-		if ev.Output == nil || ev.Output.MessageOutput == nil {
-			continue
-		}
-		if stop, terr := m.handleOutput(s, fn, acc, ev.Output.MessageOutput, est, behaviors); stop != outContinue {
-			// 已删除/断连：删除静默，断连中断收尾；传输致命：错误卡已发，
-			// 立即收线 error 态（不再赌下一次 iter.Next 送错——事件层客户
-			// 副本被中途弃读后内部管线可能互等，即「卡 running」旧病根）
-			if stop == outDeleted {
-				m.interruptUnlessStopped(s, fn)
-				return nil, "", nil
-			}
-			if stop == outOverflow {
-				return acc, session.StateError, terr // 超窗未发卡：交 pumpWithOverflow 裁决
-			}
-			endState = session.StateError
-			break
-		}
-	}
-	if s.Stopped() {
-		return nil, "", nil
-	}
-	return acc, endState, nil
-}
-
-// interruptUnlessStopped 断连/停止收尾（删除会话静默跳过）：翻中断终态 +
-// 事件 + 落盘——不留 running 僵尸。覆盖页面关闭/刷新/停止按钮。审批挂起
-// （pending_approval）不受影响——那是有意的跨页面等待，超时器兜底。
-// FlushQueue 的打断走 interrupted 行（非故障形态——紧跟的新一轮以排队消息
-// 为输入）。打断语义告知（codex interrupted marker 对位）：中断轮的历史追
-// 加一条系统注记——模型续聊时知晓打断语境与「工具可能部分执行」语义，不
-// 假设中断前操作都已成功。
-func (m *Manager) interruptUnlessStopped(s *session.Session, fn emitFn) {
-	if s.Stopped() {
-		return
-	}
-	if s.TakeFlushMark() {
-		m.appendInterruptMarker(s)
-		m.emit(s, fn, contract.EvInterrupted, contract.InterruptOut{Message: "已打断当前任务，立即处理排队消息"})
-		m.finishOf(s)(session.StateError)
-		return
-	}
-	m.appendInterruptMarker(s)
-	m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: "ABORTED", Message: "手动停止，任务中断（已执行的操作不回滚）"})
-	m.finishOf(s)(session.StateError)
-}
-
-// appendInterruptMarker 打断历史标记（部分执行语义三义：被打断/后台进程可
-// 能仍在跑/工具可能部分执行——续聊轮的模型可见面；悬空 tool_call 的配对
-// 修补归 timers/sanitizeHistory，此处只补语义告知半边）。
-func (m *Manager) appendInterruptMarker(s *session.Session) {
-	s.AppendHistory(schema.UserMessage(
-		"（系统注记）上一轮执行被中断：部分工具调用可能未完成或未生效，后台进程可能仍在运行。" +
-			"继续任务前先用只读工具核对现场（文件状态/后台任务输出），不要假设中断前的操作都已成功。"))
-	m.reg.Persist(s)
-}
-
-// summaryOf 取列表摘要。
-func summaryOf(s *session.Session) string { return s.SummaryOf() }
-
-// outVerdict handleOutput 处置判定。
-type outVerdict int
-
-const (
-	outContinue outVerdict = iota // 继续泵
-	outDeleted                    // 会话已删：静默弃（调用方 interruptUnlessStopped 兜删除分支）
-	outFatal                      // 传输致命：错误卡已发，立即收线 error 态
-	outOverflow                   // 上下文超窗：未发卡，错误经第二返回值上交（pumpWithOverflow 裁决）
-)
-
-// handleOutput 单事件分类。est = 上下文分类估算（usage 事件载荷）。
-// 返回值：outContinue 继续泵；outDeleted 会话已删（调用方静默弃）；
-// outFatal 传输致命（错误卡已发，调用方立即收线 error 态）；outOverflow
-// 超窗未发卡（错误随第二返回值上交——裁剪重装配归 pumpWithOverflow）。
-func (m *Manager) handleOutput(s *session.Session, fn emitFn, acc *runAccum, v *adk.TypedMessageVariant[*schema.Message], est ctxEstimates, behaviors map[string]string) (outVerdict, error) {
-	switch v.Role {
-	case schema.Tool:
-		// 工具结果（streaming 时拼装完整内容；digest 截断）
-		var content, callID string
-		if v.IsStreaming && v.MessageStream != nil {
-			var b strings.Builder
-			for {
-				chunk, err := v.MessageStream.Recv()
-				if err != nil {
-					break
-				}
-				if chunk != nil {
-					b.WriteString(chunk.Content)
-					if chunk.ToolCallID != "" {
-						callID = chunk.ToolCallID
-					}
-				}
-			}
-			content = b.String()
-		} else if v.Message != nil {
-			content = v.Message.Content
-			callID = v.Message.ToolCallID
-		}
-		if s.Stopped() {
-			return outDeleted, nil
-		}
-		ok, digest, preview := mid.ToolResultDigest(content) // 语义摘要 + 原始头（展开用）
-		var cr struct {
-			Counts string `json:"counts"`
-			Verb   string `json:"verb"`
-		}
-		_ = json.Unmarshal([]byte(content), &cr) // B4 信封提取（无键的工具零值省略）
-		m.emit(s, fn, contract.EvToolResult, contract.ToolResult{CallID: callID, OK: ok, Digest: digest, Preview: preview, Counts: cr.Counts, Verb: cr.Verb})
-		acc.addToolResult(callID, content) // 入史：assistant(tool_calls) 须紧跟 tool 结果，缺失回传即 400
-		m.reg.Persist(s)                   // 工具边界节流落盘（C2）：轮内崩溃不丢已完工具轮——频率有界（工具调用数）、单文件全量格式不变
-		return outContinue, nil
-
-	case schema.Assistant:
-		if v.IsStreaming && v.MessageStream != nil {
-			for {
-				chunk, err := v.MessageStream.Recv()
-				if err != nil {
-					if errors.Is(err, io.EOF) {
-						break
-					}
-					if s.Stopped() || errors.Is(err, context.Canceled) {
-						return outDeleted, nil
-					}
-					var wr *adk.WillRetryError
-					if errors.As(err, &wr) {
-						// 网络容错 ②：传输类已分类可重试，adk 在模型调用边界内
-						// 重启本次调用。失败尝试的半截增量已实时转发到事件流（eino
-						// 协议：客户端自行 reset）——丢弃半截段（不入史）+ 通知
-						// 前端回卷显示；重试尝试的新流作为下一事件自然到达。
-						m.emitTransportRetry(s, fn, wr)
-						acc.discardSeg()
-						return outContinue, nil
-					}
-					// 超窗：不发卡——交 pumpWithOverflow 裁剪重装配裁决（与
-					// ev.Err 分支同纪律）
-					if llm.Classify(unwrapRetryExhausted(err)).Code == llm.CodeOverflow {
-						return outOverflow, err
-					}
-					// 致命（欠费/认证/参数错/重试耗尽/未知）：分类错误卡 + 立即收线
-					m.emit(s, fn, contract.EvError, errCard(err))
-					return outFatal, nil
-				}
-				if chunk == nil {
-					continue
-				}
-				if chunk.ResponseMeta != nil {
-					m.emitUsage(s, fn, chunk.ResponseMeta.Usage, est, "")
-				}
-				if chunk.ReasoningContent != "" {
-					acc.addThinking(chunk.ReasoningContent)
-					m.emit(s, fn, contract.EvThinkingDelta, contract.Delta{Delta: chunk.ReasoningContent})
-				}
-				if chunk.Content != "" {
-					acc.addText(chunk.Content)
-					m.emit(s, fn, contract.EvTextDelta, contract.Delta{Delta: chunk.Content})
-				}
-				for _, tc := range chunk.ToolCalls {
-					acc.addToolCall(tc) // 分片归并（首片带 id/name，续片仅 arguments 增量）
-				}
-				if s.Stopped() {
-					return outDeleted, nil
-				}
-			}
-			// 工具调用事件在消息段收口后发：arguments 分片此时归并完整——
-			// 流中首片发事件只能拿到残缺 JSON，参数摘要（ArgsDigest）必失真
-			for _, tc := range acc.toolCalls {
-				m.emit(s, fn, contract.EvToolCall, contract.ToolCall{CallID: tc.ID, Tool: tc.Function.Name, ArgsDigest: mid.ToolArgsDigest(tc.Function.Arguments), Behavior: behaviors[tc.Function.Name]})
-			}
-			acc.endAssistantMsg()
-			return outContinue, nil
-		}
-		// 非流式完整消息
-		msg := v.Message
-		if msg == nil {
-			return outContinue, nil
-		}
-		if msg.ResponseMeta != nil {
-			m.emitUsage(s, fn, msg.ResponseMeta.Usage, est, "")
-		}
-		if msg.ReasoningContent != "" {
-			acc.addThinking(msg.ReasoningContent)
-			m.emit(s, fn, contract.EvThinkingDelta, contract.Delta{Delta: msg.ReasoningContent})
-		}
-		if msg.Content != "" {
-			acc.addText(msg.Content)
-			m.emit(s, fn, contract.EvTextDelta, contract.Delta{Delta: msg.Content})
-		}
-		for _, tc := range msg.ToolCalls {
-			acc.addToolCall(tc)
-			m.emit(s, fn, contract.EvToolCall, contract.ToolCall{CallID: tc.ID, Tool: tc.Function.Name, ArgsDigest: mid.ToolArgsDigest(tc.Function.Arguments), Behavior: behaviors[tc.Function.Name]})
-		}
-		acc.endAssistantMsg()
-		return outContinue, nil
-
-	default:
-		return outContinue, nil
-	}
-}
-
-// accText 累积文本（nil 防御）。
-func accText(a *runAccum) string {
-	if a == nil {
-		return ""
-	}
-	return a.text
-}
-
-// genTitle 首轮收尾后异步生成会话标题（≤16 字中文，直接输出）：会话模型快照 +
-// effort low（标题是短生成，固定低档思考）+ 15s 超时；失败/超时/已删除断路，
-// 列表 title = Title || Task 回退。
-func (m *Manager) genTitle(s *session.Session, userMsg, assistant string) {
-	if strings.TrimSpace(userMsg) == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	providers := m.Opt.Providers()
-	p, spec, ok := llm.FindSpec(providers, s.ModelSnapshot().Model) // 持锁快照（PUT settings 随时写并发）
-	if !ok {
-		return
-	}
-	cm, err := m.Opt.NewModel(ctx, p, spec, "low")
-	if err != nil {
-		return
-	}
-	speaker := "用户" // T6 说话人措辞（单用户零变化）
-	if a := s.TurnActorOf(); a != nil && a.Name != "" {
-		speaker = a.Name
-	}
-	prompt := "为下面的任务对话生成一个不超过16个字的中文标题，直接输出标题本身，不要引号、句号或任何解释。\n\n" +
-		speaker + "：" + truncateRunes(userMsg, 2000) + "\n\n助手：" + truncateRunes(assistant, 500)
-	out, err := cm.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)})
-	if err != nil || s.Stopped() {
-		return
-	}
-	title := sanitizeTitle(out.Content)
-	if title == "" {
-		return
-	}
-	s.SetTitle(title)
-	m.reg.Persist(s)
-}
-
-// sanitizeTitle 标题清洗：单行、去引号包裹与句读、截 16 字。
-func sanitizeTitle(in string) string {
-	in = strings.ReplaceAll(in, "\n", " ")
-	for _, q := range []string{"\"", "'", "“", "”", "‘", "’", "「", "」", "『", "』", "《", "》"} {
-		in = strings.ReplaceAll(in, q, "")
-	}
-	in = strings.TrimSpace(in)
-	in = strings.Trim(in, "。．.…！!？?；;，, ")
-	return truncateRunes(in, 16)
-}
-
-// truncateRunes 截断加省略号。
-func truncateRunes(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}
-
-// DayHeader 通用日期头（提示词机制件——业务段拼装归应用，自产品
-// instruction.go 的日期头拆出）。
-func DayHeader(now time.Time) string {
-	off := (int(now.Weekday()) + 6) % 7 // ISO 周以周一为首
-	_, w := now.ISOWeek()
-	return fmt.Sprintf("今天是 %s %s（%s，本周 %s 至 %s）。",
-		now.Format("2006-01-02"),
-		[...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}[int(now.Weekday())],
-		fmt.Sprintf("W%02d", w),
-		now.AddDate(0, 0, -off).Format("2006-01-02"),
-		now.AddDate(0, 0, 6-off).Format("2006-01-02"))
 }

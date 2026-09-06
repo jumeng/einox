@@ -24,22 +24,17 @@ import (
 	"github.com/jumeng/einox/session"
 )
 
-// modelChain 复合键清单 → 同链包装模型链（NewModel + vision + shape——与主
-// 模型/摘要模型同一包装序，出站整形口径不因降级漂移）。摘要侧（summarize.go）
-// 与主模型侧共用。
+// modelChain 复合键清单 → 同链包装模型链（newShapedModel 逐键构造——包装序
+// 与主模型/摘要模型/子面同源单点，出站整形口径不因降级漂移）。摘要侧
+// （summarize.go）与主模型侧共用。
 func (m *Manager) modelChain(ctx context.Context, s *session.Session, keys []string, what string) ([]model.BaseModel[*schema.Message], error) {
+	effort := s.ModelSnapshot().Effort // 持锁快照（PUT settings 随时写并发）
 	chain := make([]model.BaseModel[*schema.Message], 0, len(keys))
 	for _, key := range keys {
-		p, spec, ok := llm.FindSpec(m.Opt.Providers(), key)
-		if !ok {
-			return nil, &configError{what + "降级模型不在可用清单内：" + key}
-		}
-		cm, err := m.Opt.NewModel(ctx, p, spec, s.Model.Effort)
+		cm, _, err := m.newShapedModel(ctx, key, effort, what+"降级")
 		if err != nil {
-			return nil, &configError{what + "降级模型构造失败：" + err.Error()}
+			return nil, err
 		}
-		cm = llm.NewVisionModel(cm, spec, m.Opt.ImageResolve)
-		cm = llm.NewHistoryShapeModel(cm, p.Kind)
 		chain = append(chain, cm)
 	}
 	return chain, nil

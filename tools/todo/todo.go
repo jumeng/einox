@@ -93,6 +93,4 @@ func run(cfg Config, in writeIn) (map[string]any, error) {
 	return map[string]any{"ok": true, "todos": in.Todos, "count": len(in.Todos), "completed": done}, nil
 }
 
-func fail(msg string) (map[string]any, error) {
-	return map[string]any{"ok": false, "error": msg}, nil // 回喂模型自纠（errFeed 语义）
-}
+func fail(msg string) (map[string]any, error) { return tools.Fail(msg), nil } // 信封单点（tools.Fail——审查 P2-11）

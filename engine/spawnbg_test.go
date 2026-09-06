@@ -1,6 +1,6 @@
 package engine
 
-// Phase W 后台派生回归（B 方案 B-1~B-10 用例；方案 = findings/2026-08-28-
+// Phase W 后台派生回归（B 方案 B-1~B-10 用例；方案 = 定案《2026-08-28》-
 // background-spawn-plan.md）。覆盖：即回 agentId / 完成通知注入（running 排队
 // 与 idle 自续两路）/ spawn_id 会话域唯一与回放兼容零值 / 取消传播（停止全停）
 // / ArgsForce fail-closed（hitl bg 档）/ 自激护栏（连续自续预算）与停止终态
@@ -142,7 +142,7 @@ func TestBgSpawnImmediateReturnAndKey(t *testing.T) {
 		t.Fatalf("父回合应正常收口（B-1），终态 %s", s.StateOf())
 	}
 	// 父第 2 调的 tool 消息 = agentId JSON（即回）
-	over := toolMsgOf(fm.inputs[len(fm.inputs)-1])
+	over := toolMsgOf(lastInput(fm))
 	if len(over) == 0 || !strings.Contains(over[0], `"status":"background"`) || !strings.Contains(over[0], `"spawn_id":"sp1"`) {
 		t.Fatalf("background 工具结果应即回 agentId JSON（B-1），实得 %v", over)
 	}
@@ -244,7 +244,7 @@ func TestBgNotifyQueuedWhileRunning(t *testing.T) {
 	if !injected {
 		t.Fatal("应落 notify_injected 翻态回执")
 	}
-	last := fm.inputs[len(fm.inputs)-1]
+	last := lastInput(fm)
 	found := false
 	for _, msg := range last {
 		if msg.Role == schema.User && strings.Contains(msg.Content, "共 3 文件") {
@@ -268,18 +268,12 @@ func TestBgNotifyIdleContinues(t *testing.T) {
 	m.NotifyOwner(s, "[后台子代理完成] 勘察\n结论：\n迁移清单 5 项")
 	// 等自续轮真实发生（模型调用数增长——state 会先翻 running 再回 ended，
 	// 等 ended 的写法会被初始 ended 态立即误过——首跑实证）
-	fm.mu.Lock()
-	base := len(fm.inputs)
-	fm.mu.Unlock()
+	base := len(fm.inputsOf())
 	waitFor(t, "自续轮模型调用发生", func() bool {
-		fm.mu.Lock()
-		defer fm.mu.Unlock()
-		return len(fm.inputs) > base
+		return len(fm.inputsOf()) > base
 	})
 	waitFor(t, "自续轮收口", func() bool { return s.StateOf() == session.StateEnded })
-	fm.mu.Lock()
-	last := fm.inputs[len(fm.inputs)-1]
-	fm.mu.Unlock()
+	last := lastInput(fm)
 	found := false
 	for _, msg := range last {
 		if msg.Role == schema.User && strings.Contains(msg.Content, "迁移清单 5 项") {
@@ -429,8 +423,8 @@ func TestBgNotifyTailErrorTerminal(t *testing.T) {
 	if s.QueueLen() != 1 {
 		t.Fatalf("error 终态通知应只入队（下轮用户交互消费），队列 %d", s.QueueLen())
 	}
-	if len(fm.inputs) != 0 {
-		t.Fatalf("不应发生任何模型调用，实得 %d", len(fm.inputs))
+	if len(fm.inputsOf()) != 0 {
+		t.Fatalf("不应发生任何模型调用，实得 %d", len(fm.inputsOf()))
 	}
 }
 

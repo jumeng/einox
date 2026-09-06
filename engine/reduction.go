@@ -9,7 +9,7 @@ package engine
 // 失效）；模型面路径 = spill/ 虚拟前缀，fsutil read_file 同前缀路由取回。
 // TokenCounter 按整形后出站口径（llm.ShapeMessages 后计数——默认计数器
 // 无条件计 ReasoningContent，真源口径高估约一倍致 clear 提前触发白破缓存）。
-// 规约 = 设计基线 findings/2026-08-26-einox-harness-multiagent-design.md §2.1。
+// 规约 = 2026-08-26 harness 多 agent 设计基线 §2.1。
 
 import (
 	"context"
@@ -112,13 +112,7 @@ func spillPathGen(kind string) func(context.Context, *reduction.ToolDetail) (str
 func shapedTokenCounter(_ context.Context, msgs []*schema.Message, tools []*schema.ToolInfo) (int64, error) {
 	n := 0
 	for _, m := range llm.ShapeMessages(msgs) {
-		if m == nil {
-			continue
-		}
-		n += estTokens(msgTextOf(m)) + estTokens(m.ReasoningContent) + 8
-		for _, tc := range m.ToolCalls {
-			n += estTokens(tc.Function.Name) + estTokens(tc.Function.Arguments)
-		}
+		n += msgTokenEst(m)
 	}
 	for _, t := range tools {
 		n += estTokens(t.Name) + estTokens(t.Desc)

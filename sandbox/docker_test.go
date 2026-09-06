@@ -1,6 +1,6 @@
 package sandbox
 
-// DockerProvider argv 映射回归（设计真源 findings/2026-08-29-assembly-seams-
+// DockerProvider argv 映射回归（设计真源 定案《2026-08-29》-assembly-seams-
 // design.md §4；策略翻译表见 docker.go 头注）。纯构造测试——不依赖 docker
 // daemon（Wrap 的探测门与一次性容器真实执行归部署机验证）。
 

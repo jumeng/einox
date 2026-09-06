@@ -1,6 +1,6 @@
 package engine
 
-// 收束质量门回归（findings §10 分层修订版——einox 层=门循环机制）：
+// 收束质量门回归（2026-08-29 能力加固定案 §10 分层修订版——einox 层=门循环机制）：
 // 门过直通；门拒回灌（反馈入史、门卡通知、修复后过）；重试耗尽诚实报错
 // （不静默放行）；挂起/错误轮不触发；checker panic fail-closed；nil 零变化。
 
@@ -26,7 +26,7 @@ func TestGatePassDirect(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(SessionBrief) *GateConfig {
 			return &GateConfig{Checkers: []GateChecker{
 				func(context.Context, string) error { calls.Add(1); return nil },
@@ -61,7 +61,7 @@ func TestGateFailReinjectThenPass(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		send(&schema.Message{Role: schema.Assistant, Content: "修好了"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(SessionBrief) *GateConfig {
 			return &GateConfig{MaxRetries: 2, Checkers: []GateChecker{func(_ context.Context, _ string) error {
 				if calls.Add(1) == 1 {
@@ -87,7 +87,7 @@ func TestGateFailReinjectThenPass(t *testing.T) {
 	}
 	// 回灌反馈必须出现在第二轮模型输入（反馈驱动修复的直接证据）
 	found := false
-	for _, in := range fm.inputs {
+	for _, in := range fm.inputsOf() {
 		for _, msg := range in {
 			if msg.Role == schema.User && strings.Contains(msg.Content, "质量门未过") &&
 				strings.Contains(msg.Content, "构建失败") {
@@ -96,7 +96,7 @@ func TestGateFailReinjectThenPass(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("回灌反馈应出现在后续模型输入（共 %d 次调用）", len(fm.inputs))
+		t.Fatalf("回灌反馈应出现在后续模型输入（共 %d 次调用）", len(fm.inputsOf()))
 	}
 	gateCard := false
 	for _, ev := range s.SnapshotEvents() {
@@ -118,7 +118,7 @@ func TestGateExhaustsHonestError(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		send(&schema.Message{Role: schema.Assistant, Content: "还是不行"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(SessionBrief) *GateConfig {
 			return &GateConfig{MaxRetries: 1, Checkers: []GateChecker{
 				func(context.Context, string) error { calls.Add(1); return errors.New("测试未过：断言失败") },
@@ -185,7 +185,7 @@ func TestGateSkipsOnNonNaturalEnd(t *testing.T) {
 
 	// 错误轮：致命错误 → 门不触发
 	calls.Store(0)
-	m2 := newSeamManager(t, func(o *Options) {
+	m2 := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(SessionBrief) *GateConfig {
 			return &GateConfig{Checkers: []GateChecker{
 				func(context.Context, string) error { calls.Add(1); return nil },
@@ -211,7 +211,7 @@ func TestGateCheckerPanicFailClosed(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		send(&schema.Message{Role: schema.Assistant, Content: "试试"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(SessionBrief) *GateConfig {
 			return &GateConfig{MaxRetries: 1, Checkers: []GateChecker{
 				func(context.Context, string) error { calls.Add(1); panic("checker 崩了") },
@@ -241,7 +241,7 @@ func TestGateReinjectAssembleFailNoDupHistory(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		send(&schema.Message{Role: schema.Assistant, Content: "第一版"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(SessionBrief) *GateConfig {
 			return &GateConfig{Checkers: []GateChecker{func(context.Context, string) error {
 				gateCalls.Add(1)
@@ -284,7 +284,7 @@ func TestGateStrictZeroRetries(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		send(&schema.Message{Role: schema.Assistant, Content: "一稿"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(SessionBrief) *GateConfig {
 			return &GateConfig{MaxRetries: 0, Checkers: []GateChecker{
 				func(context.Context, string) error { calls.Add(1); return errors.New("构建失败") },
@@ -305,8 +305,8 @@ func TestGateStrictZeroRetries(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("checker 应恰一次：%d", calls.Load())
 	}
-	if len(fm.inputs) != 1 {
-		t.Fatalf("不应有回灌重跑（模型调用 %d 次）", len(fm.inputs))
+	if len(fm.inputsOf()) != 1 {
+		t.Fatalf("不应有回灌重跑（模型调用 %d 次）", len(fm.inputsOf()))
 	}
 }
 
@@ -317,7 +317,7 @@ func TestGateMultiRoundEpilogueOnce(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		send(&schema.Message{Role: schema.Assistant, Content: "修复版"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(SessionBrief) *GateConfig {
 			return &GateConfig{MaxRetries: 2, Checkers: []GateChecker{func(context.Context, string) error {
 				if gateCalls.Add(1) == 1 {
@@ -350,7 +350,7 @@ func TestGateNilClosureZeroChange(t *testing.T) {
 	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.FinalGate = func(b SessionBrief) *GateConfig {
 			if b.Mode != "coding" {
 				return nil // 非编码形态不开门（应用侧按形态开门的用法）

@@ -1,6 +1,6 @@
 package engine
 
-// 批次 B 装配缝回归（设计真源 findings/2026-08-29-assembly-seams-design.md
+// 批次 B 装配缝回归（设计真源 定案《2026-08-29-assembly-seams-design》（工作区档案，不入库）
 // §3/§5）：ToolWrap 工具包装缝挂 hitl 审批外层——单调收紧（审批不可豁免、
 // 重放时刻重算）、deny 走错误信封回喂模型自纠、覆盖会话域件与子代理面。
 
@@ -107,7 +107,7 @@ func TestToolWrapKeepsApprovalMandatory(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
 		o.Approval = hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}}
 		o.ToolWrap = gate.wrap
@@ -161,7 +161,7 @@ func TestToolWrapDenyEnvelope(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
 		o.ToolWrap = gate.wrap
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
@@ -217,7 +217,7 @@ func TestToolWrapCoversSessionTools(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.ToolWrap = gate.wrap
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil
@@ -265,7 +265,7 @@ func TestToolWrapCoversSubAgentFace(t *testing.T) {
 			}})
 		}}, nil
 	}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{probe} }
 		o.SubAgents = &SubAgentsConfig{Tools: []string{"sub_probe"}}
 		o.ToolWrap = gate.wrap
@@ -298,7 +298,7 @@ func TestToolWrapDenyAtReplayTime(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
 		o.Approval = hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}}
 		o.ToolWrap = gate.wrap
@@ -364,7 +364,7 @@ func TestToolWrapGoErrorTerminatesRound(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
 		o.ToolWrap = func(t contract.Tool) contract.Tool { return &goErrTool{t: t} }
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {

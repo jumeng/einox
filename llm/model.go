@@ -21,8 +21,8 @@ package llm
 // off 恢复关档本义、""/未知 → 默认 low。
 // reasoning_content 回传：两协议组件均**原样透传**、无整形（eino-ext acl/openai
 // 出站构造路径无条件拷贝——本仓 08-26 实核订正，旧注「自动处理」有误）；
-// 出站剥离归 NewHistoryShapeModel 请求边界包装（H1①，协议定案见
-// findings/2026-08-26-h1-probe-reasoning-passback.md），本层不补。
+// 出站剥离归 NewHistoryShapeModel 请求边界包装（H1①——协议定案见
+// 2026-08-26 H1 reasoning 回传探针定案），本层不补。
 // 图片输入模型（input 含 image）的路由包装归 M3-8，本层先按主模型直连。
 //
 // 适配铁律（定案见 docs/03 模型面）：「接入」零适配只覆盖方言交集面；
@@ -38,8 +38,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	claude "github.com/cloudwego/eino-ext/components/model/claude"
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
+
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/jumeng/einox/contract"
 )
 
 // ModelFactory 模型构造口（测试注入假模型；生产 = NewChatModel）。
@@ -53,7 +55,7 @@ type ModelFactory func(ctx context.Context, p ProviderSpec, m ModelSpec, effort 
 // 转换器、需引入官方 openai-go 新依赖、手写双向流式转换层踩上游演进雷区、
 // 当前零消费方；OpenAI 官方端点用 openai 协议 chat/completions 可正常接入）。
 func NewChatModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort string) (model.BaseModel[*schema.Message], error) {
-	effort = NormalizeEffort(effort)
+	effort = contract.NormalizeEffort(effort)
 	var cm model.BaseModel[*schema.Message]
 	switch p.Kind {
 	case "openai":
@@ -84,25 +86,6 @@ func NewChatModel(ctx context.Context, p ProviderSpec, m ModelSpec, effort strin
 func RewriteSpec(rewrite func(p ProviderSpec, m ModelSpec, effort string) ModelSpec) ModelFactory {
 	return func(ctx context.Context, p ProviderSpec, m ModelSpec, effort string) (model.BaseModel[*schema.Message], error) {
 		return NewChatModel(ctx, p, rewrite(p, m, effort), effort)
-	}
-}
-
-// NormalizeEffort 思考档归一：off | low | high | max（2026-08-31 关档回归
-// 四档——机制层能力，模型是否真支持关由端点定）。旧值兼容——升级前用户
-// 偏好与存量会话快照存的是 on/off（旧「开」即 enabled+effort max）：on/
-// max → max，off → off（关档回归后恢复本义），其余（""/未知）→ 默认 low。
-// 全链路唯一权威：会话读侧（恢复/回显）、API 校验、模型工厂统一走此函数，
-// 四档外的值任何一环都不外流。
-func NormalizeEffort(effort string) string {
-	switch effort {
-	case "off":
-		return "off"
-	case "high":
-		return "high"
-	case "on", "max":
-		return "max"
-	default:
-		return "low"
 	}
 }
 

@@ -22,10 +22,12 @@ package llm
 //     走原样盘，合并只发生在 resolve 视图）
 //
 // DeepSeek 官方推荐 openai 协议端点（api.deepseek.com，dialect=deepseek
-// 思考字段）；模型三只（flash/pro/vision-exp，官方定价页：上下文均 1M、
-// 最大输出 384K，vision-exp 定价与 flash 一致），1M 预开。/anthropic 兼容
-// 端点不预置（2026-09-01 裁撤内置条目，只留官方推荐接入口）——需要时
-// 自定义 Kind=anthropic 接，思考走协议原生预算档零方言。
+// 思考字段）；模型三只（flash/pro/vision-exp，1M 上下文预开；输出上限取
+// m1m 共用预设 128K——2026-09-06 与代码对齐，此前注释称 384K 与
+// Limit.Output=128_000 漂移，spec 真值以官方文档为准可再调），vision-exp
+// 定价与 flash 一致。/anthropic 兼容端点不预置（2026-09-01 裁撤内置条目，
+// 只留官方推荐接入口）——需要时自定义 Kind=anthropic 接，思考走协议原生
+// 预算档零方言。
 //
 // 智谱（BigModel）单条目：GLM-5.3（纯文本）+ GLM-5.3-Flash（原生多模态，
 // 图片经 image_url 传 URL/Base64），上下文 1M、最大输出 128K（两模型文档

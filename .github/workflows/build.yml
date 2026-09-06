@@ -41,3 +41,6 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+      # -race 门：并发热点包（渠道泵/会话/引擎/控制面）——channel.go 泵竞态
+      # （审查 P1-1）与 scriptedModel 夹具竞态均曾被无 -race 的 test 门漏放。
+      - run: go test -race -count=1 ./engine/ ./session/ ./channels/... ./ui/

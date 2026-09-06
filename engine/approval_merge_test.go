@@ -1,6 +1,6 @@
 package engine
 
-// H4-2a 合并决议回归（方案 = findings/2026-08-26-h4-parallel-aggregation-plan.md
+// H4-2a 合并决议回归（方案 = 定案《2026-08-26-h4-parallel-aggregation-plan》（工作区档案，不入库）
 // 2a 节；08-25 挂账场景的正反例）：一轮双写工具并发中断 → 泵聚合一张卡两项 →
 // 批量批准两工具都执行 / 批一拒一各自生效 / 超时全项拒绝（fail-closed 批形态）。
 
@@ -10,12 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/hitl"
-	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/tools"
 )
@@ -43,9 +41,7 @@ func mergedSetup(t *testing.T) (*Manager, *session.Session, *contract.ApprovalRe
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m, _ := newRunManager(t, []contract.Tool{wa, wb}, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
-		return fm, nil
-	})
+	m, _ := newRunManager(t, []contract.Tool{wa, wb}, factoryOf(fm))
 	m.Opt.Approval = hitl.ApprovalConfig{WriteTools: map[string]bool{"write_a": true, "write_b": true}}
 	s := m.Registry().Create("张三", "双写", "manual", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
@@ -91,20 +87,35 @@ func TestMergedApprovalOneCardTwoItems(t *testing.T) {
 	}
 }
 
-// TestMergedApprovalBatchApprove 批量批准：一卡两项一次决议 → 两工具都执行、
-// 正常收口。
+// TestMergedApprovalBatchApprove 批量批准：一卡两项一次决议（经网关全批——
+// itemID 空）→ 两工具都执行、正常收口、approval_decision 逐项回执齐备
+// （items 数 = 项数，P2-16 契约面：分歧态以 Items 为真源）。
 func TestMergedApprovalBatchApprove(t *testing.T) {
 	m, s, card, callsA, callsB := mergedSetup(t)
-	for _, it := range card.Items {
-		s.SetDecisionFor(it.ItemID, contract.ApprovalDecision{Approve: true})
+	if err := m.Channels().Approve(s.SID, "", nil, contract.ApprovalDecision{Approve: true}); err != nil {
+		t.Fatalf("批量决议应成功：%v", err)
 	}
-	m.Resume(context.Background(), s, func(session.Event) {})
+	waitFor(t, "批量批准应正常收口", func() bool { return s.StateOf() == session.StateEnded })
 	waitTitleFlight(t, s)
 	if *callsA != 1 || *callsB != 1 {
 		t.Fatalf("批量批准后两工具都应执行，实得 a=%d b=%d", *callsA, *callsB)
 	}
-	if s.StateOf() != session.StateEnded {
-		t.Fatalf("批量批准应正常收口，终态 %s", s.StateOf())
+	var got []contract.ItemDecisionOut
+	for _, ev := range s.SnapshotEvents() {
+		if ev.Event == contract.EvApprovalDecision {
+			if d, ok := ev.Data.(contract.DecisionOut); ok {
+				got = d.Items
+			}
+		}
+	}
+	if len(got) != len(card.Items) {
+		t.Fatalf("逐项回执应 = 项数（%d），实得 %d", len(card.Items), len(got))
+	}
+	want := map[string]bool{card.Items[0].ItemID: true, card.Items[1].ItemID: true}
+	for _, it := range got {
+		if !want[it.ItemID] || !it.Approve {
+			t.Fatalf("逐项回执应覆盖全部项且全批，实得 %+v", got)
+		}
 	}
 }
 

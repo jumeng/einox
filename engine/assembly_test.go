@@ -1,6 +1,6 @@
 package engine
 
-// 批次 A 装配缝回归（设计真源 findings/2026-08-29-assembly-seams-design.md
+// 批次 A 装配缝回归（设计真源 定案《2026-08-29-assembly-seams-design》（工作区档案，不入库）
 // §1/§2/§8.2/§8.8）：缝一 Tools 会话化（SessionBrief 携带 Owner/SID、按
 // owner 分面）、缝二 sessionTools 裁剪（SessionToolsOff 族级裁剪 + 未知名
 // NewManager fail-fast）、§8.8 构造错误上抛（族无声缺席 → CONFIG 错误卡）。
@@ -18,7 +18,6 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"github.com/jumeng/einox/checkpoint"
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/internal/tstore"
 	"github.com/jumeng/einox/llm"
@@ -26,36 +25,6 @@ import (
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/tools"
 )
-
-// newSeamManager 装配缝测试引擎（newRunManagerOn 同款底座 + Options 改写口）。
-func newSeamManager(t *testing.T, mut func(*Options)) *Manager {
-	t.Helper()
-	st := tstore.New(t.TempDir())
-	opt := Options{
-		Providers: func() []llm.ProviderSpec {
-			return []llm.ProviderSpec{{
-				ID: "p", Kind: "openai", Enabled: true,
-				Models: []llm.ModelSpec{{ID: "m", Input: []string{"text"}, Priority: 100}},
-			}}
-		},
-		Instruction: func(SessionBrief) string { return "test" },
-		NewModel: func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
-			return &scriptedModel{}, nil
-		},
-		CheckPoints: func(operator, sid string) CheckPointStore {
-			return checkpoint.NewCheckPointStore(st, operator, sid)
-		},
-		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
-	}
-	if mut != nil {
-		mut(&opt)
-	}
-	m, err := NewManager(session.NewRegistry(st), opt)
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	return m
-}
 
 // toolNamesOf 工具名清单（白盒 sessionTools 面）。
 func toolNamesOf(t *testing.T, m *Manager, s *session.Session) []string {
@@ -115,7 +84,7 @@ func TestNewManagerRejectsUnknownSessionToolFamily(t *testing.T) {
 // TestSessionToolsOffTrimsFamilies 族级裁剪：nil = 六族全挂（11 件基线）；
 // 裁 cmd/patch 两族后恰减对应 7→4 件，其余族不受波及。
 func TestSessionToolsOffTrimsFamilies(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	s := m.Registry().Create("张三", "任务", "manual", contract.UserPrefs{})
 	full := toolNamesOf(t, m, s)
 	for _, want := range []string{
@@ -131,7 +100,7 @@ func TestSessionToolsOffTrimsFamilies(t *testing.T) {
 		t.Fatalf("基线应为 11 件：%v", full)
 	}
 
-	m2 := newSeamManager(t, func(o *Options) { o.SessionToolsOff = []string{FamilyCmd, FamilyPatch} })
+	m2 := newTestManager(t, func(o *Options) { o.SessionToolsOff = []string{FamilyCmd, FamilyPatch} })
 	s2 := m2.Registry().Create("张三", "任务", "manual", contract.UserPrefs{})
 	trimmed := toolNamesOf(t, m2, s2)
 	for _, gone := range []string{"run_command", "task_output", "task_stop", "apply_patch"} {
@@ -159,7 +128,7 @@ func TestSessionToolsOffPatchCallErrors(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.SessionToolsOff = []string{FamilyPatch}
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil
@@ -177,13 +146,13 @@ func TestSessionToolsOffPatchCallErrors(t *testing.T) {
 	}
 	// 模型第二调必须看到「不存在」信封（apply_patch 未被执行的直接证据）
 	fed := false
-	for _, c := range toolMsgOf(fm.inputs[len(fm.inputs)-1]) {
+	for _, c := range toolMsgOf(lastInput(fm)) {
 		if strings.Contains(c, "apply_patch") && strings.Contains(c, "不存在") {
 			fed = true
 		}
 	}
 	if !fed {
-		t.Fatalf("面外调用应回喂不存在信封，实得 %+v", toolMsgOf(fm.inputs[len(fm.inputs)-1]))
+		t.Fatalf("面外调用应回喂不存在信封，实得 %+v", toolMsgOf(lastInput(fm)))
 	}
 	for _, x := range toolNamesOf(t, m, s) {
 		if x == "apply_patch" {
@@ -195,7 +164,7 @@ func TestSessionToolsOffPatchCallErrors(t *testing.T) {
 // TestSessionToolsOffAskDegradesGracefully 裁 ask 族：纯文本轮正常收尾、
 // 全程无 ask 类事件（引擎 ask 分支被动——优雅退化）。
 func TestSessionToolsOffAskDegradesGracefully(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) { o.SessionToolsOff = []string{FamilyAsk} })
+	m := newTestManager(t, func(o *Options) { o.SessionToolsOff = []string{FamilyAsk} })
 	s := m.Registry().Create("张三", "问答", "manual", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
 	var names []string
@@ -215,7 +184,7 @@ func TestSessionToolsOffAskDegradesGracefully(t *testing.T) {
 // Instruction 同源的 SessionBrief——Owner/SID/Mode/Model 全量可寻址）。
 func TestToolsBriefCarriesIdentity(t *testing.T) {
 	var briefs []SessionBrief
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(b SessionBrief) []contract.Tool {
 			briefs = append(briefs, b)
 			return nil
@@ -252,7 +221,7 @@ func ownerGatedTool(t *testing.T) contract.Tool {
 // ——多租户工具面经 Options.Tools 单点达成（无需拆 Manager 实例）。
 func TestToolsPerOwnerFace(t *testing.T) {
 	gated := ownerGatedTool(t)
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(b SessionBrief) []contract.Tool {
 			if b.Owner != "ownerB" {
 				return nil
@@ -283,7 +252,7 @@ func TestToolsPerOwnerFace(t *testing.T) {
 // 会话面收缩的既有 fail-fast 语义保持）。
 func TestDenyToolsOwnerGatedConfigError(t *testing.T) {
 	gated := ownerGatedTool(t)
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(b SessionBrief) []contract.Tool {
 			if b.Owner != "ownerB" {
 				return nil
@@ -319,7 +288,7 @@ func TestDenyToolsOwnerGatedConfigError(t *testing.T) {
 // TestSessionToolsErrorSurfacesAsConfig 构造错误上抛（§8.8）：WorkspaceRoot
 // 返回空 → 文件面族构造失败 → CONFIG 错误卡（此前为族无声缺席）。
 func TestSessionToolsErrorSurfacesAsConfig(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.WorkspaceRoot = func(owner, sid string) string { return "" }
 	})
 	s := m.Registry().Create("张三", "任务", "manual", contract.UserPrefs{Model: "p/m"})
@@ -371,7 +340,7 @@ func TestSandboxProviderPlumbing(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Sandbox = &sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}
 		o.SandboxProvider = fp
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
@@ -431,7 +400,7 @@ func TestWorkspaceGuardSeams(t *testing.T) {
 	}
 
 	// ② 注入链：WorkspaceProtect → fsutil/applypatch 写面
-	m := newSeamManager(t, func(o *Options) { o.WorkspaceProtect = []string{"repos"} })
+	m := newTestManager(t, func(o *Options) { o.WorkspaceProtect = []string{"repos"} })
 	s := m.Registry().Create("张三", "勘察", "manual", contract.UserPrefs{})
 	var del, rd, ap contract.Tool
 	for _, x := range func() []contract.Tool {

@@ -9,7 +9,7 @@ package llm
 //   剔除 = 剥后零负载消息（content 空 + 无 tool_calls；C4 态 200 实证剔除
 //     后形态合法，保留亦合法〔C2/C3 200〕，取剔除省框架费去噪）
 // 无 reasoning 历史原样透传（快路径：指针级零开销）。协议依据与探针定案 =
-// findings/2026-08-26-h1-probe-reasoning-passback.md。
+// 2026-08-26 H1 reasoning 回传探针定案。
 //
 // H9-2 anthropic 协议分叉：thinking 出站存 Extra 双键（eino-ext claude
 // convSchemaMessage 读该键构造 thinking block，不读 ReasoningContent——本地

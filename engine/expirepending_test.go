@@ -31,7 +31,7 @@ func pendingApprovalOf(t *testing.T, m *Manager, items int) *session.Session {
 // TestExpirePendingYieldsToItemDecision 决议已到达（批量逐项之一）即让位：
 // 不覆盖决议、不发超时事件、不置终态——Resume 将消费。
 func TestExpirePendingYieldsToItemDecision(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	s := pendingApprovalOf(t, m, 2)
 	s.SetDecisionFor("i0", contract.ApprovalDecision{Approve: true, Reason: "批准"})
 	m.expirePending(s, "a1", "approval")
@@ -51,7 +51,7 @@ func TestExpirePendingYieldsToItemDecision(t *testing.T) {
 // TestExpirePendingYieldsToAskAnswer 提问作答到达同理让位（SetAskDecision
 // → go Resume 窗口）。
 func TestExpirePendingYieldsToAskAnswer(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	s := m.Registry().Create("张三", "提问", "auto", contract.UserPrefs{})
 	s.SetPendingApproval("q1")
 	s.SetAskDecision(contract.AskDecision{FreeText: "答案"})
@@ -67,7 +67,7 @@ func TestExpirePendingYieldsToAskAnswer(t *testing.T) {
 // TestExpirePendingStillFiresWithoutDecision 无决议到点照常超时（让位守卫
 // 不吞正常超时路径）。
 func TestExpirePendingStillFiresWithoutDecision(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	s := pendingApprovalOf(t, m, 1)
 	m.expirePending(s, "a1", "approval")
 	if d := s.TakeDecisionFor("i0"); d == nil || d.Approve {

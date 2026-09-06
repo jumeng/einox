@@ -43,17 +43,17 @@ func TestAgentsMDInjectedBeforeFirstUser(t *testing.T) {
 	dir := t.TempDir()
 	p := writeAgentsMD(t, dir, "MARKER_XYZ 用户级约定")
 	fm := &scriptedModel{}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil
 		}
 		o.AgentsMD = func(SessionBrief) []string { return []string{p} }
 	})
 	runOnce(t, m)
-	if len(fm.inputs) == 0 {
+	if len(fm.inputsOf()) == 0 {
 		t.Fatal("应有模型调用")
 	}
-	in := fm.inputs[0]
+	in := fm.inputsOf()[0]
 	idx, injected := -1, false
 	for i, msg := range in {
 		if msg.Role == "user" && strings.Contains(msgTextOf(msg), "问") {
@@ -73,17 +73,17 @@ func TestAgentsMDInjectedBeforeFirstUser(t *testing.T) {
 
 func TestAgentsMDEmptyListNoInjection(t *testing.T) {
 	fm := &scriptedModel{}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil
 		}
 		o.AgentsMD = func(SessionBrief) []string { return nil }
 	})
 	runOnce(t, m)
-	if len(fm.inputs) == 0 {
+	if len(fm.inputsOf()) == 0 {
 		t.Fatal("应有模型调用")
 	}
-	for _, msg := range fm.inputs[0] {
+	for _, msg := range fm.inputsOf()[0] {
 		if strings.Contains(msgTextOf(msg), "system-reminder") || strings.Contains(msgTextOf(msg), "AGENTS") {
 			t.Fatalf("空清单不应注入：%s", msgTextOf(msg))
 		}
@@ -98,7 +98,7 @@ func TestAgentsMDMaxBytesSkipsOverflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	fm := &scriptedModel{}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil
 		}
@@ -106,7 +106,7 @@ func TestAgentsMDMaxBytesSkipsOverflow(t *testing.T) {
 		o.AgentsMDMaxBytes = 32 * 1024
 	})
 	runOnce(t, m)
-	for _, msg := range fm.inputs[0] {
+	for _, msg := range fm.inputsOf()[0] {
 		if strings.Contains(msgTextOf(msg), "MARKER_SMALL") {
 			t.Fatal("预算耗尽后余下文件应被跳过（上游按序装载超限即止）")
 		}
@@ -123,7 +123,7 @@ func TestAgentsMDImportRecursion(t *testing.T) {
 		t.Fatal(err)
 	}
 	fm := &scriptedModel{}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil
 		}
@@ -131,7 +131,7 @@ func TestAgentsMDImportRecursion(t *testing.T) {
 	})
 	runOnce(t, m)
 	joined := ""
-	for _, msg := range fm.inputs[0] {
+	for _, msg := range fm.inputsOf()[0] {
 		joined += msgTextOf(msg)
 	}
 	if !strings.Contains(joined, "MARKER_MAIN") || !strings.Contains(joined, "MARKER_SUB_IMPORTED") {

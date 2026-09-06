@@ -164,15 +164,33 @@ func userMessageWithImages(text string, atts []session.Attachment) *schema.Messa
 }
 
 // BeforeModelRewriteState 模型调用前注入 pending 补充（标注来源，模型可辨识）。
+// 回执同律（审查 P2-15）：此处排空的消息与 Run 头部路径一样翻「已注入」
+// 事件——此前运行中到达的排队消息不落 steer_injected/notify_injected，回放
+// 里永远停在 queued 态；notify 独立标签（非用户补充——审计可辨）。
+// 跨轮保真（安全审查 2026-09-06）：注入消息同时入会话历史——此前只进
+// state.Messages（本轮运行态），轮结束后下一轮 CloneHistory 不含注入原文，
+// 模型对「用户运行中说过什么」失忆（摘要/门回灌/recall/Fork 同受影响）。
+// 顺序天然正确：注入先入史，本轮后续 assistant 终态由 settleTurn 追加其后。
 func (m *steeringMiddleware) BeforeModelRewriteState(
 	ctx context.Context, state *adk.TypedChatModelAgentState[*schema.Message], mc *adk.ModelContext,
 ) (context.Context, *adk.TypedChatModelAgentState[*schema.Message], error) {
 	for _, msg := range m.sess.TakePending() {
+		if msg.Kind == "notify" {
+			m.sess.Record(contract.EvNotifyInjected, contract.SteerEvent{ID: msg.ID, Text: msg.Text, Kind: msg.Kind})
+			injected := userMessageWithImages("（系统通知）"+msg.Text, msg.Attachments)
+			state.Messages = append(state.Messages, injected)
+			m.sess.AppendHistory(injected)
+			continue
+		}
+		m.sess.Record(contract.EvSteerInjected, contract.SteerEvent{ID: msg.ID, Text: msg.Text,
+			Attachments: msg.Attachments, SpeakerID: msg.SpeakerID, SpeakerName: msg.SpeakerName})
 		label := "（用户运行中补充）"
 		if msg.SpeakerName != "" { // T6 谁的运行中补充
 			label = "（" + msg.SpeakerName + " 运行中补充）"
 		}
-		state.Messages = append(state.Messages, userMessageWithImages(label+msg.Text, msg.Attachments))
+		injected := userMessageWithImages(label+msg.Text, msg.Attachments)
+		state.Messages = append(state.Messages, injected)
+		m.sess.AppendHistory(injected)
 	}
 	return ctx, state, nil
 }

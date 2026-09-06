@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/strutil"
 	"github.com/jumeng/einox/tools"
 )
 
@@ -115,7 +116,7 @@ func Parse(raw string) ([]FileOp, error) {
 		case strings.TrimSpace(line) == "":
 			continue // 段间空行容错
 		default:
-			return nil, fmt.Errorf("无法识别的补丁行（第 %d 行）：%s", i+1, truncate(line, 60))
+			return nil, fmt.Errorf("无法识别的补丁行（第 %d 行）：%s", i+1, strutil.Truncate(line, 60))
 		}
 	}
 	return nil, fmt.Errorf("补丁缺少 %s 结尾", endPatch)
@@ -200,7 +201,7 @@ func parseUpdate(lines []string, i int, path string) (FileOp, int, error) {
 				cur.NewLines = append(cur.NewLines, "")
 			}
 		default:
-			return op, j, fmt.Errorf("%s 块内无法识别的行（第 %d 行，须以 空格/-/+ 开头）：%s", path, j+1, truncate(line, 60))
+			return op, j, fmt.Errorf("%s 块内无法识别的行（第 %d 行，须以 空格/-/+ 开头）：%s", path, j+1, strutil.Truncate(line, 60))
 		}
 	}
 	flush()
@@ -327,7 +328,7 @@ func computeReplacements(original []string, path string, chunks []Chunk) ([]repl
 		if ch.ChangeContext != "" {
 			idx := seekSequence(original, []string{ch.ChangeContext}, lineIndex, false)
 			if idx < 0 {
-				return nil, fmt.Errorf("找不到定位锚 %q（%s）", truncate(ch.ChangeContext, 60), path)
+				return nil, fmt.Errorf("找不到定位锚 %q（%s）", strutil.Truncate(ch.ChangeContext, 60), path)
 			}
 			lineIndex = idx + 1
 		}
@@ -348,7 +349,7 @@ func computeReplacements(original []string, path string, chunks []Chunk) ([]repl
 			found = seekSequence(original, pattern, lineIndex, ch.IsEOF)
 		}
 		if found < 0 {
-			return nil, fmt.Errorf("在 %s 中找不到待改内容：\n%s", path, truncate(strings.Join(ch.OldLines, "\n"), 200))
+			return nil, fmt.Errorf("在 %s 中找不到待改内容：\n%s", path, strutil.Truncate(strings.Join(ch.OldLines, "\n"), 200))
 		}
 		reps = append(reps, replacement{found, len(pattern), newSlice})
 		lineIndex = found + len(pattern)
@@ -437,8 +438,19 @@ func Apply(root string, ops []FileOp) ([]FileResult, error) {
 			writes = append(writes, staged{op, strings.Join(op.Contents, "\n") + "\n"})
 			results = append(results, FileResult{Path: op.Path, Action: "added", Added: len(op.Contents)})
 		case KindDelete:
-			if _, err := os.Lstat(full); err != nil {
+			st, err := os.Lstat(full)
+			if err != nil {
 				return nil, fmt.Errorf("文件不存在（Delete File）：%s", op.Path)
+			}
+			if st.IsDir() { // 非空目录在预检期拒绝（安全审查 2026-09-06：此前拖到落盘末段
+				// 才失败，前序写入已落盘——「整体回退」承诺不成立）
+				des, err := os.ReadDir(full)
+				if err != nil {
+					return nil, fmt.Errorf("检查目录失败（%s）：%w", op.Path, err)
+				}
+				if len(des) > 0 {
+					return nil, fmt.Errorf("是非空目录（Delete File 仅支持文件或空目录，目录整删用 delete_file）：%s", op.Path)
+				}
 			}
 			deletes = append(deletes, op)
 			results = append(results, FileResult{Path: op.Path, Action: "deleted"})
@@ -456,8 +468,12 @@ func Apply(root string, ops []FileOp) ([]FileResult, error) {
 			path := op.Path
 			action := "updated"
 			if op.MoveTo != "" {
-				if _, err := safeJoin(root, op.MoveTo); err != nil {
+				moveFull, err := safeJoin(root, op.MoveTo)
+				if err != nil {
 					return nil, err
+				}
+				if _, err := os.Lstat(moveFull); err == nil {
+					return nil, fmt.Errorf("目标已存在（Move to 拒绝覆盖）：%s", op.MoveTo)
 				}
 				path = op.MoveTo
 				action = "renamed"
@@ -468,17 +484,46 @@ func Apply(root string, ops []FileOp) ([]FileResult, error) {
 			results = append(results, FileResult{Path: path, Action: action, Added: added, Removed: removed})
 		}
 	}
-	// 落盘阶段（先写后删：改名场景写新删旧）
+	// 预检建目录（全部写入的父目录先行创建——中途 ENOTDIR 类失败发生在任何
+	// 文件落盘之前；新建目录留档，失败时回滚回收）
+	var createdDirs []string
 	for _, w := range writes {
 		full, err := safeJoin(root, w.op.Path)
 		if err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		dir := filepath.Dir(full)
+		if _, err := os.Lstat(dir); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("建目录失败（%s）：%w", w.op.Path, err)
 		}
-		if err := os.WriteFile(full, []byte(w.content), 0o644); err != nil {
+		createdDirs = append(createdDirs, dir)
+	}
+	// 落盘阶段（先写后删：改名场景写新删旧）。逐项留底、失败即回滚——
+	// 「任一失败全部不落盘」的事务承诺兑现到落盘段（安全审查 2026-09-06：
+	// 此前中途失败无回滚，错误文案却称整体回退）。
+	var appliedWrites []fileBackup
+	var appliedDeletes []fileBackup
+	abort := func(format string, a ...any) ([]FileResult, error) {
+		if rerr := rollbackApply(appliedWrites, appliedDeletes, createdDirs); rerr != nil {
+			return nil, fmt.Errorf(format+"（回滚失败：%v）", append(a, rerr)...)
+		}
+		return nil, fmt.Errorf(format, a...)
+	}
+	for _, w := range writes {
+		full, err := safeJoin(root, w.op.Path)
+		if err != nil {
+			return nil, err
+		}
+		bk, err := backupOf(full)
+		if err != nil {
 			return nil, fmt.Errorf("写入失败（%s）：%w", w.op.Path, err)
+		}
+		appliedWrites = append(appliedWrites, bk) // 先留底后写：半截文件也在回滚面内
+		if err := os.WriteFile(full, []byte(w.content), 0o644); err != nil {
+			return abort("写入失败（%s）：%w", w.op.Path, err)
 		}
 	}
 	for _, d := range deletes {
@@ -486,11 +531,81 @@ func Apply(root string, ops []FileOp) ([]FileResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := os.Remove(full); err != nil {
+		bk, err := backupOf(full)
+		if err != nil {
 			return nil, fmt.Errorf("删除失败（%s）：%w", d.Path, err)
+		}
+		appliedDeletes = append(appliedDeletes, bk) // 先留底后删
+		if err := os.Remove(full); err != nil {
+			return abort("删除失败（%s）：%w", d.Path, err)
 		}
 	}
 	return results, nil
+}
+
+// fileBackup 单文件落盘/删除前留底（existed=false 为新建——回滚即删；
+// isDir=true 仅空目录合法——回滚 = 重建空目录）。
+type fileBackup struct {
+	path    string
+	existed bool
+	isDir   bool
+	content []byte
+	mode    os.FileMode
+}
+
+// backupOf 文件/空目录留底（读原内容与权限；不存在 = 新建面）。
+func backupOf(full string) (fileBackup, error) {
+	st, err := os.Lstat(full)
+	if err != nil {
+		return fileBackup{path: full}, nil // 不存在 = 将新建
+	}
+	if st.IsDir() {
+		return fileBackup{path: full, existed: true, isDir: true, mode: st.Mode().Perm()}, nil
+	}
+	b, err := os.ReadFile(full)
+	if err != nil {
+		return fileBackup{}, err
+	}
+	return fileBackup{path: full, existed: true, content: b, mode: st.Mode().Perm()}, nil
+}
+
+// rollbackApply 落盘失败回滚（尽力而为——按删除逆序、写入逆序恢复原状，
+// 预检新建的空目录回收；回滚失败如实并入调用方错误文案，不静默）。
+func rollbackApply(writes, deletes []fileBackup, createdDirs []string) error {
+	var errs []string
+	restore := func(b fileBackup) {
+		switch {
+		case !b.existed: // 未曾存在却被删（防御）——无需恢复
+		case b.isDir:
+			if err := os.MkdirAll(b.path, b.mode); err != nil {
+				errs = append(errs, b.path+": "+err.Error())
+			}
+		default:
+			if err := os.WriteFile(b.path, b.content, b.mode); err != nil {
+				errs = append(errs, b.path+": "+err.Error())
+			}
+		}
+	}
+	for i := len(deletes) - 1; i >= 0; i-- {
+		restore(deletes[i])
+	}
+	for i := len(writes) - 1; i >= 0; i-- {
+		w := writes[i]
+		if !w.existed {
+			if err := os.Remove(w.path); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, w.path+": "+err.Error())
+			}
+			continue
+		}
+		restore(w)
+	}
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		_ = os.Remove(createdDirs[i]) // 仅回收空目录（非空自败——不删数据）
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "；"))
+	}
+	return nil
 }
 
 // splitLines 按行拆（丢尾换行哨兵；CRLF 归一 LF）。
@@ -534,24 +649,16 @@ func diffCount(old, new []string) (added, removed int) {
 	return added, removed
 }
 
-// safeJoin 工作区内路径（相对路径 only；穿越拒绝）。
+// safeJoin 工作区内路径（相对路径 only；穿越拒绝）。圈禁判定与 fsutil/office/
+// extwire 同源（tools.ResolveUnder 单点——审查 P1-5：曾子串拒绝 `..` 误伤
+// a..b.txt，同一文件 fsutil 可读而补丁拒改）；绝对路径显式拒保留（补丁语义：
+// 路径须相对工作区——静默改写进根内更迷惑）。
 func safeJoin(root, p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
 		return "", fmt.Errorf("路径必须为工作区内相对路径：%s", p)
 	}
-	if strings.Contains(p, "..") {
-		return "", fmt.Errorf("路径不允许 ..：%s", p)
-	}
-	return filepath.Join(root, filepath.FromSlash(p)), nil
-}
-
-func truncate(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
+	return tools.ResolveUnder(root, p)
 }
 
 // ---- 工具面 ----

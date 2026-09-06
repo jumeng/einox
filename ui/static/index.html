@@ -79,10 +79,13 @@
 "use strict";
 // Kind 域着色 + 摘要提取（封闭词表渲染契约；未知 Kind 软降级通用卡片——
 // docs/03 事件词表冻结保证增长可期、降级有底）
+// 词表与 ui/tui.go 的 tuiDomainOf/tuiSummary 同源——改词表须两侧同步
+//（跨语言无法机器对账，Go 侧有词表对账测试兜底——ui/tui_test.go）
 const DOMAINS = [
   ["k-gen",  e => /^(text_delta|thinking_delta|usage)$/.test(e)],
   ["k-tool", e => /^tool_(call|result)$/.test(e)],
-  ["k-hitl", e => /^(approval|ask_user|plan)_/.test(e)],
+  // ask 广前缀涵盖 ask_user_request 与 ask_decision/ask_timeout/ask_ignored
+  ["k-hitl", e => /^(approval|ask|plan)_/.test(e)],
   ["k-ster", e => /^(steer_|notify_|user_message$|participant_update$)/.test(e)],
   ["k-proc", e => /^(todo_update|harness_note|subagent|model_change|transport_retry)$/.test(e)],
   ["k-end",  e => /^(session_end|error|interrupted)$/.test(e)],
@@ -97,6 +100,22 @@ const SUMMARIES = {
   approval_request: d => `审批：${d.tool || "?"}${d.requester_name ? "（" + d.requester_name + " 的动作）" : ""}${d.target_name ? " → 问 " + d.target_name : ""}`,
   approval_decision: d => (d.approve ? "批准" : "拒绝") + (d.decider_name ? "（" + d.decider_name + "）" : ""),
   approval_timeout: () => "审批超时（fail-closed 拒）",
+  ask_user_request: d => "提问：" + (d.question || ""),
+  ask_decision: d => "作答：" + (d.free_text || (d.answers || []).join("、")) + (d.decider_name ? "（" + d.decider_name + "）" : ""),
+  ask_timeout: () => "提问超时",
+  ask_ignored: () => "提问被忽略",
+  plan_request: d => "计划：" + (d.task || ""),
+  plan_decision: d => (d.approve ? "批准" : "拒绝") + (d.decider_name ? "（" + d.decider_name + "）" : ""),
+  plan_timeout: () => "计划超时（自动拒）",
+  todo_update: d => "清单 " + (Array.isArray(d) ? d.length : "?") + " 项",
+  steer_queued: d => "排队：" + (d.text || ""),
+  steer_updated: d => "排队更新：" + (d.text || ""),
+  steer_removed: d => "移除排队：" + (d.id || ""),
+  steer_injected: d => "注入对话：" + (d.text || ""),
+  steer_reordered: d => "重排 " + ((d.ids || []).length || "?") + " 条",
+  notify_queued: d => "通知排队：" + (d.text || ""),
+  notify_injected: d => "通知注入：" + (d.text || ""),
+  model_change: d => `模型 ${d.from || "?"} → ${d.to || "?"}`,
   harness_note: d => `${d.kind || ""}：${d.title || ""}`,
   subagent: d => `子代理 ${d.kind}${d.stop_reason ? "（" + d.stop_reason + "）" : ""}`,
   participant_update: d => `名册：${d.participant?.name || d.participant?.id} ${d.kind}`,
@@ -131,7 +150,7 @@ async function api(path, body) {
 // 浏览器同源 EventSource 上限 ~6）
 function toggleLive() {
   if (!$("live").checked) { if (es) es.close(); es = null; return; }
-  if (!cur) return;
+  if (!cur) { $("live").checked = false; return; } // 无会话即回弹勾选态（不滞留假 live）
   if (es) es.close();
   const since = events.length ? events[events.length - 1].id : 0;
   es = new EventSource(`/api/sessions/${cur}/events?live=1&since=${since}`);
@@ -164,15 +183,17 @@ function renderAppcard() {
   if (settled) { card.style.display = "none"; return; }
   const d = lastReq.data || {}, i = ident();
   card.style.display = "";
-  card.innerHTML = `<div class="t">🔔 审批：${esc(d.tool || "?")}${d.requester_name ? "（" + esc(d.requester_name) + " 的动作）" : ""}${d.target_name ? " → 应由 " + esc(d.target_name) + " 决议" : ""}</div>
-    <button onclick="decide(true,${lastReq.id})">批准</button><button onclick="decide(false,${lastReq.id})">拒绝</button>
+  card.innerHTML = `<div class="t">🔔 审批：${esc(d.tool || "?")}${d.requester_name ? "（" + esc(d.requester_name) + " 的动作）" : ""}${d.target_name ? " → 应由 " + esc(d.target_name) + " 决议" : ""}${(d.items || []).length > 1 ? `（${d.items.length} 项——批准即全部执行）` : ""}</div>
+    <button onclick="decide(true)">批准</button><button onclick="decide(false)">拒绝</button>
     <span style="color:#5b647a;font-size:11px">决议者：${esc(i.name || i.id || "匿名")}</span>`;
 }
-async function decide(approve, reqID) {
-  const d = events.find(e => e.id === reqID)?.data || {}, i = ident();
-  const item = (d.items && d.items[0]) || {};
+async function decide(approve) {
+  // item_id 空 = 整卡决议：合并卡（N>1）即「全批/全拒」、单卡/旧卡走单决议
+  // 槽——与 feishu 卡同语义（安全审查 2026-09-06：此前恒发 items[0] 的
+  // item_id，N>1 合并卡点「批准」只批首项、其余项静默 fail-closed 拒绝）
+  const i = ident();
   const r = await api(`/api/sessions/${cur}/approve`, {
-    approve, reason: "", item_id: item.item_id || "",
+    approve, reason: "", item_id: "",
     decider_id: i.id || undefined, decider_name: i.name || undefined });
   if (r) renderAppcard();
 }
@@ -180,7 +201,9 @@ async function decide(approve, reqID) {
 // 名册：点击即取为身份
 async function loadRoster() {
   if (!cur) { $("roster").innerHTML = ""; return; }
-  const ps = await (await fetch(`/api/sessions/${cur}/participants`)).json();
+  const rs = await fetch(`/api/sessions/${cur}/participants`);
+  if (!rs.ok) { $("roster").innerHTML = ""; return; } // 错误响应非 JSON——不抛未处理 rejection
+  const ps = await rs.json();
   $("roster").innerHTML = (ps || []).map(p =>
     `<div class="p" data-id="${esc(p.id)}" data-name="${esc(p.name)}">${esc(p.name || p.id)}${p.role ? "（" + esc(p.role) + "）" : ""}</div>`).join("") || '<div class="p" style="color:#5b647a">（空）</div>';
   for (const el of $("roster").querySelectorAll(".p[data-id]"))
@@ -189,6 +212,7 @@ async function loadRoster() {
 
 async function loadSessions() {
   const rs = await fetch("/api/sessions");
+  if (!rs.ok) { $("sessions").innerHTML = ""; return; } // 错误响应非 JSON——不抛未处理 rejection
   const list = await rs.json();
   $("sessions").innerHTML = (list || []).map(s =>
     `<div class="sess" data-sid="${esc(s.sid)}"><div class="t">${esc(s.title || s.sid)}</div>

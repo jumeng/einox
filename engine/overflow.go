@@ -60,11 +60,7 @@ func (m *Manager) overflowRetry(runCtx context.Context, s *session.Session, fn e
 		return nil, nil, nil, false
 	}
 	if acc != nil {
-		acc.endAssistantMsg()
-		if len(acc.msgs) > 0 {
-			s.AppendHistory(acc.msgs...)
-			acc.msgs = nil
-		}
+		flushAcc(s, acc, true) // settleTurn/门回灌同款封账（清账防恢复失败路径二次入史）
 	}
 	hist := sanitizeHistory(s.CloneHistory())
 	input := append(append([]*schema.Message{}, tailFromLastUser(hist)...), taskAnchor(s, lastTodoState(hist)))

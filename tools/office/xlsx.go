@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/jumeng/einox/tools"
 )
 
 const (
@@ -36,23 +38,14 @@ type writeXlsxIn struct {
 	Sheets []xlsxSheetIn `json:"sheets"`
 }
 
-// helper 工作区路径与实现（闭包共享 root）。resolve 防穿越：Join 清洗 .. 后
-// 逃出 root 必须显式拒绝（与 fsutil 同纪律）。
+// helper 工作区路径与实现（闭包共享 root）。圈禁判定与 fsutil/applypatch/
+// extwire 同源（tools.ResolveUnder 单点——审查 P1-5 四份两算法收口）。
 type helper struct {
 	root string
 }
 
 func (h *helper) resolve(p string) (string, error) {
-	p = strings.TrimSpace(p)
-	if p == "" || p == "." {
-		return h.root, nil
-	}
-	a := filepath.Join(h.root, filepath.FromSlash(p))
-	rel, err := filepath.Rel(h.root, a)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("路径越界（仅限工作区内）：%s", p)
-	}
-	return a, nil
+	return tools.ResolveUnder(h.root, p)
 }
 
 func (h *helper) writeXlsx(_ context.Context, in writeXlsxIn) (map[string]any, error) {
@@ -267,7 +260,7 @@ func xlsxParts(r *zip.Reader) ([]sheetRef, []string, error) {
 	odNS := "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 	id2target := map[string]string{}
 	if rels := zipFile(r, "xl/_rels/workbook.xml.rels"); rels != nil {
-		rc, err := rels.Open()
+		rc, err := openCapped(rels)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -296,7 +289,7 @@ func xlsxParts(r *zip.Reader) ([]sheetRef, []string, error) {
 		}
 	}
 	var out []sheetRef
-	rc, err := wb.Open()
+	rc, err := openCapped(wb)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -340,7 +333,7 @@ func xlsxParts(r *zip.Reader) ([]sheetRef, []string, error) {
 
 // readSharedStrings 共享字符串表（si 内全部 t 拼接，覆盖富文本段）。
 func readSharedStrings(f *zip.File) ([]string, error) {
-	rc, err := f.Open()
+	rc, err := openCapped(f)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +380,7 @@ func readSharedStrings(f *zip.File) ([]string, error) {
 // readColCap 截断标记）。值形态：s→共享串、inlineStr→原文本、b→TRUE/FALSE、
 // 其余（n/str/日期序列）→原始 v。
 func parseSheetXML(f *zip.File, shared []string) ([][]string, bool, error) {
-	rc, err := f.Open()
+	rc, err := openCapped(f)
 	if err != nil {
 		return nil, false, err
 	}
@@ -499,11 +492,4 @@ func attr(se xml.StartElement, name string) string {
 		}
 	}
 	return ""
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

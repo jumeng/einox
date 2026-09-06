@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -65,8 +66,12 @@ func newClient(cfg Config, onMsg func(inboundMsg), onCard func(cardAction)) (*re
 			return &callback.CardActionTriggerResponse{}, nil
 		})
 	return &realClient{
-		ws:  larkws.NewClient(cfg.AppID, cfg.AppSecret, larkws.WithEventHandler(d)),
-		cli: lark.NewClient(cfg.AppID, cfg.AppSecret),
+		ws: larkws.NewClient(cfg.AppID, cfg.AppSecret, larkws.WithEventHandler(d)),
+		// 请求超时（安全审查 2026-09-06：SDK 缺省 ReqTimeout=0 落到
+		// http.DefaultClient——一次网络黑洞的 SendCard/UpdateCard 即挂死
+		// 调用方〔flushLoop 单泵共享全部 chat 时全站卡片停摆〕）。15s 覆盖
+		// 正常卡顿、兜住黑洞。
+		cli: lark.NewClient(cfg.AppID, cfg.AppSecret, lark.WithReqTimeout(15*time.Second)),
 	}, nil
 }
 

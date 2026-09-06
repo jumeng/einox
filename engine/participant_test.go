@@ -43,7 +43,7 @@ func TestParticipantSixRingChain(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(b SessionBrief) []contract.Tool {
 			briefSpeaker, briefSpeakerName = b.TurnSpeakerID, b.TurnSpeakerName
 			return []contract.Tool{wt}
@@ -115,7 +115,7 @@ func TestParticipantSixRingChain(t *testing.T) {
 	}
 	// ⑤模型输入：「张三：」前缀（历史与当前轮同律）
 	prefixed := false
-	for _, in := range fm.inputs {
+	for _, in := range fm.inputsOf() {
 		for _, msg := range in {
 			if strings.HasPrefix(msg.Content, "张三：删掉临时文件") {
 				prefixed = true
@@ -164,7 +164,7 @@ func TestParticipantInputSegments(t *testing.T) {
 // TestParticipantRosterUpsert 名册登记：首见 joined、重登记无变更零事件、
 // 改名 updated；ID 空 refuse。
 func TestParticipantRosterUpsert(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	s := m.Registry().Create("u_li", "群", "plan", contract.UserPrefs{Model: "p/m"})
 	if got := s.UpsertParticipant(contract.Participant{ID: "u_zhang", Name: "张三"}); got != "joined" {
 		t.Fatalf("首见应 joined，实得 %q", got)
@@ -237,7 +237,7 @@ func TestApprovalRouterAndGuard(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
 		o.Approval = hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}}
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
@@ -329,7 +329,7 @@ func TestArgsForceBySpeaker(t *testing.T) {
 			}
 			send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 		}}
-		return newSeamManager(t, func(o *Options) {
+		return newTestManager(t, func(o *Options) {
 			o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
 			o.Approval = hitl.ApprovalConfig{
 				WriteTools: map[string]bool{"write_tool": true},

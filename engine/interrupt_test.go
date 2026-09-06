@@ -17,7 +17,7 @@ import (
 )
 
 func TestInterruptMarkerInHistory(t *testing.T) {
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return &scriptedModel{}, nil
 		}

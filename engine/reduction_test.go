@@ -16,7 +16,6 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"github.com/jumeng/einox/checkpoint"
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/internal/tstore"
 	"github.com/jumeng/einox/llm"
@@ -33,25 +32,16 @@ func newReductionManager(t *testing.T, window int, ts []contract.Tool, fm llm.Mo
 	if window > 0 {
 		spec.Limit = &llm.Limit{Context: window, Output: 4096}
 	}
-	reg := session.NewRegistry(st)
-	m, err := NewManager(reg, Options{
-		Providers: func() []llm.ProviderSpec {
+	m := newTestManagerOn(t, st, func(o *Options) {
+		o.Providers = func() []llm.ProviderSpec {
 			return []llm.ProviderSpec{{ID: "p", Kind: "openai", Enabled: true, Models: []llm.ModelSpec{spec}}}
-		},
-		Instruction: func(SessionBrief) string { return "test" },
-		Tools:       func(SessionBrief) []contract.Tool { return ts },
-		NewModel:    fm,
-		CheckPoints: func(operator, sid string) CheckPointStore {
-			return checkpoint.NewCheckPointStore(st, operator, sid)
-		},
-		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
+		}
+		o.Tools = func(SessionBrief) []contract.Tool { return ts }
+		o.NewModel = fm
+		for _, f := range mut {
+			f(o)
+		}
 	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	for _, f := range mut {
-		f(&m.Opt)
-	}
 	return m, st
 }
 
@@ -108,11 +98,11 @@ func TestReductionTruncOffloadReadback(t *testing.T) {
 	})
 	waitTitleFlight(t, s)
 
-	if len(fm.inputs) != 3 {
-		t.Fatalf("模型应调用 3 次，实得 %d；事件流 %v；错误 %s", len(fm.inputs), evNames, errMsg)
+	if len(fm.inputsOf()) != 3 {
+		t.Fatalf("模型应调用 3 次，实得 %d；事件流 %v；错误 %s", len(fm.inputsOf()), evNames, errMsg)
 	}
 	// 第二调：结果已截断换指针（长度骤降 + 指针在场）
-	overTrunc := toolMsgOf(fm.inputs[1])
+	overTrunc := toolMsgOf(fm.inputsOf()[1])
 	if len(overTrunc) != 1 || len(overTrunc[0]) >= 10000 || !strings.Contains(overTrunc[0], "spill/trunc/c1") {
 		t.Fatalf("出站工具结果应截断并带 spill 指针：len=%d", len(overTrunc[0]))
 	}
@@ -132,7 +122,7 @@ func TestReductionTruncOffloadReadback(t *testing.T) {
 		t.Fatalf("外置原文应在会话持久域：ok=%v len=%d", ok, len(full))
 	}
 	// 第三调：read_file 读回原文（spill/ 路由 → 完整 10k 数据在场）
-	back := toolMsgOf(fm.inputs[2])
+	back := toolMsgOf(fm.inputsOf()[2])
 	if len(back) == 0 || !strings.Contains(back[len(back)-1], strings.Repeat("x", 100)) {
 		t.Fatalf("read_file 应经 spill/ 路由读回原文：%d 条", len(back))
 	}
@@ -165,10 +155,10 @@ func TestReductionClearFidelityRetention(t *testing.T) {
 	m.Run(context.Background(), s, "继续", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	if len(fm.inputs) != 1 {
-		t.Fatalf("应单次模型调用，实得 %d", len(fm.inputs))
+	if len(fm.inputsOf()) != 1 {
+		t.Fatalf("应单次模型调用，实得 %d", len(fm.inputsOf()))
 	}
-	over := toolMsgOf(fm.inputs[0])
+	over := toolMsgOf(fm.inputsOf()[0])
 	if len(over) != 5 {
 		t.Fatalf("消息数不变（clear 原位替换不删消息），tool 消息应 5 条，实得 %d", len(over))
 	}
@@ -224,7 +214,7 @@ func TestReductionClearAtLeastGate(t *testing.T) {
 	m.Run(context.Background(), s, "继续", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	over := toolMsgOf(fm.inputs[0])
+	over := toolMsgOf(fm.inputsOf()[0])
 	if !strings.Contains(over[0], "R1DATA") {
 		t.Fatalf("清出不足下限应整体不动，r1 原文应在场：%.60s", over[0])
 	}
@@ -251,7 +241,7 @@ func TestReductionExcludeToolSearch(t *testing.T) {
 	m.Run(context.Background(), s, "搜", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 
-	over := toolMsgOf(fm.inputs[1])
+	over := toolMsgOf(fm.inputsOf()[1])
 	if len(over) != 1 || !strings.Contains(over[0], strings.Repeat("h", 100)) || strings.Contains(over[0], "spill/") {
 		t.Fatalf("tool_search 结果不应截断/外置：len=%d", len(over[0]))
 	}
@@ -278,7 +268,7 @@ func TestShapeOutboundStripsSettledReasoning(t *testing.T) {
 	waitTitleFlight(t, s)
 
 	inFlight := false
-	for _, m2 := range fm.inputs[1] {
+	for _, m2 := range fm.inputsOf()[1] {
 		if m2.Role == schema.Assistant && m2.ReasoningContent == "本轮思考" {
 			inFlight = true
 		}
@@ -290,7 +280,7 @@ func TestShapeOutboundStripsSettledReasoning(t *testing.T) {
 	s.SetState(session.StateRunning)
 	m.Run(context.Background(), s, "问2", nil, func(session.Event) {}) // 轮2：c1 已结算
 	waitTitleFlight(t, s)
-	for _, m2 := range fm.inputs[2] {
+	for _, m2 := range fm.inputsOf()[2] {
 		if m2.Role == schema.Assistant && m2.ReasoningContent != "" {
 			t.Fatalf("已结算轮思考应剥离：%.40s", m2.ReasoningContent)
 		}

@@ -121,9 +121,7 @@ func TestIgnoreAskWakeOnNewMessage(t *testing.T) {
 	if contains(names, contract.EvError) {
 		t.Fatalf("唤醒轮不应报错：%v", names)
 	}
-	fm.mu.Lock()
-	inputs := fm.inputs
-	fm.mu.Unlock()
+	inputs := fm.inputsOf()
 	if len(inputs) < 2 {
 		t.Fatalf("唤醒轮应有第二次模型输入，实得 %d 轮", len(inputs))
 	}

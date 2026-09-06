@@ -24,13 +24,17 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
+
+	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/strutil"
 )
 
-// Classified 分类结果（Code 取 contract.ErrorOut 码面字符串字面量——
-// llm 不反向依赖 contract，字面量权威在 contract/event.go 注释）。
+// Classified 分类结果（Code 取 contract.ErrCode* 封闭词表常量——单一
+// 真源在 contract/event.go，审查 P2-10 收口：此前 llm 侧字面量与注释权威
+// 双源漂移无对账）。
 type Classified struct {
 	Retryable bool
-	Code      string // SERVER | AUTH | RATE_LIMIT | TRANSPORT | OVERFLOW
+	Code      string // contract.ErrCode*（Server/Auth/RateLimit/Transport/Overflow/Aborted）
 	Message   string // 面向用户的中文文案（调用方自行截断）
 }
 
@@ -40,11 +44,11 @@ func Classify(err error) Classified {
 		return Classified{}
 	}
 	if errors.Is(err, context.Canceled) {
-		return Classified{Code: "ABORTED", Message: "已取消"}
+		return Classified{Code: contract.ErrCodeAborted, Message: "已取消"}
 	}
 	// 超时层哨兵 / ctx 超时：传输类可重试
 	if errors.Is(err, ErrIdleTimeout) || errors.Is(err, context.DeadlineExceeded) {
-		return Classified{Retryable: true, Code: "TRANSPORT", Message: transportMsg(err)}
+		return Classified{Retryable: true, Code: contract.ErrCodeTransport, Message: transportMsg(err)}
 	}
 	// 上下文超窗：不可重试、不进 failover（换模型救不了真超窗——窗口更小的
 	// 备模型更糟），恢复归 manager 输入面（裁剪重装配有界重试，engine/overflow.go）。
@@ -76,19 +80,19 @@ func Classify(err error) Classified {
 	// 网络类（dial/reset/timeout——url.Error 包裹下 errors.As 仍穿透）
 	var ne net.Error
 	if errors.As(err, &ne) {
-		return Classified{Retryable: true, Code: "TRANSPORT", Message: transportMsg(err)}
+		return Classified{Retryable: true, Code: contract.ErrCodeTransport, Message: transportMsg(err)}
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return Classified{Retryable: true, Code: "TRANSPORT", Message: "连接提前关闭：" + truncateErr(err)}
+		return Classified{Retryable: true, Code: contract.ErrCodeTransport, Message: "连接提前关闭：" + truncateErr(err)}
 	}
 	// 无类型形态的传输错误（http2 GOAWAY / broken pipe 等）
 	for _, s := range transportTexts {
 		if strings.Contains(err.Error(), s) {
-			return Classified{Retryable: true, Code: "TRANSPORT", Message: transportMsg(err)}
+			return Classified{Retryable: true, Code: contract.ErrCodeTransport, Message: transportMsg(err)}
 		}
 	}
 	// 未知：保守不重试
-	return Classified{Code: "SERVER", Message: truncateErr(err)}
+	return Classified{Code: contract.ErrCodeServer, Message: truncateErr(err)}
 }
 
 var transportTexts = []string{
@@ -100,8 +104,9 @@ var transportTexts = []string{
 }
 
 // CodeOverflow 上下文超窗类（消费方：engine manager 层裁剪重装配恢复——
-// 不可重试、不进 failover，与 ABORTED 同为致命面但语义独立）。
-const CodeOverflow = "OVERFLOW"
+// 不可重试、不进 failover，与 ABORTED 同为致命面但语义独立）。值锚定
+// contract 封闭词表（引擎侧判别用 llm.CodeOverflow 亦不脱锚）。
+const CodeOverflow = contract.ErrCodeOverflow
 
 // overflowTexts 超窗错误全文标记词表（数据面——新厂家短语在此扩，不进逻辑）。
 var overflowTexts = []string{
@@ -136,15 +141,15 @@ func isOverflowErr(err error) bool {
 func classifyStatus(status int, detail string) Classified {
 	switch {
 	case status == 401 || status == 403:
-		return Classified{Code: "AUTH", Message: "API Key 认证失败（" + itoa(status) + "）——请到模型页检查密钥配置"}
+		return Classified{Code: contract.ErrCodeAuth, Message: "API Key 认证失败（" + itoa(status) + "）——请到模型页检查密钥配置"}
 	case status == 402:
-		return Classified{Code: "SERVER", Message: "余额不足（402）——请到模型服务商充值后重试"}
+		return Classified{Code: contract.ErrCodeServer, Message: "余额不足（402）——请到模型服务商充值后重试"}
 	case status == 429:
-		return Classified{Retryable: true, Code: "RATE_LIMIT", Message: "请求频率达到上限（429）" + detail}
+		return Classified{Retryable: true, Code: contract.ErrCodeRateLimit, Message: "请求频率达到上限（429）" + detail}
 	case status >= 500:
-		return Classified{Retryable: true, Code: "SERVER", Message: "模型服务端故障（" + itoa(status) + "）" + detail}
+		return Classified{Retryable: true, Code: contract.ErrCodeServer, Message: "模型服务端故障（" + itoa(status) + "）" + detail}
 	default: // 400 格式错 / 422 参数错 / 其余 4xx：修请求才有意义，重试无用
-		return Classified{Code: "SERVER", Message: "请求被拒绝（" + itoa(status) + "）" + detail + "——请检查后重试"}
+		return Classified{Code: contract.ErrCodeServer, Message: "请求被拒绝（" + itoa(status) + "）" + detail + "——请检查后重试"}
 	}
 }
 
@@ -160,7 +165,7 @@ func classifyBizCode(code any) (Classified, bool) {
 		return Classified{}, false
 	}
 	if msg, ok := fatalBizCodes[s]; ok {
-		return Classified{Code: "SERVER", Message: msg}, true
+		return Classified{Code: contract.ErrCodeServer, Message: msg}, true
 	}
 	return Classified{}, false
 }
@@ -180,13 +185,13 @@ var fatalBizCodes = map[string]string{
 func classifyAnthropicType(typ, raw string) Classified {
 	switch typ {
 	case "authentication_error":
-		return Classified{Code: "AUTH", Message: "API Key 认证失败——请到模型页检查密钥配置"}
+		return Classified{Code: contract.ErrCodeAuth, Message: "API Key 认证失败——请到模型页检查密钥配置"}
 	case "permission_error", "billing_error", "not_found_error":
-		return Classified{Code: "SERVER", Message: "请求被拒绝（" + typ + "）：" + truncateStr(raw)}
+		return Classified{Code: contract.ErrCodeServer, Message: "请求被拒绝（" + typ + "）：" + truncateStr(raw)}
 	case "rate_limit_error":
-		return Classified{Retryable: true, Code: "RATE_LIMIT", Message: "请求频率达到上限（429）"}
+		return Classified{Retryable: true, Code: contract.ErrCodeRateLimit, Message: "请求频率达到上限（429）"}
 	case "overloaded_error", "api_error":
-		return Classified{Retryable: true, Code: "SERVER", Message: "模型服务端繁忙：" + truncateStr(raw)}
+		return Classified{Retryable: true, Code: contract.ErrCodeServer, Message: "模型服务端繁忙：" + truncateStr(raw)}
 	}
 	return Classified{}
 }
@@ -198,9 +203,14 @@ func transportMsg(err error) string {
 }
 
 // anthropicRaw SDK Error 的安全文案（Error() 在 Request/Response 为 nil 时
-// panic——真实运行错误必有，手工构造/边界路径防御性回退 RawJSON）。
+// panic——真实运行错误必有，手工构造/边界路径防御性回退 RawJSON）。nil
+// 单列先返（安全审查 2026-09-06：RawJSON 是值接收者，nil 指针上调用即解
+// 引用 panic——原防御分支自踩）。
 func anthropicRaw(ae *anthropic.Error) string {
-	if ae == nil || ae.Request == nil || ae.Response == nil {
+	if ae == nil {
+		return ""
+	}
+	if ae.Request == nil || ae.Response == nil {
 		return ae.RawJSON()
 	}
 	return ae.Error()
@@ -218,12 +228,6 @@ func detailOf(msg, raw string) string {
 
 func itoa(v int) string { return fmt.Sprintf("%d", v) }
 
-func truncateStr(s string) string {
-	r := []rune(s)
-	if len(r) > 160 {
-		return string(r[:160]) + "…"
-	}
-	return s
-}
+func truncateStr(s string) string { return strutil.Truncate(s, 160) }
 
 func truncateErr(err error) string { return truncateStr(err.Error()) }

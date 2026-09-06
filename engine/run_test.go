@@ -32,6 +32,27 @@ type scriptedModel struct {
 	onStream func(n int, send func(*schema.Message))
 }
 
+// inputsOf 输入记录的锁内快照（读方在测试 goroutine——断言/轮询与引擎
+// Stream 写并发，裸读即夹具自身竞态；-race 门下全量走此面）。
+func (f *scriptedModel) inputsOf() [][]*schema.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]*schema.Message(nil), f.inputs...)
+}
+
+// inputsRecorder 记录模型输入的假模型统一取值面（lastInput 通用收尾——
+// 各假模型的 inputsOf 同形）。
+type inputsRecorder interface{ inputsOf() [][]*schema.Message }
+
+// lastInput 末次模型入参（空记录 nil）。
+func lastInput(r inputsRecorder) []*schema.Message {
+	ins := r.inputsOf()
+	if len(ins) == 0 {
+		return nil
+	}
+	return ins[len(ins)-1]
+}
+
 func (f *scriptedModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	return schema.AssistantMessage("非流式答复", nil), nil
 }
@@ -53,18 +74,13 @@ func (f *scriptedModel) Stream(_ context.Context, input []*schema.Message, _ ...
 	return sr, nil
 }
 
-// newRunManager 构造带单工具面的测试引擎（写审批名单含 write_tool）。
-func newRunManager(t *testing.T, ts []contract.Tool, fm llm.ModelFactory) (*Manager, *tstore.Store) {
+// newTestManagerOn 指定 store 的测试引擎装配基座（engine 包内 Manager 装配的
+// 唯一样板）：固定底座（provider p/m、test 指令、scriptedModel 缺省模型、
+// checkpoint、工作区根），差异面全经 mut 改写（Tools/NewModel/Approval/
+// Channels/Providers 覆写等）。
+func newTestManagerOn(t *testing.T, st session.Store, mut func(*Options)) *Manager {
 	t.Helper()
-	st := tstore.New(t.TempDir())
-	return newRunManagerOn(t, ts, fm, st), st
-}
-
-// newRunManagerOn 自带 store 的引擎装配（ghost 回归用慢 store 包装注入写延迟）。
-func newRunManagerOn(t *testing.T, ts []contract.Tool, fm llm.ModelFactory, st session.Store) *Manager {
-	t.Helper()
-	reg := session.NewRegistry(st)
-	m, err := NewManager(reg, Options{
+	opt := Options{
 		Providers: func() []llm.ProviderSpec {
 			return []llm.ProviderSpec{{
 				ID: "p", Kind: "openai", Enabled: true,
@@ -72,18 +88,41 @@ func newRunManagerOn(t *testing.T, ts []contract.Tool, fm llm.ModelFactory, st s
 			}}
 		},
 		Instruction: func(SessionBrief) string { return "test" },
-		Tools:       func(SessionBrief) []contract.Tool { return ts },
-		NewModel:    fm,
+		NewModel: func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return &scriptedModel{}, nil
+		},
 		CheckPoints: func(operator, sid string) CheckPointStore {
 			return checkpoint.NewCheckPointStore(st, operator, sid)
 		},
-		Approval:      hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}},
 		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
-	})
+	}
+	if mut != nil {
+		mut(&opt)
+	}
+	m, err := NewManager(session.NewRegistry(st), opt)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
 	return m
+}
+
+// newTestManager 自建 tstore 的便捷面（装配缝/回归测试通用）。
+func newTestManager(t *testing.T, mut func(*Options)) *Manager {
+	t.Helper()
+	return newTestManagerOn(t, tstore.New(t.TempDir()), mut)
+}
+
+// newRunManager 构造带单工具面与写审批的测试引擎（写审批名单含 write_tool——
+// Run 级/审批/golden 回归族的差异项封装）。
+func newRunManager(t *testing.T, ts []contract.Tool, fm llm.ModelFactory) (*Manager, *tstore.Store) {
+	t.Helper()
+	st := tstore.New(t.TempDir())
+	m := newTestManagerOn(t, st, func(o *Options) {
+		o.Tools = func(SessionBrief) []contract.Tool { return ts }
+		o.NewModel = fm
+		o.Approval = hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}}
+	})
+	return m, st
 }
 
 // waitTitleFlight 等标题在途写收尾（Run 返回 ≠ 写完——genTitle 是唯一逃逸
@@ -121,9 +160,7 @@ func TestApprovalTimeoutAutoReject(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m, _ := newRunManager(t, []contract.Tool{wt}, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
-		return fm, nil
-	})
+	m, _ := newRunManager(t, []contract.Tool{wt}, factoryOf(fm))
 
 	s := m.Registry().Create("张三", "创建", "manual", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
@@ -177,9 +214,7 @@ func TestToolCallFragmentsMergedIntoHistory(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m, _ := newRunManager(t, []contract.Tool{rt}, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
-		return fm, nil
-	})
+	m, _ := newRunManager(t, []contract.Tool{rt}, factoryOf(fm))
 
 	s := m.Registry().Create("张三", "查询", "plan", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
@@ -225,9 +260,10 @@ func TestTitleFlightDeleteNoGhost(t *testing.T) {
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
 	st := slowStore{Store: tstore.New(t.TempDir()), d: 100 * time.Millisecond}
-	m := newRunManagerOn(t, []contract.Tool{rt}, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
-		return fm, nil
-	}, st)
+	m := newTestManagerOn(t, st, func(o *Options) {
+		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{rt} }
+		o.NewModel = factoryOf(fm)
+	})
 	s := m.Registry().Create("张三", "查询", "plan", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
 	m.Run(context.Background(), s, "查", nil, func(session.Event) {})

@@ -34,6 +34,19 @@ type runReq struct {
 	Attachments []session.Attachment `json:"attachments,omitempty"`
 }
 
+// maxBodyBytes 请求体上限（裸 decode 无上限是内存放大面——安全审查 2026-09-06）。
+const maxBodyBytes = 1 << 20
+
+// decodeJSON 限量解码（超限/坏 JSON → 400，返回 false 已写响应）。
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
 // run 起轮/排队（Manager.Dispatch——与 ChannelGateway.Handle 共用编排：
 // BeginRun 成功起轮，运行中/挂起转排队带说话人；说话人首见登记名册）。
 func (h *server) run(w http.ResponseWriter, r *http.Request) {
@@ -42,8 +55,7 @@ func (h *server) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in runReq
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+	if !decodeJSON(w, r, &in) {
 		return
 	}
 	var actor *contract.Participant
@@ -102,8 +114,7 @@ func (h *server) approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in approveReq
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+	if !decodeJSON(w, r, &in) {
 		return
 	}
 	var decider *contract.Participant
@@ -118,8 +129,10 @@ func (h *server) approve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true})
 	case errors.Is(err, engine.ErrNoPendingDecision):
 		http.Error(w, err.Error(), http.StatusConflict) // 幂等迟到——前端当已处理
+	case errors.Is(err, engine.ErrDecisionRejected):
+		http.Error(w, err.Error(), http.StatusForbidden) // DecisionGuard 拒绝（越权点批）
 	default:
-		http.Error(w, err.Error(), http.StatusForbidden) // DecisionGuard 拒绝等
+		http.Error(w, err.Error(), http.StatusInternalServerError) // 其余如实 500（安全审查 2026-09-06：一刀切 403 误导）
 	}
 }
 
@@ -137,8 +150,7 @@ func (h *server) answer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in answerReq
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		http.Error(w, "请求体不是合法 JSON："+err.Error(), http.StatusBadRequest)
+	if !decodeJSON(w, r, &in) {
 		return
 	}
 	var decider *contract.Participant
@@ -168,7 +180,7 @@ func (h *server) upsertParticipant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p contract.Participant
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.ID == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&p); err != nil || p.ID == "" {
 		http.Error(w, "参与者需非空 id", http.StatusBadRequest)
 		return
 	}

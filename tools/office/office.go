@@ -8,6 +8,7 @@ package office
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/tools"
@@ -23,7 +24,11 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 	if cfg.Root == "" {
 		return nil, fmt.Errorf("office 需要工作区根（拒绝全盘默认）")
 	}
-	h := &helper{root: cfg.Root}
+	root := cfg.Root
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs // 与 fsutil/applypatch 同归一（安全审查 2026-09-06：相对根随进程 CWD 漂移，防御纵深不一致）
+	}
+	h := &helper{root: root}
 	wx, err := tools.InferTool("write_xlsx",
 		"在工作区创建 xlsx 工作簿（同名覆盖）。sheets 为工作表数组：name + rows（二维单元格，值支持字符串/数字/布尔，空串 = 空单元格，稀疏行列自动补位）。上限 32 表 × 5000 行 × 256 列；纯内容无样式面（无合并单元格/公式/格式），要样式请生成后人工处理。",
 		h.writeXlsx)
@@ -58,6 +63,4 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 }
 
 // fail 统一失败输出（回喂模型自纠，errFeed 语义——与 fsutil 一致）。
-func fail(msg string) (map[string]any, error) {
-	return map[string]any{"ok": false, "error": msg}, nil
-}
+func fail(msg string) (map[string]any, error) { return tools.Fail(msg), nil } // 信封单点（tools.Fail——审查 P2-11）

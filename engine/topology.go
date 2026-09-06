@@ -27,7 +27,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
-	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
 
@@ -68,21 +67,15 @@ func (m *Manager) newTopologySub(ctx context.Context, s *session.Session, spec S
 	if err != nil {
 		return nil, err
 	}
+	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发）
 	key := spec.Model
 	if key == "" {
-		key = s.Model.Model
+		key = ms.Model
 	}
-	providers := m.Opt.Providers()
-	p, mspec, found := llm.FindSpec(providers, key)
-	if !found {
-		return nil, &configError{"拓扑子代理模型不在可用清单内：" + key}
-	}
-	cm, err := m.Opt.NewModel(ctx, p, mspec, s.Model.Effort)
+	cm, tspec, err := m.newShapedModel(ctx, key, ms.Effort, "拓扑子代理模型")
 	if err != nil {
-		return nil, &configError{"拓扑子代理模型构造失败：" + err.Error()}
+		return nil, err
 	}
-	cm = llm.NewVisionModel(cm, mspec, m.Opt.ImageResolve)
-	cm = llm.NewHistoryShapeModel(cm, p.Kind)
 	conf := &adk.ChatModelAgentConfig{
 		Name: spec.Name, Description: spec.Description,
 		Instruction: spec.Instruction, Model: cm, MaxIterations: maxIterations,
@@ -99,7 +92,7 @@ func (m *Manager) newTopologySub(ctx context.Context, s *session.Session, spec S
 			Tools: m.wrapFace(subTs, s, "auto"), UnknownToolsHandler: newUnknownToolHandler(contractToolNames(subTs), nil),
 		}}
 	}
-	if mw, err := m.newReductionMiddleware(s, windowOf(mspec), false); err != nil {
+	if mw, err := m.newReductionMiddleware(s, windowOf(tspec), false); err != nil {
 		return nil, err
 	} else {
 		conf.Handlers = append(conf.Handlers, mw)

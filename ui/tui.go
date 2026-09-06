@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/engine"
+	"github.com/jumeng/einox/internal/strutil"
 	"github.com/jumeng/einox/session"
 )
 
@@ -33,7 +35,8 @@ func TUI(m *engine.Manager, sid string) error {
 		return fmt.Errorf("ui: 原始模式失败：%w", err)
 	}
 	defer term.Restore(fd, old)
-	app := &tuiApp{m: m, width: w, height: h, keys: make(chan []byte, 8), redraw: make(chan struct{}, 1)}
+	app := &tuiApp{m: m, width: w, height: h, keys: make(chan []byte, 8), redraw: make(chan struct{}, 1),
+		out: func(s string) { _, _ = os.Stdout.WriteString(s) }}
 	app.quit = make(chan struct{})
 	go func() { // 键盘泵（原始模式逐字节读，方向键三字节 ESC 序列）。stdin
 		// 读阻塞不可选中——退出让位经 keys 满时 select（读阻塞随进程退出，
@@ -54,6 +57,7 @@ func TUI(m *engine.Manager, sid string) error {
 			}
 		}
 	}()
+	defer close(app.quit) // 键盘泵让位收线（选择器错误路径同样覆盖——安全审查 2026-09-06 前挂在 run() 内，pickSession 失败即漏）
 	if sid == "" {
 		picked, err := app.pickSession()
 		if err != nil {
@@ -75,7 +79,8 @@ type tuiModel struct {
 	cursor   int // 选中（按可见序）
 	offset   int // 视窗首行（可见序）
 	filter   string
-	filterIn bool // 过滤输入态
+	pend     []byte // 过滤输入的不完整 UTF-8 前缀（键盘泵每次读 ≤8 字节，CJK rune 可能跨读被切）
+	filterIn bool
 	inspOpen bool
 	live     bool
 }
@@ -122,6 +127,8 @@ func (mo *tuiModel) append(ev session.Event, height int) {
 func clamp(v, lo, hi int) int { return max(lo, min(hi, v)) }
 
 // ── Kind 摘要与域色（与 web 回放页同口径——T6 身份字段渲染）──────────
+// 词表与 ui/static/index.html 的 DOMAINS/SUMMARIES 同源——改词表须两侧同步
+//（跨语言无法机器对账，Go 侧有词表对账测试兜底——tui_test.go）。
 
 type tuiDomain int
 
@@ -147,9 +154,11 @@ func tuiDomainOf(kind string) tuiDomain {
 		return domGen
 	case kind == contract.EvToolCall || kind == contract.EvToolResult:
 		return domTool
-	case strings.HasPrefix(kind, "approval_") || strings.HasPrefix(kind, "ask_user_") ||
-		strings.HasPrefix(kind, "plan_request") || strings.HasPrefix(kind, "plan_decision") ||
-		strings.HasPrefix(kind, "plan_timeout"):
+	// hitl 广前缀（审查 P1-3）：ask_ 涵盖 ask_user_request 与 ask_decision/
+	// ask_timeout/ask_ignored（后者前缀是 ask_ 非 ask_user_，两实现曾共同漏）；
+	// plan_ 涵盖全部 plan_*——显式枚举新增 Kind 即漏
+	case strings.HasPrefix(kind, "approval_") || strings.HasPrefix(kind, "ask_") ||
+		strings.HasPrefix(kind, "plan_"):
 		return domHitl
 	case strings.HasPrefix(kind, "steer_") || strings.HasPrefix(kind, "notify_") ||
 		kind == contract.EvUserMessage || kind == contract.EvParticipantUpdate:
@@ -167,12 +176,7 @@ func tuiDomainOf(kind string) tuiDomain {
 // Reattach 盘面与 HTTP 面是 map——统一归一（map 直用，typed 经 JSON 往返；
 // 审查 P1-1：进程内直喂 typed 曾使全部摘要空白）。
 func tuiSummary(ev session.Event) string {
-	d, _ := ev.Data.(map[string]any)
-	if d == nil && ev.Data != nil {
-		if b, err := json.Marshal(ev.Data); err == nil {
-			_ = json.Unmarshal(b, &d)
-		}
-	}
+	d, _ := session.EventAs[map[string]any](ev) // 双形态统一取值（typed/map）
 	g := func(k string) string { s, _ := d[k].(string); return s }
 	switch ev.Event {
 	case contract.EvUserMessage:
@@ -180,11 +184,17 @@ func tuiSummary(ev session.Event) string {
 		if who != "" {
 			who = "（" + who + "）"
 		}
-		return "消息" + who + "：" + g("text")
+		text := g("text")
+		if text == "" {
+			text = "（附件）" // 空文本 = 纯附件消息（与 web 回放页同口径）
+		}
+		return "消息" + who + "：" + text
 	case contract.EvTextDelta:
 		return "文本：" + g("delta")
 	case contract.EvThinkingDelta:
 		return "思考…"
+	case contract.EvUsage:
+		return "用量上报"
 	case contract.EvToolCall:
 		return "调用 " + g("tool")
 	case contract.EvToolResult:
@@ -212,6 +222,74 @@ func tuiSummary(ev session.Event) string {
 			v += "（" + g("decider_name") + "）"
 		}
 		return v
+	case contract.EvApprovalTimeout:
+		return "审批超时（fail-closed 拒）"
+	case contract.EvAskRequest:
+		return "提问：" + g("question")
+	case contract.EvAskDecision:
+		// 作答正文：自由文本优先，退选项拼接（活会话 map 内 []string、
+		// 线上 JSON 往返 []any 双形态）
+		ans := g("free_text")
+		if ans == "" {
+			switch xs := d["answers"].(type) {
+			case []string:
+				ans = strings.Join(xs, "、")
+			case []any:
+				ss := make([]string, 0, len(xs))
+				for _, x := range xs {
+					if s, ok := x.(string); ok {
+						ss = append(ss, s)
+					}
+				}
+				ans = strings.Join(ss, "、")
+			}
+		}
+		if g("decider_name") != "" {
+			ans += "（" + g("decider_name") + "）"
+		}
+		return "作答：" + ans
+	case contract.EvAskTimeout:
+		return "提问超时"
+	case contract.EvAskIgnored:
+		return "提问被忽略"
+	case contract.EvPlanRequest:
+		return "计划：" + g("task")
+	case contract.EvPlanDecision:
+		v := "拒绝"
+		if b, _ := d["approve"].(bool); b {
+			v = "批准"
+		}
+		if g("decider_name") != "" {
+			v += "（" + g("decider_name") + "）"
+		}
+		return v
+	case contract.EvPlanTimeout:
+		return "计划超时（自动拒）"
+	case contract.EvTodoUpdate:
+		// 载荷是条目数组（typed []todo.Item）——map 归一不适用，数组同经 EventAs
+		if xs, ok := session.EventAs[[]any](ev); ok {
+			return fmt.Sprintf("清单 %d 项", len(xs))
+		}
+		return "清单"
+	case contract.EvSteerQueued:
+		return "排队：" + g("text")
+	case contract.EvSteerUpdated:
+		return "排队更新：" + g("text")
+	case contract.EvSteerRemoved:
+		return "移除排队：" + g("id")
+	case contract.EvSteerInjected:
+		return "注入对话：" + g("text")
+	case contract.EvSteerReordered:
+		if xs, ok := d["ids"].([]any); ok {
+			return fmt.Sprintf("重排 %d 条", len(xs))
+		}
+		return "重排"
+	case contract.EvNotifyQueued:
+		return "通知排队：" + g("text")
+	case contract.EvNotifyInjected:
+		return "通知注入：" + g("text")
+	case contract.EvModelChange:
+		return "模型 " + g("from") + " → " + g("to")
 	case contract.EvHarnessNote:
 		return g("kind") + "：" + g("title")
 	case "subagent":
@@ -230,7 +308,19 @@ func tuiSummary(ev session.Event) string {
 	case contract.EvSessionEnd:
 		return fmt.Sprintf("轮末（历史 %v 条）", d["hist_len"])
 	case contract.EvError:
-		return "错误 " + g("code") + "：" + g("message")
+		// message 截断 60（trunc 边界 n-1 + 省略号；与 web 页 slice(0,60) 略异，
+		// 取 TUI trunc 语义一致）
+		return "错误 " + g("code") + "：" + strutil.TruncateTotal(g("message"), 60)
+	case contract.EvInterrupted:
+		return "打断（非故障）"
+	case contract.EvTransportRetry:
+		n := func(k string) string {
+			if v, ok := d[k]; ok && v != nil {
+				return fmt.Sprintf("%v", v)
+			}
+			return "?"
+		}
+		return "重连 " + n("attempt") + "/" + n("max")
 	}
 	return "（未知事件——软降级通用行）"
 }
@@ -247,9 +337,8 @@ type tuiApp struct {
 	keys   chan []byte
 	quit   chan struct{}
 	redraw chan struct{}
+	out    func(string) // 输出面（默认 stdout——测试注入捕获；安全审查 2026-09-06 前为方法，渲染不可测即 panic 漏网）
 }
-
-func (a *tuiApp) out(s string) { _, _ = os.Stdout.WriteString(s) }
 
 func (a *tuiApp) pickSession() (*session.Session, error) {
 	items := a.m.Registry().ListAll()
@@ -324,8 +413,7 @@ func (a *tuiApp) run() error {
 	a.model.events = a.s.SnapshotEvents()
 	a.out("\x1b[?1049h\x1b[?25l") // 备用屏 + 藏光标
 	defer a.out("\x1b[?25h\x1b[?1049l")
-	defer close(a.quit) // 键盘泵让位
-	defer func() {      // 退订兜底：Record 扇出满即弃不阻塞，但僵尸订阅常驻 subs 表（小泄漏）
+	defer func() { // 退订兜底：Record 扇出满即弃不阻塞，但僵尸订阅常驻 subs 表（小泄漏）
 		if a.sub != nil {
 			a.s.Unsubscribe(a.sub)
 		}
@@ -370,13 +458,31 @@ func (a *tuiApp) key(k []byte) bool {
 		switch name {
 		case "enter", "esc":
 			a.model.filterIn = false
-		case "del": // 退格（0x7f）
+			a.model.pend = nil
+		case "del": // 退格（0x7f）——按 rune 截尾（多字节字符截一字节即坏串）
+			a.model.pend = nil
 			if n := len(a.model.filter); n > 0 {
-				a.model.filter = a.model.filter[:n-1]
+				_, size := utf8.DecodeLastRuneInString(a.model.filter)
+				a.model.filter = a.model.filter[:n-size]
 			}
 		default:
-			if len(k) == 1 && k[0] >= 0x20 {
-				a.model.filter += string(k)
+			// 逐 rune 消费（安全审查 2026-09-06：此前逐字节 string(k) 拼接，
+			// CJK 多字节跨读撕裂即产替换符——中文过滤词不可用）；控制字节
+			// （<0x20）与坏字节不进过滤器
+			a.model.pend = append(a.model.pend, k...)
+			for len(a.model.pend) > 0 {
+				r, size := utf8.DecodeRune(a.model.pend)
+				if r == utf8.RuneError && size == 1 {
+					if !utf8.FullRune(a.model.pend) {
+						break // 不完整前缀：留待下一批
+					}
+					a.model.pend = a.model.pend[1:] // 真坏字节：丢弃
+					continue
+				}
+				if r >= 0x20 {
+					a.model.filter += string(r)
+				}
+				a.model.pend = a.model.pend[size:]
 			}
 		}
 		a.model.cursor, a.model.offset = 0, 0
@@ -430,7 +536,7 @@ func (a *tuiApp) render() {
 	h := a.bodyHeight()
 	for row := 0; row < h && a.model.offset+row < len(idx); row++ {
 		ev := a.model.events[idx[a.model.offset+row]]
-		line := fmt.Sprintf("  #%d %-18s %s", ev.ID, ev.Event, trunc(tuiSummary(ev), a.width-28))
+		line := fmt.Sprintf("  #%d %-18s %s", ev.ID, ev.Event, strutil.TruncateTotal(tuiSummary(ev), a.width-28))
 		if a.model.offset+row == a.model.cursor {
 			b.WriteString("\x1b[7m" + line + "\x1b[0m")
 		} else {
@@ -442,18 +548,13 @@ func (a *tuiApp) render() {
 		ev := a.model.events[idx[a.model.cursor]]
 		payload, _ := json.MarshalIndent(ev.Data, "", "  ")
 		fmt.Fprintf(&b, "\x1b[38;5;75m#%d %s\x1b[0m\r\n", ev.ID, ev.Event)
-		for _, ln := range strings.Split(string(payload), "\n")[:max(1, a.height-h-5)] {
-			b.WriteString("  " + trunc(ln, a.width-2) + "\x1b[K\r\n")
+		lines := strings.Split(string(payload), "\n")
+		n := min(len(lines), max(1, a.height-h-5)) // 安全审查 2026-09-06：载荷行数
+		// 可少于可用高度（小载荷常见）——切片前必须钳界，否则越界 panic
+		for _, ln := range lines[:n] {
+			b.WriteString("  " + strutil.TruncateTotal(ln, a.width-2) + "\x1b[K\r\n")
 		}
 	}
 	b.WriteString("\x1b[38;5;245mk/j 上下 · g 头 G 尾 · Enter 检查器 · / 过滤 · l 实时 · r 刷新 · q 退出\x1b[0m\x1b[K\x1b[K\r\n")
 	a.out(b.String())
-}
-
-func trunc(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n || n <= 0 {
-		return s
-	}
-	return string(r[:max(0, n-1)]) + "…"
 }

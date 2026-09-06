@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/calendar"
 	"github.com/jumeng/einox/tools"
 )
 
@@ -27,9 +28,7 @@ func run(_ context.Context, _ struct{}) (map[string]any, error) {
 	now := time.Now()
 	weekday := [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}[int(now.Weekday())]
 	_, w := now.ISOWeek()
-	// ISO 周以周一为首：偏移换算（周一=0）
-	off := (int(now.Weekday()) + 6) % 7
-	monday := now.AddDate(0, 0, -off)
+	monday := calendar.Monday(now) // ISO 周界单点（与 engine.DayHeader 同源，审查 P3-4）
 	return map[string]any{
 		"now":        now.Format("2006-01-02 15:04:05"),
 		"date":       now.Format("2006-01-02"),

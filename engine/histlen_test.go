@@ -14,7 +14,7 @@ import (
 )
 
 func TestSessionEndCarriesHistLen(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	s := m.Registry().Create("张三", "注", "auto", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
 	m.Run(context.Background(), s, "问", nil, func(session.Event) {})
@@ -60,7 +60,7 @@ func TestSessionEndCarriesHistLen(t *testing.T) {
 // 把它计入（错误轮锚是「从失败点重试」合法场景，见设计文档）。
 func TestSessionEndHistLenOnFatalStreamError(t *testing.T) {
 	fm := llmtest.New(llmtest.Turn{Text: "半截输出", Err: errors.New("连接中断")})
-	m := newSeamManager(t, func(o *Options) { o.NewModel = fm.Factory() })
+	m := newTestManager(t, func(o *Options) { o.NewModel = fm.Factory() })
 	s := m.Registry().Create("张三", "注", "auto", contract.UserPrefs{Model: "p/m"})
 	s.SetState(session.StateRunning)
 	m.Run(context.Background(), s, "问", nil, func(session.Event) {})

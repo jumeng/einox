@@ -1,7 +1,7 @@
 package engine
 
-// 收束质量门（FinalGate，findings/2026-08-29-capability-hardening-design.md §10
-// 分层修订版）：三层约束（事前审批/事中 ErrFeed/收束门）的唯一空位补齐。
+// 收束质量门（FinalGate，2026-08-29 能力加固设计 §10 分层修订版）：三层
+// 约束（事前审批/事中 ErrFeed/收束门）的唯一空位补齐。
 //
 // 分层定案（2026-08-29 裁决）：
 //   einox 层 = 门循环机制——收束拦截（pump 自然收束后、settleTurn 前）、
@@ -23,6 +23,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/strutil"
 	"github.com/jumeng/einox/session"
 )
 
@@ -70,22 +71,19 @@ func (m *Manager) drive(runCtx context.Context, s *session.Session, fn emitFn,
 			return acc, endState // 门过：正常收束
 		}
 		if retries >= gateRetries(gate) {
-			m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: "SERVER",
-				Message: fmt.Sprintf("质量门未过（已重试 %d 次）：%s", retries, truncateRunes(gerr.Error(), 180))})
+			m.emit(s, fn, contract.EvError, contract.ErrorOut{Code: contract.ErrCodeServer,
+				Message: fmt.Sprintf("质量门未过（已重试 %d 次）：%s", retries, strutil.Truncate(gerr.Error(), 180))})
 			return acc, session.StateError
 		}
 		retries++
 		// 门卡通知（回放可见——不冒充用户消息；反馈本体入史驱动修复）
 		m.emit(s, fn, contract.EvHarnessNote, contract.HarnessNote{
 			Kind: "gate", Title: "质量门未过，已退回修复",
-			Detail: fmt.Sprintf("第 %d 次回灌：%s", retries, truncateRunes(gerr.Error(), 300)),
+			Detail: fmt.Sprintf("第 %d 次回灌：%s", retries, strutil.Truncate(gerr.Error(), 300)),
 		})
-		// 本轮产出入史（settleTurn 同款封账）→ 反馈消息入史 → 重入
-		acc.endAssistantMsg()
-		if len(acc.msgs) > 0 {
-			s.AppendHistory(acc.msgs...)
-			acc.msgs = nil // 清账：回灌失败路径本 acc 复用至 settleTurn，防同批二次入史
-		}
+		// 本轮产出入史（settleTurn 同款封账——清账：acc 复用至 settleTurn，
+		// 防回灌失败路径同批二次入史）→ 反馈消息入史 → 重入
+		flushAcc(s, acc, true)
 		fb := schema.UserMessage("（质量门未过）" + gerr.Error() +
 			"。请修复以上问题后重新完成任务，不要直接重复原回答。")
 		hist := renderSpeakers(sanitizeHistory(s.CloneHistory())) // T6 署名前缀投影（回灌输入同主输入同律）

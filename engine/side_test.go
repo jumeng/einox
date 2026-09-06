@@ -2,7 +2,7 @@ package engine
 
 // Side 引擎侧回归：工作区/外置域父感知（共享寻址）、side 轮末不清工作区、
 // SessionBrief.ParentSID 传递。构造语义见 session 包 side_test 与
-// findings/2026-09-05 设计文档。
+// 定案《2026-09-05》 设计文档。
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 )
 
 func TestSideWorkspaceSharesParent(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	reg := m.Registry()
 	parent := reg.Create("张三", "主任务", "auto", contract.UserPrefs{Model: "p/m"})
 	reg.Persist(parent)
@@ -73,7 +73,7 @@ func TestSideWorkspaceSharesParent(t *testing.T) {
 }
 
 func TestSideSpillResolvesParentDir(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	reg := m.Registry()
 	parent := reg.Create("张三", "主任务", "auto", contract.UserPrefs{Model: "p/m"})
 	reg.Persist(parent)
@@ -88,7 +88,7 @@ func TestSideSpillResolvesParentDir(t *testing.T) {
 // TestGateCheckerRootParentAware FinalGate 判据的工作区根父感知：side 的
 // 工具面工作在父工作区，判据拿到的根必须是父根（否则门对 side 形同虚设）。
 func TestGateCheckerRootParentAware(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	reg := m.Registry()
 	parent := reg.Create("张三", "主任务", "auto", contract.UserPrefs{Model: "p/m"})
 	reg.Persist(parent)
@@ -109,7 +109,7 @@ func TestGateCheckerRootParentAware(t *testing.T) {
 // 存储域走父 spill 目录（wsSID 共享寻址），文件名带自身 SID 防与父固定名
 // 互相覆盖；side 的 read_file 能读回自己那份（通知卡承诺可溯源）。
 func TestTranscriptSideWritesParentNoCollision(t *testing.T) {
-	m := newSeamManager(t, nil)
+	m := newTestManager(t, nil)
 	reg := m.Registry()
 	parent := reg.Create("张三", "主任务", "auto", contract.UserPrefs{Model: "p/m"})
 	reg.Persist(parent)

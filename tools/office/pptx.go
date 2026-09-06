@@ -1,5 +1,5 @@
 // pptx.go 幻灯片读：ppt/slides/slideN.xml 按序号排序，a:t 文本框逐段拼接。
-// 写面暂缺（无成熟纯 Go 方案，findings/2026-08-25 已记短板）。
+// 写面暂缺（无成熟纯 Go 方案——2026-08-25 已记短板）。
 
 package office
 
@@ -44,7 +44,7 @@ func (h *helper) readPptx(_ context.Context, in readPptxIn) (map[string]any, err
 		if len(slides) >= maxSlides {
 			break
 		}
-		rc, err := f.Open()
+		rc, err := openCapped(f)
 		if err != nil {
 			return fail("读取失败：" + f.Name + "：" + err.Error())
 		}

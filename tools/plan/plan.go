@@ -205,6 +205,4 @@ func docOf(cfg Config, c contract.PlanCard, status string) []byte {
 	return []byte(b.String())
 }
 
-func fail(msg string) (map[string]any, error) {
-	return map[string]any{"ok": false, "error": msg}, nil // 回喂模型自纠（errFeed 语义）
-}
+func fail(msg string) (map[string]any, error) { return tools.Fail(msg), nil } // 信封单点（tools.Fail——审查 P2-11）

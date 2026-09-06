@@ -5,8 +5,7 @@ package engine
 // 消耗模型轮次；checkpoint 保留——续聊时模型从工具拒绝/未作答反馈中自然知晓）。
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -15,7 +14,9 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/shortid"
 	"github.com/jumeng/einox/session"
+	"github.com/jumeng/einox/tools"
 )
 
 // approvalTimeout 挂起超时（默认 30 分钟；测试可缩短）。
@@ -24,26 +25,14 @@ var approvalTimeout = 30 * 60 * time.Second
 // ApprovalTimeout 当前超时配置。
 func ApprovalTimeout() time.Duration { return approvalTimeout }
 
-// newApprovalID 审批标识（a 前缀 + 6 hex）。
-func newApprovalID() string {
-	b := make([]byte, 3)
-	_, _ = rand.Read(b)
-	return "a" + hex.EncodeToString(b)
-}
+// 挂起域短标识（shortid 单点实现——审查 P3-2：rand-hex 生成曾六处各写，
+// 前缀语义表分散多包注释）。a=审批 q=提问 p=计划（session 侧另有 s=会话、
+// q=队列〔不同名空间已核实无碰撞面〕、hitl 侧 i=项——分配表见 internal/shortid）。
+func newApprovalID() string { return shortid.Hex("a", 3) }
 
-// newAskID 提问标识（q 前缀 + 6 hex；与审批 a 前缀区分）。
-func newAskID() string {
-	b := make([]byte, 3)
-	_, _ = rand.Read(b)
-	return "q" + hex.EncodeToString(b)
-}
+func newAskID() string { return shortid.Hex("q", 3) }
 
-// newPlanID 计划标识（p 前缀 + 6 hex；与审批 a/提问 q 前缀区分）。
-func newPlanID() string {
-	b := make([]byte, 3)
-	_, _ = rand.Read(b)
-	return "p" + hex.EncodeToString(b)
-}
+func newPlanID() string { return shortid.Hex("p", 3) }
 
 // approvalTimerKey 按 sid 的超时计时器登记（重复挂起替换旧计时器）。
 var (
@@ -106,8 +95,7 @@ func (m *Manager) expirePending(s *session.Session, appID, kind string) {
 	if kind == "ask" {
 		// 提问超时：不作答即分支取消（Resume 时 Decision 为 nil → fail-closed）
 		s.Record(contract.EvAskTimeout, map[string]string{"ask_id": appID, "reason": "提问超时未作答"})
-		s.SetState(session.StateEnded)
-		m.reg.Persist(s)
+		m.finishOf(s)(session.StateEnded)
 		return
 	}
 	if kind == "plan" {
@@ -115,8 +103,7 @@ func (m *Manager) expirePending(s *session.Session, appID, kind string) {
 		// Resume，工具恢复流不跑，续聊由模型从拒绝反馈中知晓）
 		s.SetDecision(contract.ApprovalDecision{Approve: false, Reason: "计划审批超时，自动拒绝"})
 		s.Record(contract.EvPlanTimeout, map[string]string{"plan_id": appID, "reason": "计划审批超时，自动拒绝"})
-		s.SetState(session.StateEnded)
-		m.reg.Persist(s)
+		m.finishOf(s)(session.StateEnded)
 		return
 	}
 	// 审批超时：自动拒绝（fail-closed）。合并决议卡 = 全项拒绝（项清单
@@ -130,8 +117,7 @@ func (m *Manager) expirePending(s *session.Session, appID, kind string) {
 		s.SetDecision(contract.ApprovalDecision{Approve: false, Reason: "审批超时，自动拒绝"})
 	}
 	s.Record(contract.EvApprovalTimeout, map[string]string{"approval_id": appID, "reason": "审批超时，自动拒绝"})
-	s.SetState(session.StateEnded)
-	m.reg.Persist(s)
+	m.finishOf(s)(session.StateEnded)
 }
 
 // stopApprovalTimer 决议到达即停表（approve/reject 抢先于超时）。
@@ -158,14 +144,15 @@ func (m *Manager) IgnoreAsk(s *session.Session) {
 	stopApprovalTimer(s.SID)
 	s.SetPendingApproval("")
 	for _, callID := range danglingToolCalls(s.CloneHistory()) {
+		// 回执走 marshal（手拼 JSON 文案带引号即非法——形态与 tools.Fail 同源，审查 P2-11）
+		env, _ := json.Marshal(tools.Fail("用户搁置了本次提问（未作答），本轮任务暂停未推进——用户将以新消息继续，请结合后续消息决定下一步"))
 		s.AppendHistory(&schema.Message{
 			Role: schema.Tool, ToolCallID: callID,
-			Content: `{"ok":false,"error":"用户搁置了本次提问（未作答），本轮任务暂停未推进——用户将以新消息继续，请结合后续消息决定下一步"}`,
+			Content: string(env),
 		})
 	}
 	s.Record(contract.EvAskIgnored, map[string]string{"ask_id": id, "reason": "用户忽略，未作答"})
-	s.SetState(session.StateEnded)
-	m.reg.Persist(s)
+	m.finishOf(s)(session.StateEnded)
 }
 
 // danglingToolCalls 挂起轮悬空 tool_call 定位（assistant 带 tool_calls 但
@@ -228,49 +215,34 @@ func approvalCardsOf(ii *adk.InterruptInfo) []contract.ApprovalCard {
 	return out
 }
 
-// approvalCardOf 从中断事件提取首张审批卡（旧单卡语义——ask/plan 分支与
-// 兼容路径用）。
-func approvalCardOf(ii *adk.InterruptInfo) (contract.ApprovalCard, bool) {
-	if cards := approvalCardsOf(ii); len(cards) > 0 {
-		return cards[0], true
+// cardOf 从中断事件提取首个指定形态的卡（顶层 Data 直传形态优先，复合
+// 中断走根因 InterruptContexts 链）。ask/plan 曾两份逐字同构（审查 P3-12
+// 泛型收敛）；approval 侧为多卡聚合（approvalCardsOf），语义不同不并。
+func cardOf[T any](ii *adk.InterruptInfo) (T, bool) {
+	var zero T
+	if ii == nil {
+		return zero, false
 	}
-	return contract.ApprovalCard{}, false
+	if c, ok := ii.Data.(T); ok {
+		return c, true
+	}
+	for _, c := range ii.InterruptContexts {
+		if c == nil {
+			continue
+		}
+		if cc, ok := c.Info.(T); ok {
+			return cc, true
+		}
+	}
+	return zero, false
 }
 
-// askCardOf 从中断事件提取提问卡（与 approvalCardOf 同构）。
+// askCardOf 从中断事件提取提问卡。
 func askCardOf(ii *adk.InterruptInfo) (contract.AskCard, bool) {
-	if ii == nil {
-		return contract.AskCard{}, false
-	}
-	if c, ok := ii.Data.(contract.AskCard); ok {
-		return c, true
-	}
-	for _, c := range ii.InterruptContexts {
-		if c == nil {
-			continue
-		}
-		if cc, ok := c.Info.(contract.AskCard); ok {
-			return cc, true
-		}
-	}
-	return contract.AskCard{}, false
+	return cardOf[contract.AskCard](ii)
 }
 
-// planCardOf 从中断事件提取计划卡（与 approvalCardOf 同构）。
+// planCardOf 从中断事件提取计划卡。
 func planCardOf(ii *adk.InterruptInfo) (contract.PlanCard, bool) {
-	if ii == nil {
-		return contract.PlanCard{}, false
-	}
-	if c, ok := ii.Data.(contract.PlanCard); ok {
-		return c, true
-	}
-	for _, c := range ii.InterruptContexts {
-		if c == nil {
-			continue
-		}
-		if cc, ok := c.Info.(contract.PlanCard); ok {
-			return cc, true
-		}
-	}
-	return contract.PlanCard{}, false
+	return cardOf[contract.PlanCard](ii)
 }

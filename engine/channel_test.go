@@ -9,20 +9,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/cloudwego/eino/components/model"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"github.com/cloudwego/eino/schema"
-	"github.com/jumeng/einox/checkpoint"
+
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/hitl"
 	"github.com/jumeng/einox/internal/tstore"
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/tools"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
 )
 
 // chanSink 测试渠道出站：全量收集（可 hold 模拟慢消费——投递阻塞，触发
@@ -71,7 +71,8 @@ func chanWaitFor(t *testing.T, cond func() bool, desc func() string) {
 	t.Fatal(desc())
 }
 
-// channelSetup 渠道测试装配：写审批引擎 + 剧本模型 + 渠道清单。
+// channelSetup 渠道测试装配：写审批引擎 + 剧本模型 + 渠道清单（newTestManagerOn
+// 基座 + 渠道差异项；store 外置——重启续绑场景同盘重建引擎）。
 func channelSetup(t *testing.T, st session.Store, fm *scriptedModel, chans ...ChannelConfig) (*Manager, *ChannelGateway, *int32) {
 	t.Helper()
 	var calls int32
@@ -82,28 +83,12 @@ func channelSetup(t *testing.T, st session.Store, fm *scriptedModel, chans ...Ch
 	if err != nil {
 		t.Fatalf("InferTool: %v", err)
 	}
-	m, err := NewManager(session.NewRegistry(st), Options{
-		Providers: func() []llm.ProviderSpec {
-			return []llm.ProviderSpec{{
-				ID: "p", Kind: "openai", Enabled: true,
-				Models: []llm.ModelSpec{{ID: "m", Input: []string{"text"}, Priority: 100}},
-			}}
-		},
-		Instruction: func(SessionBrief) string { return "test" },
-		Tools:       func(SessionBrief) []contract.Tool { return []contract.Tool{wt} },
-		NewModel: func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
-			return fm, nil
-		},
-		CheckPoints: func(operator, sid string) CheckPointStore {
-			return checkpoint.NewCheckPointStore(st, operator, sid)
-		},
-		Approval:      hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}},
-		WorkspaceRoot: func(owner, sid string) string { return st.TmpDir() + "/ws/" + owner + "/" + sid },
-		Channels:      chans,
+	m := newTestManagerOn(t, st, func(o *Options) {
+		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
+		o.NewModel = factoryOf(fm)
+		o.Approval = hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}}
+		o.Channels = chans
 	})
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
 	return m, m.Channels(), &calls
 }
 
@@ -201,13 +186,13 @@ func TestChannelRunningSteerQueues(t *testing.T) {
 	// 排队消息随下一轮前置注入（第二轮模型输入含 B 与新消息）
 	_ = gw.Handle(InboundMsg{Channel: "c1", Chat: "g1", Owner: "张三", Text: "第二问"})
 	chanWaitFor(t, func() bool {
-		return len(fm.inputs) >= 2 && joinedInput(fm.inputs[1]) != ""
+		return len(fm.inputsOf()) >= 2 && joinedInput(fm.inputsOf()[1]) != ""
 	}, func() string { return "第二轮模型调用应发生" })
 	s := chanSessionOf(t, gw, "c1", "g1")
 	chanWaitFor(t, func() bool { return s.StateOf() == session.StateEnded },
 		func() string { return "第二轮应收束" })
 	waitTitleFlight(t, s)
-	if j := joinedInput(fm.inputs[len(fm.inputs)-1]); !strings.Contains(j, "排队消息B") || !strings.Contains(j, "第二问") {
+	if j := joinedInput(lastInput(fm)); !strings.Contains(j, "排队消息B") || !strings.Contains(j, "第二问") {
 		t.Fatalf("第二轮输入应含排队消息与新消息：%s", j)
 	}
 	m.Channels().Close(2 * time.Second)

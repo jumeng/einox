@@ -1,6 +1,6 @@
 package einoext
 
-// RegisterSuspendState 注册出口回归（设计真源 findings/2026-08-29-assembly-seams-design.md
+// RegisterSuspendState 注册出口回归（设计真源 定案《2026-08-29-assembly-seams-design》（工作区档案，不入库）
 // §8.1）：Suspend.Info/State 过 checkpoint 走 gob——接口字段持有的具体类型
 // 必须注册；未注册类型编码即失败（fail 口），经注册出口登记后往返完好。
 // 业务据此不 import eino 即可满足序列化义务。

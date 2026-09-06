@@ -1,6 +1,6 @@
 package sandbox
 
-// EnvMode 环境档回归（设计真源 findings/2026-08-29-assembly-seams-design.md
+// EnvMode 环境档回归（设计真源 定案《2026-08-29-assembly-seams-design》（工作区档案，不入库）
 // §8.3）：缺省 inherit 零行为变化；minimal 白名单——凭据面默认不进围栏，
 // Policy.Env 显式注入照常覆盖/追加。
 

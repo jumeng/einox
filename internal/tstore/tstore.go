@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Store 目录式测试存储。
@@ -17,8 +18,21 @@ type Store struct {
 // New 构造（root = t.TempDir()）。
 func New(root string) *Store { return &Store{root: root} }
 
+// userPath 用户域子树路径。operator 围栏（安全审查 2026-09-06：operator 来自
+// ui 查询参数/渠道消息等外部面，含分隔符或 ../ 形态即穿越 users/<op>/ 树——
+// 无效 operator 落隔离名，读写皆空转不出树；结构规则与 session.ValidOwner 同源）。
 func (s *Store) userPath(operator, rel string) string {
-	return filepath.Join(s.root, "users", operator, filepath.FromSlash(rel))
+	return filepath.Join(s.root, "users", fencedOperator(operator), filepath.FromSlash(rel))
+}
+
+// fencedOperator 无效 operator 的隔离名（不存在目录——读 miss、写/删落空点，
+// 绝不出 users/ 树）。
+func fencedOperator(operator string) string {
+	if operator == "" || operator == "." || operator == ".." ||
+		strings.ContainsAny(operator, `/\`) || strings.ContainsRune(operator, 0) {
+		return "_invalid-operator_"
+	}
+	return operator
 }
 
 // ReadUserTreeFile 读用户域子树文件。
@@ -41,14 +55,15 @@ func (s *Store) RemoveUserTree(operator, rel string) error {
 	return os.RemoveAll(s.userPath(operator, rel))
 }
 
-// UserTreeDir 用户域根绝对路径（users/<op>；与 userPath 同根）。
+// UserTreeDir 用户域根绝对路径（users/<op>；与 userPath 同根——operator 同
+// 受围栏，无效即隔离名）。
 func (s *Store) UserTreeDir(operator string) string {
-	return filepath.Join(s.root, "users", operator)
+	return filepath.Join(s.root, "users", fencedOperator(operator))
 }
 
 // ListUserTreeSessions 列用户会话子目录。
 func (s *Store) ListUserTreeSessions(operator string) []string {
-	entries, err := os.ReadDir(filepath.Join(s.root, "users", operator, "sessions"))
+	entries, err := os.ReadDir(filepath.Join(s.root, "users", fencedOperator(operator), "sessions"))
 	if err != nil {
 		return nil
 	}

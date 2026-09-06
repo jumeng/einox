@@ -48,7 +48,7 @@ func TestOutputContractRenderAndValidate(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{bigReportTool{}} }
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil
@@ -60,10 +60,10 @@ func TestOutputContractRenderAndValidate(t *testing.T) {
 	waitTitleFlight(t, s)
 
 	// 模型第二轮输入里的 tool 结果 = Render 投影（非 canonical 大 JSON）
-	if len(fm.inputs) < 2 {
-		t.Fatalf("应有两轮模型调用，实得 %d", len(fm.inputs))
+	if len(fm.inputsOf()) < 2 {
+		t.Fatalf("应有两轮模型调用，实得 %d", len(fm.inputsOf()))
 	}
-	for _, msg := range fm.inputs[1] {
+	for _, msg := range fm.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, "报表已生成") {
 			toolSeen = msg.Content
 		}
@@ -86,7 +86,7 @@ func TestOutputContractValidationFailFeedsBack(t *testing.T) {
 		}
 		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
 	}}
-	m := newSeamManager(t, func(o *Options) {
+	m := newTestManager(t, func(o *Options) {
 		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{badReportTool{}} }
 		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
 			return fm, nil
@@ -97,7 +97,7 @@ func TestOutputContractValidationFailFeedsBack(t *testing.T) {
 	m.Run(context.Background(), s, "出报表", nil, func(session.Event) {})
 	waitTitleFlight(t, s)
 	found := false
-	for _, msg := range fm.inputs[1] {
+	for _, msg := range fm.inputsOf()[1] {
 		if msg.Role == schema.Tool && strings.Contains(msg.Content, "不符合声明的 schema") && strings.Contains(msg.Content, "meta") {
 			found = true
 		}

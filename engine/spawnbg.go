@@ -1,4 +1,4 @@
-// spawn 后台派生（Phase W，B 方案 = findings/2026-08-28-background-spawn-plan.md）：
+// spawn 后台派生（Phase W，B 方案 = 2026-08-28 后台派生定案）：
 // spawn{background:true} 调用即回 agentId，父回合继续；子代理自建 Runner 泵
 // 跑完（事件走 Record 扇出，与主 SSE 三路同链路），结论经通知注入回传父模型
 // （running=排队 / idle=自续轮，session.ContinueOrNotify 单锁原子裁定）。
@@ -27,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/strutil"
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
@@ -179,9 +180,9 @@ func (b *bgSpawnTool) InvokableRun(ctx context.Context, args string, opts ...too
 		// partial 非空才带（与 bg 档 finishSpawnBG 同形态——含前缀）
 		env := map[string]any{
 			"ok": false, "stop_reason": "error",
-			"error": "子代理未提交结构化结论即结束（须以 spawn_submit 提交）"}
+			"error": spawnErrNoSubmit}
 		if out != "" {
-			env["partial"] = "终止前最后一段输出：\n" + out
+			env["partial"] = spawnPartialPrefix + out
 		}
 		bv, _ := json.Marshal(env)
 		return string(bv), nil
@@ -259,7 +260,7 @@ func spawnTaskOf(args string) string {
 	if json.Unmarshal([]byte(args), &in) == nil && in.Task != "" {
 		return in.Task
 	}
-	return truncateRunes(args, 80)
+	return strutil.Truncate(args, 80)
 }
 
 // runSpawnBG 后台执行体：bg 档子代理自建 Runner + 泵翻译（EvSubAgent 带
@@ -361,7 +362,7 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 				}
 			}
 			m.finishSpawnBG(s, id, task, "", lastText, fmt.Errorf("后台子代理执行失败（%s）：%w",
-				truncateRunes(llm.Classify(unwrapRetryExhausted(ev.Err)).Message, 120), unwrapRetryExhausted(ev.Err)), true)
+				strutil.Truncate(llm.Classify(unwrapRetryExhausted(ev.Err)).Message, 120), unwrapRetryExhausted(ev.Err)), true)
 			return
 		}
 		if ev.Action != nil && ev.Action.Interrupted != nil {
@@ -390,7 +391,7 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 			m.finishSpawnBG(s, id, task, string(v), "", nil, true)
 			return
 		}
-		m.finishSpawnBG(s, id, task, "", lastText, errors.New("子代理未提交结构化结论即结束（须以 spawn_submit 提交）"), true)
+		m.finishSpawnBG(s, id, task, "", lastText, errors.New(spawnErrNoSubmit), true)
 		return
 	}
 	m.finishSpawnBG(s, id, task, lastText, "", nil, true)
@@ -465,7 +466,7 @@ func (m *Manager) finishSpawnBG(s *session.Session, id, task, conclusion, partia
 	if failure != nil {
 		env := map[string]any{"ok": false, "error": failure.Error()}
 		if partial != "" {
-			env["partial"] = "终止前最后一段输出：\n" + partial
+			env["partial"] = spawnPartialPrefix + partial
 		}
 		b, _ := json.Marshal(env)
 		text = string(b)
@@ -511,7 +512,7 @@ func notifyText(id, task, payload string, ok bool) string {
 	if !ok {
 		head = "[后台子代理失败] "
 	}
-	return head + truncateRunes(task, 120) + "\n结论：\n" + payload
+	return head + strutil.Truncate(task, 120) + "\n结论：\n" + payload
 }
 
 // NotifyOwner 完成通知注入（W-3 核心）：自激护栏（预算耗尽只入队不自续）→
@@ -528,6 +529,11 @@ func (m *Manager) NotifyOwner(s *session.Session, note string) {
 		go m.Run(context.Background(), s, "", nil, noopEmit) // 自续轮：通知经队列注入（输入路径唯一）
 		return
 	}
+	if !allowWake {
+		return // W-3 护栏：预算耗尽只入队不自续——尾巴兜底同受约束（曾绕守卫
+		// 唤醒：上一轮将关未清的 runDone 释放后按「ended+有滞留」自续，
+		// -race 时序放大 1/20 实锚，测试补强批发现）
+	}
 	// 滞留尾巴兜底：入队时父轮在跑（或挂起）——挂 runDone 等收尾；自然结束
 	// （ended）且队列仍滞留则自续消费；error（用户停止）/pending（决议续流）
 	// /新轮已起（running）都不动——把用户中断洗成模型请求是被明确拒绝的形态。
@@ -537,8 +543,8 @@ func (m *Manager) NotifyOwner(s *session.Session, note string) {
 			return
 		}
 		<-done
-		if s.StateOf() != session.StateEnded || s.QueueLen() == 0 {
-			return
+		if s.StateOf() != session.StateEnded || s.QueueLen() == 0 || s.Stopped() {
+			return // 停止竞态窗（Delete 并发）：不起死会话的空轮
 		}
 		if s.BeginRun("") {
 			s.SetTurnActor(nil) // 系统兜底轮同律

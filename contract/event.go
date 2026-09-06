@@ -7,9 +7,9 @@ import "time"
 // approval_decision / approval_timeout / ask_user_request / ask_decision /
 // ask_timeout / ask_ignored / plan_request / plan_decision / plan_timeout /
 // todo_update / steer_queued / steer_updated / steer_removed / steer_injected /
-// steer_reordered / notify_queued / notify_injected / user_message / usage /
-// session_end / error / interrupted / harness_note / subagent / model_change /
-// transport_retry。
+// steer_reordered / notify_queued / notify_injected / user_message /
+// participant_update / usage / session_end / error / interrupted /
+// harness_note / subagent / model_change / transport_retry。
 // 传输无关：应用层订阅 Session 事件后映射到自己的管线（SSE 编码归应用）。
 const (
 	EvTextDelta         = "text_delta"
@@ -31,6 +31,7 @@ const (
 	EvSteerUpdated      = "steer_updated"
 	EvSteerRemoved      = "steer_removed"
 	EvSteerInjected     = "steer_injected"
+	EvSteerReordered    = "steer_reordered"
 	EvNotifyQueued      = "notify_queued"
 	EvNotifyInjected    = "notify_injected"
 	EvUserMessage       = "user_message"
@@ -42,7 +43,6 @@ const (
 	EvHarnessNote       = "harness_note"
 	EvSubAgent          = "subagent"
 	EvModelChange       = "model_change"
-	EvSteerReordered    = "steer_reordered"
 	EvTransportRetry    = "transport_retry"
 )
 
@@ -203,8 +203,8 @@ type AskReq struct {
 	AskID         string      `json:"ask_id"`
 	Question      string      `json:"question"`
 	Options       []AskOption `json:"options"`
-	AllowMulti    bool        `json:"allow_multi"`
-	AllowFreeText bool        `json:"allow_free_text"`
+	AllowMulti    bool        `json:"allow_multi,omitempty"`
+	AllowFreeText bool        `json:"allow_free_text,omitempty"`
 	TimeoutAt     time.Time   `json:"timeout_at"`
 }
 
@@ -291,10 +291,22 @@ type TransportRetry struct {
 	Max     int `json:"max"`     // 重试上限（llm.MaxRetries）
 }
 
-// ErrorOut 错误卡片（Code：CONFIG | SERVER | TRANSPORT | ABORTED | AUTH |
-// RATE_LIMIT | OVERFLOW——AUTH/RATE_LIMIT 为网络容错 ③ 分类器新增〔认证
-// 失败 / 限速重试耗尽〕；OVERFLOW = 上下文超窗〔manager 裁剪重装配有界
-// 重试一次后才如实报错〕）。
+// 错误码封闭词表（ErrorOut.Code 的唯一常量源——llm.Classify 归约、engine/
+// session 发卡、前端按 code 分支渲染全部经此引用；此前权威只在注释、字面量
+// 散落 llm/engine 各写一份，typo 即静默漂移且无编译期对账，审查 P2-10）。
+const (
+	ErrCodeConfig    = "CONFIG"     // 装配/配置类（未配模型、键不在清单、构造失败）
+	ErrCodeServer    = "SERVER"     // 服务端/未知类（含轮次预算耗尽——可发消息接续）
+	ErrCodeTransport = "TRANSPORT"  // 网络传输类（可重试）
+	ErrCodeAborted   = "ABORTED"    // 取消/中断（非故障）
+	ErrCodeAuth      = "AUTH"       // 认证失败（网络容错 ③ 分类器）
+	ErrCodeRateLimit = "RATE_LIMIT" // 限速重试耗尽（网络容错 ③ 分类器）
+	ErrCodeOverflow  = "OVERFLOW"   // 上下文超窗（manager 裁剪重装配有界重试一次后才如实报错）
+)
+
+// ErrorOut 错误卡片（Code 取上方封闭词表常量；AUTH/RATE_LIMIT 为网络容错 ③
+// 分类器新增〔认证失败 / 限速重试耗尽〕；OVERFLOW = 上下文超窗〔manager 裁剪
+// 重装配有界重试一次后才如实报错〕）。
 type ErrorOut struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`

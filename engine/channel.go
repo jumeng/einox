@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -95,9 +96,10 @@ func bindKey(channel, chat string) string { return channel + "\x00" + chat }
 type ChannelGateway struct {
 	m *Manager
 
-	mu    sync.Mutex
-	binds map[string]*channelBind // 运行态（含消费泵）
-	disk  bindFile                // 落盘镜像（懒加载；新建/失绑即回写）
+	mu       sync.Mutex
+	binds    map[string]*channelBind // 运行态（含消费泵；在册 = 泵活——摘除即出册）
+	disk     bindFile                // 落盘镜像（懒加载；新建/失绑即回写）
+	createMu sync.Mutex              // 新建档互斥（TTL 扫盘在 g.mu 外执行，防同键并发双建）
 
 	wg     sync.WaitGroup
 	stopCh chan struct{}
@@ -105,12 +107,49 @@ type ChannelGateway struct {
 }
 
 // channelBind 运行态绑定：会话引用 + 订阅通道 + 投递水位（最新已投事件 ID
-// ——慢消费丢事件后按 ID 间隙从事件快照补投）。
+// ——慢消费丢事件后按 ID 间隙从事件快照补投）。s/sub 由 b.mu 守护（写方持
+// g.mu 再进 b.mu——锁序恒 g.mu → b.mu；读方是消费泵与 Cancel/Push，锁外
+// 经 refs/sess 取快照引用，不裸读字段：Unbind/Close 与泵并发曾构成实报
+// 数据竞态）；done = 绑定收线信号（Unbind 摘除即关——泵退出后不再投递，
+// 与「解绑即静默」语义对齐；网关级收线走 stopCh）。
 type channelBind struct {
-	brief  ChannelBrief
+	brief ChannelBrief
+
+	mu     sync.Mutex
 	s      *session.Session
 	sub    chan session.Event
-	lastID int
+	done   chan struct{}
+	lastID int // 泵单 goroutine 串行推进（b.mu 外——仅泵读写）
+}
+
+// refs 订阅通道与会话引用的锁内快照（泵每次迭代取一次）。
+func (b *channelBind) refs() (chan session.Event, *session.Session) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sub, b.s
+}
+
+// sess 会话引用（Cancel/Push 等锁外使用方）。
+func (b *channelBind) sess() *session.Session {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.s
+}
+
+// swapSession 绑定换会话（Reattach 造出新对象时——旧对象已出注册表，其订阅
+// 通道不再有事件写入）：换引用并重订新会话，恢复即时投递（否则只剩 250ms
+// 节拍追赶）。同对象零变化。
+func (b *channelBind) swapSession(s *session.Session) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if s == b.s {
+		return
+	}
+	if old := b.s; old != nil {
+		old.Unsubscribe(b.sub)
+	}
+	sub, _ := s.Subscribe() // 订阅序不抬水位：旧水位与新订阅序间的事件由节拍追赶补投
+	b.s, b.sub = s, sub
 }
 
 func newChannelGateway(m *Manager) *ChannelGateway {
@@ -155,25 +194,30 @@ func (g *ChannelGateway) loadDiskLocked() {
 	}
 }
 
-// saveDiskLocked 绑定表回写。mu 持有者调用。
+// saveDiskLocked 绑定表回写。mu 持有者调用。失败记日志不外抛（绑定表丢写
+// 只影响下次重启的绑定重建——逐渠道会话自愈兜底；静默黑洞无排障锚点，与
+// session persist 的日志纪律对齐）。
 func (g *ChannelGateway) saveDiskLocked() {
 	data, err := json.Marshal(g.disk)
 	if err != nil {
+		log.Printf("engine/channel: 绑定表序列化失败：%v", err)
 		return
 	}
-	_ = g.m.reg.Store().WriteUserTreeFile(bindOwner, bindRel, data)
+	if err := g.m.reg.Store().WriteUserTreeFile(bindOwner, bindRel, data); err != nil {
+		log.Printf("engine/channel: 绑定表落盘失败（下次重启绑定重建走自愈）：%v", err)
+	}
 }
 
-// establishLocked 起订阅消费泵（幂等——泵已在即回现有绑定）。mu 持有者
-// 调用；投递自订阅时水位起（历史不重推，适配器要历史走 Detail/快照）。
+// establishLocked 起订阅消费泵（幂等——泵已在即换会话引用返回现有绑定）。
+// mu 持有者调用；投递自订阅时水位起（历史不重推，适配器要历史走 Detail/快照）。
 func (g *ChannelGateway) establishLocked(s *session.Session, brief ChannelBrief) *channelBind {
 	key := bindKey(brief.Channel, brief.Chat)
-	if b, ok := g.binds[key]; ok && b.sub != nil {
-		b.s = s
+	if b, ok := g.binds[key]; ok {
+		b.swapSession(s)
 		return b
 	}
 	sub, seq := s.Subscribe()
-	b := &channelBind{brief: brief, s: s, sub: sub, lastID: seq}
+	b := &channelBind{brief: brief, s: s, sub: sub, done: make(chan struct{}), lastID: seq}
 	g.binds[key] = b
 	cfg, _ := g.cfgOf(brief.Channel)
 	g.wg.Add(1)
@@ -197,10 +241,19 @@ func (g *ChannelGateway) bindOfLocked(channel, chat string) *channelBind {
 	key := bindKey(channel, chat)
 	if b, ok := g.binds[key]; ok {
 		if s := g.attach(b.brief); s != nil {
-			b.s = s
+			b.swapSession(s)
 			return b
 		}
-		delete(g.binds, key) // 会话已删：绑定失效（新建覆盖在 sessionOf）
+		// 会话已删：绑定失效。close done 收泵（安全审查 2026-09-06：此前仅
+		// 出册不收线——泵活到网关 Close，违背「在册 = 泵活」的逆命题；与
+		// Unbind 同收线语义）
+		b.mu.Lock()
+		close(b.done)
+		if s := b.s; s != nil {
+			s.Unsubscribe(b.sub)
+		}
+		b.mu.Unlock()
+		delete(g.binds, key) // 新建覆盖在 sessionOf
 		return nil
 	}
 	rec, ok := g.disk.Binds[key]
@@ -218,20 +271,49 @@ func (g *ChannelGateway) bindOfLocked(channel, chat string) *channelBind {
 }
 
 // sessionOf 绑定会话寻址：有效绑定（内存或盘面）→ 会话取回/起泵；绑定
-// 失效或未绑定 → 新建会话 + 落绑定 + 起泵。
+// 失效或未绑定 → 新建会话 + 落绑定 + 起泵。新建档（含 Registry.Create 内联
+// 的 TTL 全量扫盘）在 g.mu 外执行——网关锁守绑定表与投递面，不背扫盘的
+// 串行化（否则任一新渠道会话首条消息期间全部渠道的入站/取消/推送都阻塞）；
+// createMu 防同键并发双建（双检：取到新建档锁后再核一遍绑定表）。
 func (g *ChannelGateway) sessionOf(msg InboundMsg) (*session.Session, error) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.closed {
+		g.mu.Unlock()
 		return nil, errors.New("engine: 渠道编排已关闭")
 	}
 	if b := g.bindOfLocked(msg.Channel, msg.Chat); b != nil {
-		return b.s, nil
+		s := b.sess()
+		g.mu.Unlock()
+		return s, nil
 	}
+	g.mu.Unlock()
+
+	g.createMu.Lock()
+	defer g.createMu.Unlock()
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return nil, errors.New("engine: 渠道编排已关闭")
+	}
+	if b := g.bindOfLocked(msg.Channel, msg.Chat); b != nil { // 等档锁期间他方已建
+		s := b.sess()
+		g.mu.Unlock()
+		return s, nil
+	}
+	g.mu.Unlock()
 	cfg, _ := g.cfgOf(msg.Channel)
+	if !session.ValidOwner(msg.Owner) {
+		// owner 是用户标识符不是路径片段（安全审查 2026-09-06：InboundMsg.Owner
+		// 经 Create 进 users/<op>/ 路径构造——含 ../ 形态即穿越，入口即拒；
+		// Owner 判定策略归适配器的既有边界不变，此处只拦结构非法形态）
+		return nil, errors.New("engine: InboundMsg.Owner 含非法形态（用户标识不可含路径分隔符或 ..）")
+	}
 	s := g.m.reg.Create(msg.Owner, msg.Text, firstNonEmpty(msg.Mode, contract.ModeManual), contract.UserPrefs{Model: cfg.Model})
 	brief := ChannelBrief{Channel: msg.Channel, Chat: msg.Chat, Owner: s.Owner, SID: s.SID}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.establishLocked(s, brief)
+	g.loadDiskLocked()
 	g.disk.Binds[bindKey(msg.Channel, msg.Chat)] = bindRecord{SID: s.SID, Owner: s.Owner}
 	g.saveDiskLocked()
 	return s, nil
@@ -283,6 +365,10 @@ func (m *Manager) Dispatch(s *session.Session, actor *contract.Participant, text
 // 语义，渠道侧把迟到按钮当已处理：静默而非告警）。
 var ErrNoPendingDecision = errors.New("engine: 会话无挂起决议（已处理或超时）")
 
+// ErrDecisionRejected 决议被 DecisionGuard 拒绝（目标 ≠ 决议者，或路由卡
+// 匿名决议 fail-closed）——ui/渠道侧映射 403（与其余内部错误区分）。
+var ErrDecisionRejected = errors.New("engine: 决议被拒")
+
 // Approve 审批/计划决议回写续流（决议端点编排收编：登记 → 回执落流 →
 // 落盘 → 续流）。itemID 空 = 单决议/计划卡（plan 档回执走 plan_decision），
 // 非空 = 合并决议卡逐项。decider（T6，可空）= 点按钮的人——随决议落回执
@@ -308,21 +394,28 @@ func (g *ChannelGateway) Approve(sid, itemID string, decider *contract.Participa
 			// 路由卡（有目标）+ 守卫在场：匿名决议即拒（fail-closed——
 			// 审查 P2：「无身份」不应成为越权旁路；nil 守卫/无目标零变化）
 			if d.DeciderID == "" {
-				return fmt.Errorf("决议被拒：本卡已定向路由（目标 %s），决议须携带决议者身份", tgt)
+				return fmt.Errorf("决议被拒：本卡已定向路由（目标 %s），决议须携带决议者身份：%w", tgt, ErrDecisionRejected)
 			}
 			if err := g.m.Opt.DecisionGuard(tgt, d.DeciderID); err != nil {
-				return fmt.Errorf("决议被拒（目标 %s ≠ 决议者 %s）：%w", tgt, d.DeciderID, err)
+				return fmt.Errorf("决议被拒（目标 %s ≠ 决议者 %s）：%w", tgt, d.DeciderID, ErrDecisionRejected)
 			}
 		}
 	}
 	kind, _ := s.PendingDueOf()
+	var receipts []contract.ItemDecisionOut // 逐项回执（分歧态回放真源——契约 Items 面，审查 P2-16）
+	itemOut := func(id string) contract.ItemDecisionOut {
+		return contract.ItemDecisionOut{ItemID: id, Approve: d.Approve, Reason: d.Reason,
+			DeciderID: d.DeciderID, DeciderName: d.DeciderName}
+	}
 	if itemID != "" {
 		s.SetDecisionFor(itemID, d)
+		receipts = append(receipts, itemOut(itemID))
 	} else if items := s.PendingItems(); len(items) > 0 {
 		// 合并决议卡「全批/全拒」：逐项登记（恢复流按项领决议），回执与
-		// 续流一次（逐项回执是升级位——顶层镜像已可回放重建终态）
+		// 续流一次
 		for _, it := range items {
 			s.SetDecisionFor(it, d)
+			receipts = append(receipts, itemOut(it))
 		}
 	} else {
 		s.SetDecision(d)
@@ -330,7 +423,7 @@ func (g *ChannelGateway) Approve(sid, itemID string, decider *contract.Participa
 	if kind == "plan" {
 		s.RecordPlanDecision(appID, d)
 	} else {
-		s.RecordDecision(appID, d)
+		s.RecordDecision(appID, d, receipts...)
 	}
 	g.m.reg.Persist(s)
 	go g.m.Resume(context.Background(), s, noopEmit) // 原子抢占归 Resume 首行（BeginResume）
@@ -368,10 +461,10 @@ func (g *ChannelGateway) Cancel(channel, chat string) bool {
 	if b == nil {
 		return false
 	}
-	if b.s.StateOf() != session.StateRunning {
+	if b.sess().StateOf() != session.StateRunning {
 		return false
 	}
-	b.s.CancelRun()
+	b.sess().CancelRun()
 	return true
 }
 
@@ -386,7 +479,7 @@ func (g *ChannelGateway) Push(channel, chat, text string) error {
 	if b == nil {
 		return fmt.Errorf("engine: 渠道会话未绑定（%s/%s）——无推送面", channel, chat)
 	}
-	b.s.Record(contract.EvHarnessNote, contract.HarnessNote{Kind: "channel_push", Title: text})
+	b.sess().Record(contract.EvHarnessNote, contract.HarnessNote{Kind: "channel_push", Title: text})
 	return nil
 }
 
@@ -406,16 +499,22 @@ func (g *ChannelGateway) Lookup(channel, chat string) (ChannelBrief, bool) {
 }
 
 // Unbind 解除绑定（应用删除会话/渠道会话注销时；内存与盘面同摘，消费泵
-// 收线时随 stopCh 退出——会话删除后 Record 静默，闲置泵不投递）。
+// 随绑定收线信号退出——解绑后不再投递该会话的任何事件，兑现「注销即静默」；
+// 残留在订阅通道内的事件随泵退出一并丢弃——事件流真源在会话记录，回放不受
+// 影响）。
 func (g *ChannelGateway) Unbind(channel, chat string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.loadDiskLocked()
 	key := bindKey(channel, chat)
-	_, had := g.binds[key]
-	if b, ok := g.binds[key]; ok && b.sub != nil {
-		b.s.Unsubscribe(b.sub)
-		b.sub = nil
+	b, had := g.binds[key]
+	if b != nil {
+		b.mu.Lock()
+		close(b.done) // 绑定收线（在册绑定 done 至多关一次：摘除即出册）
+		if s := b.s; s != nil {
+			s.Unsubscribe(b.sub)
+		}
+		b.mu.Unlock()
 	}
 	delete(g.binds, key)
 	if _, ok := g.disk.Binds[key]; ok {
@@ -436,10 +535,11 @@ func (g *ChannelGateway) Close(deadline time.Duration) bool {
 	}
 	g.closed = true
 	for _, b := range g.binds {
-		if b.sub != nil {
-			b.s.Unsubscribe(b.sub) // 先摘订阅：泵收线前不再收新事件
-			b.sub = nil
+		b.mu.Lock()
+		if s := b.s; s != nil {
+			s.Unsubscribe(b.sub) // 先摘订阅：泵收线前不再收新事件
 		}
+		b.mu.Unlock()
 	}
 	close(g.stopCh)
 	g.mu.Unlock()
@@ -460,17 +560,21 @@ func (g *ChannelGateway) Close(deadline time.Duration) bool {
 // pump 订阅消费泵：事件扇出 → 水位推进 → 渠道投递；投递面尽力而为的对齐
 // 兜底两条——事件间隙（慢消费丢事件，订阅通道满即弃的既有语义）即时从
 // 快照补投；静默节拍主动对齐真源（被弃的是尾部事件时无「下一事件」触发
-// 间隙检测，由节拍追赶收口——终态不缺失）。会话删除后 Record 停记（通道
-// 静默），泵闲置至收线。
+// 间隙检测，由节拍追赶收口——终态不缺失）。收线两路：网关级 stopCh（停机）
+// 与绑定级 done（Unbind——解绑即静默）。会话引用/订阅通道每迭代经 refs 锁内
+// 快照（换会话重订在泵外并发进行，不裸读字段）。
 func (g *ChannelGateway) pump(b *channelBind, sink ChannelSink) {
 	defer g.wg.Done()
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
+		sub, s := b.refs()
 		select {
 		case <-g.stopCh:
 			return
-		case ev := <-b.sub:
+		case <-b.done:
+			return
+		case ev := <-sub:
 			if ev.ID == 0 {
 				continue
 			}
@@ -478,14 +582,14 @@ func (g *ChannelGateway) pump(b *channelBind, sink ChannelSink) {
 				continue // 节拍追赶已投过（通道内滞留的旧事件）
 			}
 			if ev.ID > b.lastID+1 {
-				for _, miss := range b.snapshotBetween(b.lastID, ev.ID) {
+				for _, miss := range snapshotBetween(s, b.lastID, ev.ID) {
 					sink.Deliver(b.brief, miss)
 				}
 			}
 			sink.Deliver(b.brief, ev)
 			b.lastID = ev.ID
 		case <-tick.C:
-			for _, miss := range b.catchUp() {
+			for _, miss := range catchUp(s, b) {
 				sink.Deliver(b.brief, miss)
 			}
 		}
@@ -493,9 +597,9 @@ func (g *ChannelGateway) pump(b *channelBind, sink ChannelSink) {
 }
 
 // snapshotBetween 事件快照的 (from, to) 开区间切片（间隙补投源）。
-func (b *channelBind) snapshotBetween(from, to int) []session.Event {
+func snapshotBetween(s *session.Session, from, to int) []session.Event {
 	var out []session.Event
-	for _, ev := range b.s.EventsSince(from) {
+	for _, ev := range s.EventsSince(from) {
 		if ev.ID < to {
 			out = append(out, ev)
 		}
@@ -505,8 +609,8 @@ func (b *channelBind) snapshotBetween(from, to int) []session.Event {
 
 // catchUp 静默追赶：快照中水位之后的全部事件（尾部被弃的收口路径），
 // 推进水位（调用方串行——pump 单 goroutine 持有）。
-func (b *channelBind) catchUp() []session.Event {
-	out := b.s.EventsSince(b.lastID)
+func catchUp(s *session.Session, b *channelBind) []session.Event {
+	out := s.EventsSince(b.lastID)
 	if len(out) > 0 {
 		b.lastID = out[len(out)-1].ID
 	}

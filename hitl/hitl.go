@@ -18,15 +18,13 @@ package hitl
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/shortid"
 	"github.com/jumeng/einox/mid"
 )
 
@@ -90,22 +88,22 @@ type DecisionSource interface {
 	GrantTask()
 }
 
-// approvalState 中断保存态（恢复时带回：原始调用参数 + 项标识）。
+// approvalState 中断保存态（恢复时带回：原始调用参数 + 项标识 + 是否强制
+// 审批卡——批准语义分叉依据：强制卡批准只代执行本次，不授本轮写）。
 type approvalState struct {
 	Args   string
 	ItemID string // 合并决议卡项标识（空 = 旧单卡挂起态——legacy 单决议路径）
+	Forced bool   // 挂起时命中 ArgsForce/ArgsForceBy（Resume 时裁决批准是否授轮权）
 }
 
-// newItemID 合并决议卡项标识（i 前缀 + 6 hex；与审批 a/提问 q/计划 p 前缀区分）。
-func newItemID() string {
-	b := make([]byte, 3)
-	_, _ = rand.Read(b)
-	return "i" + hex.EncodeToString(b)
-}
+// newItemID 合并决议卡项标识（i 前缀——shortid 单点，前缀分配表见其包注释）。
+func newItemID() string { return shortid.Hex("i", 3) }
 
 // gob 序列化注册（checkpoint 持久化中断载荷——未注册跨进程恢复会失败）。
+// ApprovalConfig 仅为占位注册（该类型不进中断载荷——中断只存 approvalState；
+// 函数字段 gob 也不支持编码）。
 func init() {
-	schema.Register[ApprovalConfig]() // 保持 gob 注册表覆盖（空结构无字段开销）
+	schema.Register[ApprovalConfig]()
 	schema.Register[approvalState]()
 	schema.Register[contract.ApprovalCard]()
 }
@@ -180,10 +178,18 @@ func (a *approvalTool) Invoke(ctx context.Context, args json.RawMessage) (json.R
 			if reason == "" {
 				reason = "用户未提供原因"
 			}
-			return json.RawMessage(fmt.Sprintf(`{"ok":false,"error":"disapproved: %s——用户拒绝本次操作，请调整方案或向用户确认"}`, reason)), nil
+			// 信封走 marshal（安全审查 2026-09-06：reason 是用户自由文本，含引号/
+			// 换行时 Sprintf 手拼即非法 JSON——ToolResultDigest 解不出 ok 键会把
+			// 拒绝误判为成功；与 tools.Fail 同源形态）
+			env, _ := json.Marshal(map[string]any{
+				"ok":    false,
+				"error": "disapproved: " + reason + "——用户拒绝本次操作，请调整方案或向用户确认"})
+			return json.RawMessage(env), nil
 		}
-		// 批准：plan 档授权本轮后续写
-		if a.mode == "plan" {
+		// 批准：plan 档授权本轮后续写。强制审批卡例外（安全审查 2026-09-06）——
+		// ArgsForce 契约「人批准后本次代执行」「本确认不可被模式授权语义替代」：
+		// 批准一张强制卡不得顺带授予本轮全部写免审（放权面意外扩大）。
+		if a.mode == "plan" && !saved.Forced {
 			a.src.GrantTurn()
 		}
 		runArgs := string(args)
@@ -207,9 +213,16 @@ func (a *approvalTool) Invoke(ctx context.Context, args json.RawMessage) (json.R
 		card.Note = "计划模式：批准 = 授权本轮写操作。建议先用 submit_plan 提交计划文档——计划获批后整个任务期免逐项确认"
 	}
 	if forced {
-		card.Note = a.cfg.ForceNotes[a.opName] // 强制审批文案优先（本确认不可被模式授权语义替代）
+		// 强制审批文案优先（本确认不可被模式授权语义替代）；ForceNotes 未配置
+		// 该工具时用兑底文案——强制卡零说明会让用户不知情（plan 档的「批准 =
+		// 授权本轮写」告知对强制卡也不适用——批准语义已收窄为本次代执行）。
+		if note := a.cfg.ForceNotes[a.opName]; note != "" {
+			card.Note = note
+		} else {
+			card.Note = "参数级强制审批：本次批准仅代执行本调用，不授予任何后续免审。"
+		}
 	}
-	return nil, &contract.Suspend{Info: card, State: approvalState{Args: string(args), ItemID: itemID}}
+	return nil, &contract.Suspend{Info: card, State: approvalState{Args: string(args), ItemID: itemID, Forced: forced}}
 }
 
 // WrapTools 组装期包装：全量工具内层套 validate（入参 schema 子集校验）+

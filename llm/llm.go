@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -327,10 +328,16 @@ func resolveYAML() []ProviderSpec {
 	return nil
 }
 
-// FlattenModels 启用 provider 的模型平铺（priority 序，llm-options 数据源；
+// FlattenModels 启用 provider 的模型平铺（priority 降序稳定排序——
+// 「priority 序」注释此前无排序兑现（安全审查 2026-09-06），ResolveCurrent
+// 的「回退第一模型」实际拿到配置切片序；稳定排序保同优先级的清单序。
 // 空配置返回空切片而非 nil——JSON 出 [] 不出 null）。
 func FlattenModels(ps []ProviderSpec) []ModelOpt {
-	out := make([]ModelOpt, 0)
+	type flat struct {
+		opt ModelOpt
+		pri int
+	}
+	var out []flat
 	for _, p := range ps {
 		if !p.Enabled {
 			continue
@@ -340,13 +347,18 @@ func FlattenModels(ps []ProviderSpec) []ModelOpt {
 			if m.Limit != nil && m.Limit.Context > 0 {
 				cw = m.Limit.Context
 			}
-			out = append(out, ModelOpt{
+			out = append(out, flat{opt: ModelOpt{
 				Key: p.ID + "/" + m.ID, Provider: p.ID, ProviderName: p.Name,
 				Name: m.Name, Input: m.Input, ContextWindow: cw,
-			})
+			}, pri: m.Priority})
 		}
 	}
-	return out
+	sort.SliceStable(out, func(i, j int) bool { return out[i].pri > out[j].pri })
+	opts := make([]ModelOpt, 0, len(out))
+	for _, f := range out {
+		opts = append(opts, f.opt)
+	}
+	return opts
 }
 
 // inferContextWindow 模型上下文窗口推断（best-effort 前缀表；显式

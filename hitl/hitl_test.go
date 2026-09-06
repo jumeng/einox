@@ -412,3 +412,62 @@ func TestResumeFailClosed(t *testing.T) {
 		t.Fatal("plan 批准应授权本轮")
 	}
 }
+
+// TestArgsForcePlanApprovalNoTurnGrant（安全审查 2026-09-06）：plan 档批准
+// 强制卡 = 只代执行本次，不授本轮写（ArgsForce 契约「人批准后本次代执行」
+// 「本确认不可被模式授权语义替代」）；对照：批准普通 plan 卡照旧授轮权。
+func TestArgsForcePlanApprovalNoTurnGrant(t *testing.T) {
+	// 强制卡批准：执行本次，且不置轮授权
+	ctx := contract.WithResumeState(context.Background(), approvalState{Args: forceArgs, Forced: true})
+	src := &stubDecisions{decision: &contract.ApprovalDecision{Approve: true}}
+	stub := &countingTool{name: "update_issue_fields"}
+	wrapped := WrapTools([]contract.Tool{stub}, src, "plan", forceConfig())
+	if _, err := wrapped[0].Invoke(ctx, json.RawMessage(forceArgs)); err != nil || stub.calls != 1 {
+		t.Fatalf("强制卡批准后应执行本次调用：%v calls=%d", err, stub.calls)
+	}
+	if src.granted {
+		t.Fatal("强制卡批准不应授予本轮写免审")
+	}
+	// 不授轮的直接后果：同轮普通写调用照常挂起（修复前会被顺带免审放行）
+	stub2 := &countingTool{name: "create_issues"}
+	wrapped2 := WrapTools([]contract.Tool{stub2}, src, "plan", testConfig())
+	if _, err := wrapped2[0].Invoke(context.Background(), json.RawMessage(`{}`)); err == nil {
+		t.Fatal("轮权未授：普通写调用应照常挂起")
+	} else if _, ok := err.(*contract.Suspend); !ok {
+		t.Fatalf("应为挂起信号：%v", err)
+	}
+
+	// 对照：批准普通 plan 卡（非强制）授轮权——既有语义锚
+	ctx2 := contract.WithResumeState(context.Background(), approvalState{Args: `{}`})
+	src2 := &stubDecisions{decision: &contract.ApprovalDecision{Approve: true}}
+	stub3 := &countingTool{name: "create_issues"}
+	wrapped3 := WrapTools([]contract.Tool{stub3}, src2, "plan", testConfig())
+	if _, err := wrapped3[0].Invoke(ctx2, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("普通 plan 卡批准应执行：%v", err)
+	}
+	if !src2.granted {
+		t.Fatal("普通 plan 卡批准应授本轮写")
+	}
+}
+
+// TestDisapproveEnvelopeReasonSafe（安全审查 2026-09-06）：拒绝 reason 含引号/
+// 换行时回执仍是合法 JSON（手拼 Sprintf 形态会产非法 JSON，下游
+// ToolResultDigest 解不出 ok 键把拒绝误判为成功）。
+func TestDisapproveEnvelopeReasonSafe(t *testing.T) {
+	src := &stubDecisions{decision: &contract.ApprovalDecision{Approve: false,
+		Reason: "含\"引号\"与\\反斜杠\n换行"}}
+	stub := &countingTool{name: "create_issues"}
+	wrapped := WrapTools([]contract.Tool{stub}, src, "manual", testConfig())
+	ctx := contract.WithResumeState(context.Background(), approvalState{Args: `{}`})
+	out, err := wrapped[0].Invoke(ctx, json.RawMessage(`{}`))
+	if err != nil || stub.calls != 0 {
+		t.Fatalf("拒绝应回喂信封不执行：%v calls=%d", err, stub.calls)
+	}
+	var m map[string]any
+	if json.Unmarshal(out, &m) != nil {
+		t.Fatalf("拒绝信封应为合法 JSON：%s", out)
+	}
+	if v, _ := m["ok"].(bool); v {
+		t.Fatal("拒绝信封 ok 应为 false")
+	}
+}

@@ -1,7 +1,7 @@
 package session
 
 // ForkAt 锚定分叉回归：截断正确性 / 未知锚与零值锚拒绝 / side 拒分叉 /
-// anchor=0 与 Fork 等价 / 盘面路径。设计见 findings/2026-09-05。
+// anchor=0 与 Fork 等价 / 盘面路径。设计见 定案《2026-09-05》。
 
 import (
 	"testing"

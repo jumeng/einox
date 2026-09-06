@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,9 +19,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestBuildCmdDefaultOff 默认关 = 行为等价（真源红线③：Sandbox == nil 时
-// run_command 执行路径与既有直执行形态一致——sh -c、无 env 覆盖、无
-// SysProcAttr）。
+// TestBuildCmdDefaultOff 默认关 = 不施加沙箱（真源红线③：Sandbox == nil 时
+// sh -c 直执行、无 env 覆盖）。进程组长除外（安全审查 2026-09-06：超时/停止
+// 只杀 sh 会留整棵进程树——组化是生命周期治理不是围栏，对成功执行的命令
+// 零行为差异；Windows 无进程组语义为 no-op）。
 func TestBuildCmdDefaultOff(t *testing.T) {
 	t.Setenv("EINO_RUN_DOCKER", "")
 	cmd, sandboxed := buildCmd(context.Background(), "/ws", nil, nil, "echo hi")
@@ -30,8 +32,11 @@ func TestBuildCmdDefaultOff(t *testing.T) {
 	if len(cmd.Args) != 3 || cmd.Args[0] != "sh" || cmd.Args[1] != "-c" || cmd.Args[2] != "echo hi" {
 		t.Fatalf("默认应直执行 sh -c：%v", cmd.Args)
 	}
-	if cmd.Env != nil || cmd.SysProcAttr != nil {
-		t.Fatalf("默认路径不应动 env/SysProcAttr：%v %v", cmd.Env, cmd.SysProcAttr)
+	if cmd.Env != nil {
+		t.Fatalf("默认路径不应动 env：%v", cmd.Env)
+	}
+	if runtime.GOOS != "windows" && cmd.SysProcAttr == nil {
+		t.Fatal("默认路径应设进程组长（超时/停止整组终结）")
 	}
 }
 

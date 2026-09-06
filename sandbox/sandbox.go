@@ -3,8 +3,8 @@
 // （Landlock/seccomp/rlimit 必须 fork 后 exec 前在子进程内施加，Go self
 // re-exec 惯例，codex helper 同构）+ 后端探测三态如实上报（dsh 式）。
 // 机制归基座、选择归业务：应用装配层决定用不用/用哪档/参数（PM 默认关
-// opt-in），基座承载实现与安全不变量。设计真源 = 仓内
-// findings/2026-08-26-einox-sandbox-design.md（含 2026-08-26 独立审查修订）。
+// opt-in），基座承载实现与安全不变量。设计 = 2026-08-26 沙箱设计定案
+// （含同日独立审查修订）。
 package sandbox
 
 import (

@@ -37,7 +37,7 @@ type ApprovalCard struct {
 	Action   string     `json:"action,omitempty"` // 动作名（缺省回退 Tool）
 	Args     string     `json:"-"`
 	ItemID   string     `json:"item_id,omitempty"`
-	PlanMode bool       `json:"plan_mode"` // plan 档计划卡（批准授权本轮全部写）
+	PlanMode bool       `json:"plan_mode,omitempty"` // plan 档计划卡（批准授权本轮全部写）
 	Plan     []PlanItem `json:"plan"`
 	Note     string     `json:"note,omitempty"`
 	Diff     string     `json:"diff,omitempty"` // 审批卡逐行 diff 载荷——apply_patch 透传补丁原文 / repo_commit 现算 git diff；超长截断

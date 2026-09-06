@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -71,12 +72,35 @@ func (g *guardTool) Invoke(ctx context.Context, args json.RawMessage) (json.RawM
 	out, err := g.t.Invoke(gctx, args)
 	if err != nil {
 		if errors.Is(gctx.Err(), context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-			return json.RawMessage(fmt.Sprintf(`{"ok":false,"error":"工具执行超过 %s 硬上限，已截止——拆小任务或改用后台任务（run_command background）"}`, ToolDeadline)), nil
+			// 信封走 marshal（手拼 JSON 文案带引号即非法——形态与 tools.Fail 同源，审查 P2-11）。
+			// 判据是「恰好超窗 + 非 Canceled」的因果近似：deadline 边界上的业务
+			// 失败也会被归类为超时——原始错误记日志留排障锚点（安全审查
+			// 2026-09-06：此前静默替换，根因无从追）。
+			log.Printf("mid: 工具 %s 疑似超时截止（%s），被替换的原始错误：%v",
+				g.t.Info().Name, ToolDeadline, err)
+			env, _ := json.Marshal(map[string]any{"ok": false, "error": fmt.Sprintf("工具执行超过 %s 硬上限，已截止——拆小任务或改用后台任务（run_command background）", ToolDeadline)})
+			return json.RawMessage(env), nil
 		}
 		return nil, err
 	}
 	if n >= 3 {
-		out = json.RawMessage(fmt.Sprintf("⚠ 本工具已连续第 %d 次以相同参数调用——若前次结果已够用勿再重复；若一直失败请换思路（改参数/换工具/ask_user 问用户）。\n%s", n, out))
+		out = wrapRepeatNote(out, n)
 	}
 	return out, nil
+}
+
+// wrapRepeatNote 第 3+ 次同参调用的防重提醒（安全审查 2026-09-06：此前以
+// 「⚠ …\n」文本前缀拼接——把合法 JSON 信封破坏成纯文本，ToolResultDigest
+// 回退判 ok=true，恰在反复失败（提醒的靶场景）把失败误报为成功）。现为
+// JSON 结果注入 repeat_note 字段（信封完整、ok 语义保真）；非 JSON 结果退回
+// 文本前缀形态（无信封可破）。
+func wrapRepeatNote(out json.RawMessage, n int) json.RawMessage {
+	var m map[string]any
+	if json.Unmarshal(out, &m) == nil {
+		m["repeat_note"] = fmt.Sprintf("本工具已连续第 %d 次以相同参数调用——若前次结果已够用勿再重复；若一直失败请换思路（改参数/换工具/ask_user 问用户）", n)
+		if b, err := json.Marshal(m); err == nil {
+			return b
+		}
+	}
+	return json.RawMessage(fmt.Sprintf("⚠ 本工具已连续第 %d 次以相同参数调用——若前次结果已够用勿再重复；若一直失败请换思路（改参数/换工具/ask_user 问用户）。\n%s", n, out))
 }

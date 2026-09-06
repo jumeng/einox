@@ -1,10 +1,10 @@
 package engine
 
-// spawn 子代理（Phase H2，多 agent 最小面；方案 = findings/2026-08-26-h2-spawn-plan.md）：
+// spawn 子代理（Phase H2，多 agent 最小面；方案 = 2026-08-26 H2 spawn 定案）：
 // 执行体 = adk agent_tool 包装子 ChatModelAgent（eino 原生循环，零自研）——
 // 默认输入即 request 单串 = 独立上下文；子事件不进父 runSession/checkpoint；
 // 子面零审批直执（auto 档）——子审批中断经 CompositeInterrupt 穿透父审批链
-// 仅作异常路径防御（approvalCardOf 根因链提取），正常形态不发生。
+// 仅作异常路径防御（中断根因链提取），正常形态不发生。
 // spawn 壳参数 {task, tools?, expect?} 经 WithAgentInputSchema 定义，整段 JSON
 // 成为子代理 user 消息（子提示词解析）。红线③：数据域写不经子代理——白名单
 // 装配层硬筛（写工具不进白名单即物理不可达）；hitl 包装子面同样生效
@@ -26,6 +26,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/strutil"
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/mid"
 	"github.com/jumeng/einox/session"
@@ -83,29 +84,11 @@ func (m *Manager) subEventsOn() bool {
 func (m *Manager) emitSubAgent(s *session.Session, fn emitFn, agent string, calls map[string]string, v *adk.TypedMessageVariant[*schema.Message], spawnID string, last *string) {
 	switch v.Role {
 	case schema.Tool:
-		var content, callID string
-		if v.IsStreaming && v.MessageStream != nil {
-			var b strings.Builder
-			for {
-				chunk, err := v.MessageStream.Recv()
-				if err != nil {
-					break
-				}
-				if chunk != nil {
-					b.WriteString(chunk.Content)
-					if chunk.ToolCallID != "" {
-						callID = chunk.ToolCallID
-					}
-				}
-			}
-			content = b.String()
-		} else if v.Message != nil {
-			content, callID = v.Message.Content, v.Message.ToolCallID
-		}
+		content, callID := drainToolVariant(v)
 		ok, _, _ := mid.ToolResultDigest(content) // 失败信封/非零 exit → 红（与主流 ToolResult 同判定）
 		m.emit(s, fn, contract.EvSubAgent, contract.SubAgentEvent{
 			SpawnID: spawnID, Agent: agent, Kind: "tool_result", Tool: calls[callID],
-			Text: truncateRunes(content, 200), OK: ok,
+			Text: strutil.Truncate(content, 200), OK: ok,
 		})
 	case schema.Assistant:
 		emitText := func(t string) {
@@ -249,21 +232,15 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 		return nil, err
 	}
 	// 子模型：覆写键 ?? 父快照；与父同链包装（vision/shape）+ reduction 同挂
+	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发）
 	key := cfg.Model
 	if key == "" {
-		key = s.Model.Model
+		key = ms.Model
 	}
-	providers := m.Opt.Providers()
-	p, spec, found := llm.FindSpec(providers, key)
-	if !found {
-		return nil, &configError{"子代理模型不在可用清单内：" + key}
-	}
-	subCM, err := m.Opt.NewModel(ctx, p, spec, s.Model.Effort)
+	subCM, subSpec, err := m.newShapedModel(ctx, key, ms.Effort, "子代理模型")
 	if err != nil {
-		return nil, &configError{"子代理模型构造失败：" + err.Error()}
+		return nil, err
 	}
-	subCM = llm.NewVisionModel(subCM, spec, m.Opt.ImageResolve)
-	subCM = llm.NewHistoryShapeModel(subCM, p.Kind)
 
 	// T8 结构化回传装配：收束模型包装 + 提示词追加（submit 工具在 buildSub
 	// 注面——ctx 信号机制见 spawnsubmit.go）。Schema 根形校验在 NewManager
@@ -282,7 +259,7 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 	}
 	// buildSub 子代理构造闭包（同步 "auto" / 后台 "bg" 两档——bg 档 ArgsForce
 	// 拒绝回喂不挂起，hitl fail-closed；白名单/提示词/模型/reduction 全共享）
-	window := windowOf(spec)
+	window := windowOf(subSpec)
 	buildSub := func(bctx context.Context, mode string) (*adk.ChatModelAgent, error) {
 		conf := &adk.ChatModelAgentConfig{
 			Name:             spawnToolName,
@@ -390,7 +367,7 @@ func (f *spawnFailFeed) InvokableRun(ctx context.Context, args string, opts ...t
 		"stop_reason": spawnStopReason(err),
 	}
 	if s := concludeSignalOf(ctx); s != nil && s.partialOf() != "" {
-		env["partial"] = "终止前最后一段输出：\n" + s.partialOf()
+		env["partial"] = spawnPartialPrefix + s.partialOf()
 	}
 	b, _ := json.Marshal(env)
 	return string(b), nil
@@ -416,6 +393,14 @@ func (t *throttledSpawn) InvokableRun(ctx context.Context, args string, opts ...
 		return "", fmt.Errorf("spawn 等待并发额度被取消：%w", ctx.Err())
 	}
 }
+
+// spawn 失败/未提交信封的共用文案（父模型消费的隐式契约——同步档/bg 档/
+// Output 档三处信封构造共用同一词，曾三处逐字散落，改一处忘两处即双档信封
+// 形态分叉，审查 P2-6）。
+const (
+	spawnPartialPrefix = "终止前最后一段输出：\n"
+	spawnErrNoSubmit   = "子代理未提交结构化结论即结束（须以 spawn_submit 提交）"
+)
 
 // windowOf 模型上下文窗口（0/未知 = reduction 只截断不清除）。
 func windowOf(spec llm.ModelSpec) int {

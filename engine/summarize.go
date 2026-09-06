@@ -1,6 +1,6 @@
 package engine
 
-// summarization 接线（Phase H3-1；方案 = findings/2026-08-26-h3-summarization-plan.md）：
+// summarization 接线（Phase H3-1；方案 = 2026-08-26 H3 摘要定案）：
 // 中间件本体 = adk middlewares/summarization（原生白拿——触发/重试/摘要/finalize），
 // einox 自研仅三件补差：
 //   ①防超窗修剪（GenModelInput 覆写——摘要请求输入裁进 80% 窗口预算，
@@ -34,7 +34,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
-	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
 
@@ -61,16 +60,11 @@ const summarizeInstruction = `请把以上完整对话历史压缩为一份结�
 
 // newSummarizationMiddleware 摘要中间件 + 清窗兜底包装（window>0 才装配）。
 func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Session, window int) (adk.ChatModelAgentMiddleware, error) {
-	p, spec, ok := llm.FindSpec(m.Opt.Providers(), s.Model.Model)
-	if !ok {
-		return nil, &configError{"摘要模型不在可用清单内：" + s.Model.Model}
-	}
-	cm, err := m.Opt.NewModel(ctx, p, spec, s.Model.Effort)
+	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发）
+	cm, _, err := m.newShapedModel(ctx, ms.Model, ms.Effort, "摘要模型")
 	if err != nil {
-		return nil, &configError{"摘要模型构造失败：" + err.Error()}
+		return nil, err
 	}
-	cm = llm.NewVisionModel(cm, spec, m.Opt.ImageResolve)
-	cm = llm.NewHistoryShapeModel(cm, p.Kind)
 
 	// H9-3 PreserveSkills 预算按窗口钳制：min(25000, window×10%)——adk 默认
 	// 25k 是窗口无关常数，与 70% 相对触发线零关联（预算与触发线无 post-check
@@ -222,10 +216,12 @@ func trimModelInput(window int) summarization.GenModelInputFunc {
 }
 
 // trimToBudget 自尾向前累计至预算，起点回退到 user 边界（至少保留末条）。
+// 口径与触发/预算同源（msgTokenEst 同一计数器——含 tool_call 名与参数；
+// 曾漏计致修剪后输入仍超预算线，审查 P1-4）。
 func trimToBudget(msgs []*schema.Message, budget int) []*schema.Message {
 	n, start := 0, len(msgs)
 	for i := len(msgs) - 1; i >= 0; i-- {
-		c := estTokens(msgTextOf(msgs[i])) + estTokens(msgs[i].ReasoningContent) + 8
+		c := msgTokenEst(msgs[i])
 		if n+c > budget && i < len(msgs)-1 {
 			break
 		}

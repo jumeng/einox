@@ -143,7 +143,7 @@
 | 能力门控（NoToolCalls） | `ModelSpec.NoToolCalls` 明示模型不支持函数调用（人工维护元数据；能力是模型属性故在 ModelSpec——同 provider 各模型可不同）：置位且工具面非空（含会话域件/spawn）→ assemble 期 CONFIG 错误，不等首轮运行期报端点方言各异的错                                                                                                                                                                                                                                                   |
 | thinking 双协议映射    | effort 四档（off/low/high/max，关档 2026-08-31 回归——能力归机制，模型能否真关由端点定）：anthropic 协议 = 关档不发思考块、其余档预算分档（BudgetTokens），openai 协议 = 思考方言（`dialect=deepseek` / `dialect=glm` 关档 thinking disabled、开档发扩展字段+档位直传 / `dialect=effort` 通用 reasoning_effort〔off→none、max→high 对齐 OpenAI 词表〕/ 空方言零思考字段）                                                                                                                                                                                                                     |
 | 出站整形              | `NewHistoryShapeModel`：在途带 tool_calls 轮的思维链保留、其余剥离（DeepSeek 等端点的协议要求）；会话存储保真不动                                                                                                                                                                                                                                                                                                                     |
-| `NormalizeEffort` | 档位归一唯一权威（四档原样；旧值 on/max→max、off 恢复关档本义，未知→默认 low） |
+| `NormalizeEffort` | 档位归一唯一权威（四档原样；旧值 on/max→max、off 恢复关档本义，未知→默认 low）。2026-09-06 迁 `contract`（会话域契约语义——`session→llm` 单函数依赖边消除；错误码常量 `contract.ErrCode*` 同批收口为封闭词表单一真源） |
 
 ## eino 地基面
 

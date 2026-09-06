@@ -1,7 +1,7 @@
 package session
 
 // Side 辅助对话回归：记录往返 / 快照继承 / 级联删除。构造语义见
-// findings/2026-09-05-zcode-parity-gaps-design.md。
+// 定案《2026-09-05-zcode-parity-gaps-design》（工作区档案，不入库）。
 
 import (
 	"strings"

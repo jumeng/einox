@@ -1,7 +1,7 @@
 package session
 
-// 持久会话只读检索面（recall 拉通道的数据底座，findings/2026-08-29-memory-
-// three-channel-design.md §1.1）：复用既有落盘真源 users/<op>/sessions/<sid>/
+// 持久会话只读检索面（recall 拉通道的数据底座，2026-08-29 三通道记忆设计
+// §1.1）：复用既有落盘真源 users/<op>/sessions/<sid>/
 // session.json，零第二存储、零同步。只暴露轻字段 + 续聊历史投影——不含
 // Events 原始流（脱敏隔层：检索/深读到的是摘要与消息文本，非事件载荷）。
 //
@@ -11,9 +11,7 @@ package session
 // 文档 §5）。
 
 import (
-	"encoding/json"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"time"
@@ -71,12 +69,8 @@ type PersistedDigest struct {
 // ReadPersisted 读单个持久会话的检索视图（不存在/损坏 = ok=false 不报错——
 // 检索面容忍缺页，调用方跳过即可）。
 func ReadPersisted(st Store, owner, sid string) (PersistedDigest, bool) {
-	data, ok := st.ReadUserTreeFile(owner, path.Join("sessions", sid, "session.json"))
-	if !ok || len(data) == 0 {
-		return PersistedDigest{}, false
-	}
-	var rec sessionRecord
-	if json.Unmarshal(data, &rec) != nil {
+	rec, ok := readSessionRecord(st, owner, sid)
+	if !ok {
 		return PersistedDigest{}, false
 	}
 	return PersistedDigest{
