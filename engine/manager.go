@@ -589,8 +589,8 @@ func msgTextOf(m *schema.Message) string {
 	return b.String()
 }
 
-// sanitizeHistory 历史回传防御（① ②原地修复消息，下一轮 persist 落盘即为
-// 净数据；③剔除后返回新序列）：
+// sanitizeHistory 历史回传防御（深拷贝副本上修复——会话真源不动，仅本轮
+// 回传视图生效；① ② ③ 剔除后返回新序列）：
 // ① 空 arguments 的 tool call 经 openai 序列化 omitempty 会整个省略 arguments
 // 键，严格供应商直接 400。分片归并修复前落盘的存量脏历史在此自愈——回灌 "{}"。
 // ② 悬空 tool_calls：assistant 带 tool_calls 后必须紧跟每个 tool_call_id 的
@@ -849,6 +849,7 @@ func (m *Manager) FlushQueue(s *session.Session) bool {
 	if !s.BeginRun("") {
 		return false
 	}
+	s.SetTurnActor(nil) // 系统接管轮：清陈旧说话人（排队消息自带 per-message 署名；operator 回退 Owner）
 	go m.Run(context.Background(), s, "", nil, func(session.Event) {})
 	return true
 }
@@ -1378,6 +1379,7 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 					req.Items = append(req.Items, contract.ApprovalItem{
 						ItemID: c.ItemID, Tool: c.Tool, Action: c.Action, Plan: c.Plan,
 						PlanMode: c.PlanMode, Note: c.Note, Diff: c.Diff,
+						RequesterID: req.RequesterID, RequesterName: req.RequesterName, // T6 逐项署名（同轮同 actor）
 					})
 				}
 				// 顶层旧字段 = 首项镜像（旧回放/旧前端按 N=1 单卡渲染——兼容）

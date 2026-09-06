@@ -57,9 +57,7 @@ func (h *server) run(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := 0; i < 2; i++ { // 收束竞态重试一次（Handle 同款）
 		if s.BeginRun(mode) {
-			if actor != nil {
-				s.SetTurnActor(actor)
-			}
+			s.SetTurnActor(actor) // 无条件设：nil 清陈旧归属（审查 P1——匿名轮不得继承上轮身份）
 			// 执行体脱离请求生命周期（真实服务 handler 返回即取消请求 ctx——
 			// httptest 感知不到此差异；channel.go Handle 同款用 Background，实锚）
 			go h.m.Run(context.Background(), s, in.Text, in.Attachments, func(session.Event) {})
@@ -77,6 +75,10 @@ func (h *server) run(w http.ResponseWriter, r *http.Request) {
 func (h *server) resume(w http.ResponseWriter, r *http.Request) {
 	s := h.sessionOf(w, r)
 	if s == nil {
+		return
+	}
+	if s.PendingAppID() == "" { // 预检幂等迟到（审查 P2：盲目 200 与 approve 语义不对称）
+		http.Error(w, "会话无挂起可恢复（已续流或超时）", http.StatusConflict)
 		return
 	}
 	go h.m.Resume(context.Background(), s, func(session.Event) {}) // 脱离请求生命周期；原子抢占归 Resume 首行（BeginResume）

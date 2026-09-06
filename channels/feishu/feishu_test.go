@@ -195,18 +195,19 @@ func TestApprovalCardFlow(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if ss != nil {
-		sawDecider := false
-		for _, ev := range ss.SnapshotEvents() {
-			if ev.Event == contract.EvApprovalDecision {
-				if d, ok2 := ev.Data.(contract.DecisionOut); ok2 && d.DeciderID == "ou_boss" {
-					sawDecider = true
-				}
+	if ss == nil { // 审查修复：原 if ss != nil 包裹使取不到会话时静默通过（测试剧场）
+		t.Fatal("会话应可寻址（软断言修复——decider 验证不得被跳过）")
+	}
+	sawDecider := false
+	for _, ev := range ss.SnapshotEvents() {
+		if ev.Event == contract.EvApprovalDecision {
+			if d, ok2 := ev.Data.(contract.DecisionOut); ok2 && d.DeciderID == "ou_boss" {
+				sawDecider = true
 			}
 		}
-		if !sawDecider {
-			t.Fatal("T6 决议回执应带点按钮的人（decider_id=ou_boss）")
-		}
+	}
+	if !sawDecider {
+		t.Fatal("T6 决议回执应带点按钮的人（decider_id=ou_boss）")
 	}
 	// 挂起卡定格为已答复
 	waitUntil(t, func() bool {

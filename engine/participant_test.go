@@ -273,6 +273,11 @@ func TestApprovalRouterAndGuard(t *testing.T) {
 		t.Fatalf("pending target 应入会话域，实得 %q", s.PendingTarget())
 	}
 	gw := m.Channels()
+	// 匿名决议：路由卡（有目标）+ 守卫在场 → fail-closed 拒（审查 P2：
+	// 无身份不应成为越权旁路）
+	if err := gw.Approve(s.SID, card.Items[0].ItemID, nil, contract.ApprovalDecision{Approve: true}); err == nil {
+		t.Fatal("路由卡匿名决议应拒绝")
+	}
 	// mismatch：王五点批 → fail-closed 拒绝，工具未执行、仍挂起
 	err := gw.Approve(s.SID, card.Items[0].ItemID, &contract.Participant{ID: "u_wang", Name: "王五"},
 		contract.ApprovalDecision{Approve: true})

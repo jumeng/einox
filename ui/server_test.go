@@ -409,3 +409,79 @@ func TestControlAuthorize(t *testing.T) {
 		}
 	}
 }
+
+// TestReplayOrderFidelity 回放端点序保真（M1 验收强化——大量事件经端点
+// 回放，ID 连续升序且事件名逐位保序：可完整步进的形式化判据）。
+func TestReplayOrderFidelity(t *testing.T) {
+	h, s := newTestServer(t, Config{})
+	kinds := []string{contract.EvUserMessage, contract.EvTextDelta, contract.EvToolCall,
+		contract.EvToolResult, contract.EvHarnessNote, contract.EvSessionEnd, "participant_update"}
+	for i := 0; i < 42; i++ {
+		s.Record(kinds[i%len(kinds)], map[string]any{"i": i})
+	}
+	var evs []session.Event
+	getJSON(t, h, "/api/sessions/"+s.SID+"/events", &evs)
+	if len(evs) != 45 { // 3 既有 + 42
+		t.Fatalf("事件数应 45，实得 %d", len(evs))
+	}
+	for i, ev := range evs {
+		if ev.ID != i+1 {
+			t.Fatalf("ID 应连续升序：位 %d 实得 #%d", i, ev.ID)
+		}
+		if i > 2 && ev.Event != kinds[(i-3)%len(kinds)] {
+			t.Fatalf("事件名保序破坏：位 %d 实得 %s", i, ev.Event)
+		}
+	}
+}
+
+// TestRunClearsStaleTurnActor 跨轮清零（审查 P1-2 回归）：张三轮后匿名起轮，
+// user_message 不得继承张三署名。
+func TestRunClearsStaleTurnActor(t *testing.T) {
+	h, s := newE2EServer(t, Config{})
+	postJSON(t, h, "/api/sessions/"+s.SID+"/run", runReq{
+		Text: "第一轮", SpeakerID: "u_zhang", SpeakerName: "张三"})
+	// 首轮：manual 档写工具 → 挂起 → 决议 → 收束（剧本首轮必走审批）
+	evs1 := pollEvents(t, h, s.SID, func(es []session.Event) bool {
+		for _, e := range es {
+			if e.Event == contract.EvApprovalRequest {
+				return true
+			}
+		}
+		return false
+	}, "首轮挂起")
+	var req1 contract.ApprovalReq
+	for _, e := range evs1 {
+		if e.Event == contract.EvApprovalRequest {
+			decodeAs(t, e.Data, &req1)
+		}
+	}
+	postJSON(t, h, "/api/sessions/"+s.SID+"/approve", approveReq{
+		Approve: true, ItemID: req1.Items[0].ItemID, DeciderID: "u_li", DeciderName: "李四"})
+	_ = pollEvents(t, h, s.SID, func(es []session.Event) bool {
+		for _, e := range es {
+			if e.Event == contract.EvSessionEnd {
+				return true
+			}
+		}
+		return false
+	}, "首轮收束")
+	// 匿名第二轮：不携带 speaker → 须清陈旧归属
+	postJSON(t, h, "/api/sessions/"+s.SID+"/run", runReq{Text: "第二轮"})
+	evs := pollEvents(t, h, s.SID, func(es []session.Event) bool {
+		for _, e := range es {
+			if e.Event == contract.EvUserMessage && e.ID > 3 {
+				return true
+			}
+		}
+		return false
+	}, "第二轮 user_message")
+	for _, e := range evs {
+		if e.Event == contract.EvUserMessage && e.ID > 3 {
+			var um contract.UserMsg
+			decodeAs(t, e.Data, &um)
+			if um.SpeakerID == "u_zhang" {
+				t.Fatal("匿名轮不得继承张三署名（turnActor 未清）")
+			}
+		}
+	}
+}

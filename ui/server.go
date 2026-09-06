@@ -2,8 +2,8 @@
 // （REST + SSE）+ embed 单页回放组件。装配先例同 channels/——应用 import
 // 才进构建；零引擎改动（Registry/Session 公开面的纯装配）。
 //
-// 装配面：ui.New(m, Config) → http.Handler（应用自挂 mux 或独立端口）；
-// 控制面（run/决议）属 M2，本件只读。
+// 装配面：ui.New(m, Config) → http.Handler（应用自挂 mux）；ui.Serve(addr)
+// 便捷档阻塞监听。
 // 扩展点：Config.Authorize 鉴权缝（nil = 不校验——多租户/会话可见性归应用；
 // owner 从注册表解析非 URL 参数，不可伪造）。
 // 已知限制：单会话面寻址内存注册表——冷会话（仅盘面）先经应用 Reattach；
@@ -34,7 +34,17 @@ type Config struct {
 	Authorize func(r *http.Request, owner, sid string) error
 }
 
-// New 构造只读回放服务。端点：GET /api/sessions?owner=（列表，空 = 全量）；
+// Serve 便捷档：构造 + 阻塞监听（独立端口跑回放面；优雅停机归应用——
+// http.Server 自行包装可加）。
+func Serve(m *engine.Manager, cfg Config, addr string) error {
+	h, err := New(m, cfg)
+	if err != nil {
+		return err
+	}
+	return http.ListenAndServe(addr, h)
+}
+
+// New 构造服务（读面 + M2 控制面同包装配——control.go）。端点：GET /api/sessions?owner=（列表，空 = 全量）；
 // GET /api/sessions/{sid}?since=（详情 + 增量事件）；GET /api/sessions/{sid}/
 // events?since=&live=1（默认回放档 = 快照 JSON 数组〔golden 同款形态〕；
 // live=1 = SSE：先快照补齐再实时转发，按事件 ID 去重，断线重连带 since 续传）。

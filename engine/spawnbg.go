@@ -312,10 +312,16 @@ func (m *Manager) runSpawnBG(ctx context.Context, s *session.Session, reg *bgReg
 			}
 			// 原始错误 %w 保留身份（StopReason 映射依据：取消→aborted、轮次
 			// 耗尽→max_tokens）；分类文案前置给父模型可读。
-			// T8 例外：结构化回传档的自纠耗尽（轮次预算内未提交合法结论）按
-			// error 计——dsh 形态锚（§2.3-③ 行为规格：耗尽→StopReason=error）。
+			// T8：结构化回传档优先看提交信号——合法提交后即便预算边缘报错
+			//（concludeModel 合成调用仍计入迭代数）也以提交值收尾（审查 P2：
+			// 原序会丢弃已提交的 canonical 结论）；未提交的自纠耗尽按 error 计
+			//（dsh 形态锚 §2.3-③）。
 			if sig := concludeSignalOf(ctx); sig != nil {
-				if _, done := sig.result(); !done && errors.Is(unwrapRetryExhausted(ev.Err), adk.ErrExceedMaxIterations) {
+				if v, done := sig.result(); done {
+					m.finishSpawnBG(s, id, task, string(v), "", nil, true)
+					return
+				}
+				if errors.Is(unwrapRetryExhausted(ev.Err), adk.ErrExceedMaxIterations) {
 					m.finishSpawnBG(s, id, task, "", lastText, errors.New("结构化结论自纠耗尽（轮次预算内未提交合法结论）"), true)
 					return
 				}
@@ -483,6 +489,7 @@ func (m *Manager) NotifyOwner(s *session.Session, note string) {
 	began, q := s.ContinueOrNotify(note, allowWake)
 	s.Record(contract.EvNotifyQueued, contract.SteerEvent{ID: q.ID, Text: q.Text, Kind: "notify"})
 	if began {
+		s.SetTurnActor(nil)                                  // 系统自续轮：清陈旧说话人（通知非人发；operator 回退 Owner——审查 P1）
 		go m.Run(context.Background(), s, "", nil, noopEmit) // 自续轮：通知经队列注入（输入路径唯一）
 		return
 	}
@@ -499,6 +506,7 @@ func (m *Manager) NotifyOwner(s *session.Session, note string) {
 			return
 		}
 		if s.BeginRun("") {
+			s.SetTurnActor(nil) // 系统兜底轮同律
 			go m.Run(context.Background(), s, "", nil, noopEmit)
 		}
 	}()

@@ -52,6 +52,9 @@ type InboundMsg struct {
 	//——此前（实锚）已绑定会话的后续发送者身份被静默丢弃。
 	SpeakerID   string
 	SpeakerName string
+	// T6 会话形态（p2p | group——适配器解析透传，应用据此选择装配策略；
+	// 基座不消费）。
+	ChatType string
 }
 
 // ChannelConfig 渠道实例装配（Options.Channels 条目）。ID 是消息路由键
@@ -254,9 +257,8 @@ func (g *ChannelGateway) Handle(msg InboundMsg) error {
 	mode := firstNonEmpty(msg.Mode, contract.ModeManual)
 	for i := 0; i < 2; i++ {
 		if s.BeginRun(mode) {
-			if actor != nil {
-				s.SetTurnActor(actor) // 当轮说话人（跨审批中断保留）
-			}
+			s.SetTurnActor(actor) // 当轮说话人（跨审批中断保留；无条件设——
+			// nil 清陈旧归属，审查 P1：仅 actor!=nil 设会使匿名轮继承上轮身份）
 			go g.m.Run(context.Background(), s, msg.Text, msg.Attachments, noopEmit)
 			return nil
 		}
@@ -292,7 +294,12 @@ func (g *ChannelGateway) Approve(sid, itemID string, decider *contract.Participa
 	// T6 决议校验缝：卡有目标且决议带人——mismatch 拒绝；缝未挂或任一侧
 	// 缺席 = 不校验（零变化）。
 	if g.m.Opt.DecisionGuard != nil {
-		if tgt := s.PendingTarget(); tgt != "" && d.DeciderID != "" {
+		if tgt := s.PendingTarget(); tgt != "" {
+			// 路由卡（有目标）+ 守卫在场：匿名决议即拒（fail-closed——
+			// 审查 P2：「无身份」不应成为越权旁路；nil 守卫/无目标零变化）
+			if d.DeciderID == "" {
+				return fmt.Errorf("决议被拒：本卡已定向路由（目标 %s），决议须携带决议者身份", tgt)
+			}
 			if err := g.m.Opt.DecisionGuard(tgt, d.DeciderID); err != nil {
 				return fmt.Errorf("决议被拒（目标 %s ≠ 决议者 %s）：%w", tgt, d.DeciderID, err)
 			}

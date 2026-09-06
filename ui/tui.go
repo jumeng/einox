@@ -20,7 +20,8 @@ import (
 )
 
 // TUI 启动终端回放浏览器：sid 空 = 先选会话（ListAll）；否则直入会话视图。
-// 键位：↑/j ↓/k 移动 · Enter 检查器开合 · / 过滤 · l 实时 · r 刷新 · q 退出。
+// 键位：k/j 上下 · g 头 G 尾 · Enter 检查器开合 · / 过滤 · l 实时 · r 刷新 ·
+// q 退出。单次使用约束（键盘泵 stdin 读阻塞随进程退出——见泵注释）。
 func TUI(m *engine.Manager, sid string) error {
 	fd := int(os.Stdin.Fd())
 	w, h, err := term.GetSize(fd)
@@ -33,12 +34,19 @@ func TUI(m *engine.Manager, sid string) error {
 	}
 	defer term.Restore(fd, old)
 	app := &tuiApp{m: m, width: w, height: h, keys: make(chan []byte, 8), redraw: make(chan struct{}, 1)}
-	go func() { // 键盘泵（原始模式逐字节读，方向键三字节 ESC 序列）
+	app.quit = make(chan struct{})
+	go func() { // 键盘泵（原始模式逐字节读，方向键三字节 ESC 序列）。stdin
+		// 读阻塞不可选中——退出让位经 keys 满时 select（读阻塞随进程退出，
+		// 单次 CLI 使用约束；审查 P2 部分收口）
 		buf := make([]byte, 8)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				app.keys <- append([]byte(nil), buf[:n]...)
+				select {
+				case app.keys <- append([]byte(nil), buf[:n]...):
+				case <-app.quit:
+					return
+				}
 			}
 			if err != nil {
 				close(app.keys)
@@ -155,9 +163,16 @@ func tuiDomainOf(kind string) tuiDomain {
 	return domUnknown
 }
 
-// tuiSummary 单行摘要（载荷经 wire 形态——TUI 消费 map，与前端同实况）。
+// tuiSummary 单行摘要。载荷形态双源：活会话 Record 落的是类型化结构体、
+// Reattach 盘面与 HTTP 面是 map——统一归一（map 直用，typed 经 JSON 往返；
+// 审查 P1-1：进程内直喂 typed 曾使全部摘要空白）。
 func tuiSummary(ev session.Event) string {
 	d, _ := ev.Data.(map[string]any)
+	if d == nil && ev.Data != nil {
+		if b, err := json.Marshal(ev.Data); err == nil {
+			_ = json.Unmarshal(b, &d)
+		}
+	}
 	g := func(k string) string { s, _ := d[k].(string); return s }
 	switch ev.Event {
 	case contract.EvUserMessage:
@@ -230,6 +245,7 @@ type tuiApp struct {
 	width  int
 	height int
 	keys   chan []byte
+	quit   chan struct{}
 	redraw chan struct{}
 }
 
@@ -282,8 +298,12 @@ func keyName(k []byte) string {
 			return "enter"
 		case 3:
 			return "ctrlc"
+		case 0x1b:
+			return "esc"
+		case 0x7f:
+			return "del"
 		}
-		return strings.ToLower(string(k))
+		return string(k) // 可打印键保持原样（区分 g/G——ToLower 曾使 G 跳尾不可达，审查 P2）
 	}
 	if len(k) == 3 && k[0] == 0x1b && k[1] == '[' {
 		switch k[2] {
@@ -304,6 +324,12 @@ func (a *tuiApp) run() error {
 	a.model.events = a.s.SnapshotEvents()
 	a.out("\x1b[?1049h\x1b[?25l") // 备用屏 + 藏光标
 	defer a.out("\x1b[?25h\x1b[?1049l")
+	defer close(a.quit) // 键盘泵让位
+	defer func() {      // 退订兜底：Record 扇出满即弃不阻塞，但僵尸订阅常驻 subs 表（小泄漏）
+		if a.sub != nil {
+			a.s.Unsubscribe(a.sub)
+		}
+	}()
 	a.render()
 	for {
 		select {
@@ -344,17 +370,13 @@ func (a *tuiApp) key(k []byte) bool {
 		switch name {
 		case "enter", "esc":
 			a.model.filterIn = false
-		case "backspace", "backspace8":
+		case "del": // 退格（0x7f）
 			if n := len(a.model.filter); n > 0 {
 				a.model.filter = a.model.filter[:n-1]
 			}
 		default:
 			if len(k) == 1 && k[0] >= 0x20 {
 				a.model.filter += string(k)
-			} else if len(k) == 1 && k[0] == 0x7f {
-				if n := len(a.model.filter); n > 0 {
-					a.model.filter = a.model.filter[:n-1]
-				}
 			}
 		}
 		a.model.cursor, a.model.offset = 0, 0
@@ -369,7 +391,7 @@ func (a *tuiApp) key(k []byte) bool {
 		a.model.move(1, a.bodyHeight())
 	case "g":
 		a.model.cursor, a.model.offset = 0, 0
-	case "G":
+	case "G": // 跳尾（keyName 不再 ToLower 后可达）
 		a.model.move(len(a.model.matched()), a.bodyHeight())
 	case "enter":
 		a.model.inspOpen = !a.model.inspOpen
@@ -424,7 +446,7 @@ func (a *tuiApp) render() {
 			b.WriteString("  " + trunc(ln, a.width-2) + "\x1b[K\r\n")
 		}
 	}
-	b.WriteString("\x1b[38;5;245m↑↓/jk 移动 · Enter 检查器 · / 过滤 · l 实时 · r 刷新 · q 退出\x1b[0m\x1b[K\r\n")
+	b.WriteString("\x1b[38;5;245mk/j 上下 · g 头 G 尾 · Enter 检查器 · / 过滤 · l 实时 · r 刷新 · q 退出\x1b[0m\x1b[K\x1b[K\r\n")
 	a.out(b.String())
 }
 

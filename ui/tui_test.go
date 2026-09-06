@@ -110,3 +110,21 @@ func TestTuiSummaryAndDomain(t *testing.T) {
 		t.Fatal("未知 Kind 域应为 unknown")
 	}
 }
+
+// TestTuiSummaryTypedPayload 直喂类型化载荷（审查 P1-1 回归——活会话
+// Record 落的是结构体，原实现仅 map 断言使全部摘要空白；wireData 夹具
+// 曾掩蔽此缺陷）。
+func TestTuiSummaryTypedPayload(t *testing.T) {
+	if got := tuiSummary(session.Event{ID: 1, Event: "user_message",
+		Data: contract.UserMsg{Text: "你好", SpeakerName: "张三"}}); got != "消息（张三）：你好" {
+		t.Fatalf("typed 直喂摘要应工作：%q", got)
+	}
+	if got := tuiSummary(session.Event{ID: 2, Event: "session_end",
+		Data: contract.SessionEnd{HistLen: 7}}); got != "轮末（历史 7 条）" {
+		t.Fatalf("typed 直喂摘要应工作：%q", got)
+	}
+	if got := tuiSummary(session.Event{ID: 3, Event: "tool_call",
+		Data: contract.ToolCall{Tool: "write_tool"}}); got != "调用 write_tool" {
+		t.Fatalf("typed 直喂摘要应工作：%q", got)
+	}
+}

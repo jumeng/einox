@@ -139,6 +139,10 @@ type ApprovalItem struct {
 	PlanMode bool       `json:"plan_mode,omitempty"`
 	Note     string     `json:"note,omitempty"`
 	Diff     string     `json:"diff,omitempty"`
+	// T6 多参与者：谁的动作（同轮同 actor——顶层镜像之外的逐项署名，
+	// 合并卡逐项可独立归因）。空 = 单用户零变化。
+	RequesterID   string `json:"requester_id,omitempty"`
+	RequesterName string `json:"requester_name,omitempty"`
 }
 
 // ApprovalReq 审批请求（事件载荷，前端审批卡数据源）。Items = 合并决议卡
