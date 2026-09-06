@@ -161,7 +161,7 @@ func TestInboundRunsAndRendersCards(t *testing.T) {
 // TestApprovalCardFlow 审批闭环：挂起 → 审批卡（按钮 value 带路由键）→ 批准
 // 回调 → 续流收束 + 挂起卡定格。
 func TestApprovalCardFlow(t *testing.T) {
-	bot, fc, _, calls := botSetup(t,
+	bot, fc, m, calls := botSetup(t,
 		llmtest.Turn{ToolCalls: []llmtest.ToolCallSpec{{ID: "t1", Name: "write_tool", Args: "{}"}}},
 		llmtest.Turn{Text: "完成"},
 	)
@@ -183,8 +183,31 @@ func TestApprovalCardFlow(t *testing.T) {
 	}
 	sid := extractJSONString(approvalCard, "sid")
 
-	bot.handleAction(cardAction{value: map[string]any{"act": "approve", "sid": sid}})
+	bot.handleAction(cardAction{value: map[string]any{"act": "approve", "sid": sid}, operator: "ou_boss", chatID: "oc_1"})
 	waitUntil(t, func() bool { return atomic.LoadInt32(calls) == 1 }, "批准后写工具应执行")
+	// T6：点按钮的人（operator）随决议落回执可审计
+	deadline := time.Now().Add(3 * time.Second)
+	var ss *session.Session
+	for time.Now().Before(deadline) {
+		ss, _ = m.Registry().Get(sid)
+		if ss != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ss != nil {
+		sawDecider := false
+		for _, ev := range ss.SnapshotEvents() {
+			if ev.Event == contract.EvApprovalDecision {
+				if d, ok2 := ev.Data.(contract.DecisionOut); ok2 && d.DeciderID == "ou_boss" {
+					sawDecider = true
+				}
+			}
+		}
+		if !sawDecider {
+			t.Fatal("T6 决议回执应带点按钮的人（decider_id=ou_boss）")
+		}
+	}
 	// 挂起卡定格为已答复
 	waitUntil(t, func() bool {
 		for _, c := range fc.updatesOf() {
@@ -220,4 +243,17 @@ func extractJSONString(card, key string) string {
 		return rest[:end]
 	}
 	return ""
+}
+
+// TestChatCardSpeakerRender T6 说话人措辞：带署名渲染「**张三**：」，
+// 无署名保持「**用户**：」（单用户零变化）。
+func TestChatCardSpeakerRender(t *testing.T) {
+	c1 := chatCards{userText: "你好", userSpeaker: "张三"}
+	if !strings.Contains(string(c1.render()), "**张三**：你好") { // render 产物是 JSON 卡（> 转义 \u003e）——断言取正文段
+		t.Fatalf("署名应渲染说话人：%s", c1.render())
+	}
+	c2 := chatCards{userText: "你好"}
+	if !strings.Contains(string(c2.render()), "**用户**：你好") {
+		t.Fatalf("无署名应保持「用户」（零变化）：%s", c2.render())
+	}
 }

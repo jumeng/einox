@@ -31,11 +31,12 @@ type cardHub struct {
 
 // chatCards 单会话出站态（主卡聚合 + 节流）。
 type chatCards struct {
-	mainID   string
-	userText string
-	text     strings.Builder
-	tools    []string
-	dirty    bool
+	mainID      string
+	userText    string
+	userSpeaker string // T6 当轮说话人展示名（空 = 「用户」——单用户零变化）
+	text        strings.Builder
+	tools       []string
+	dirty       bool
 }
 
 // pendCard 挂起交互卡（sid 维度；决议/超时定格）。
@@ -67,7 +68,7 @@ func (h *cardHub) Deliver(b engine.ChannelBrief, ev session.Event) {
 	switch ev.Event {
 	case contract.EvUserMessage:
 		if m, ok := ev.Data.(contract.UserMsg); ok {
-			h.newTurn(b, m.Text)
+			h.newTurn(b, m.Text, m.SpeakerName) // T6 说话人随轮入卡
 		}
 	case contract.EvTextDelta:
 		if d, ok := ev.Data.(contract.Delta); ok {
@@ -120,10 +121,10 @@ func (h *cardHub) cardsOf(chatID string) *chatCards {
 }
 
 // newTurn 新轮新卡（上一轮已定格，本轮用户消息开新卡）。
-func (h *cardHub) newTurn(b engine.ChannelBrief, userText string) {
+func (h *cardHub) newTurn(b engine.ChannelBrief, userText, speaker string) {
 	c := h.cardsOf(b.Chat)
 	h.mu.Lock()
-	c.userText, c.tools = userText, nil
+	c.userText, c.userSpeaker, c.tools = userText, speaker, nil
 	c.text.Reset()
 	c.mainID = ""
 	c.dirty = true
@@ -156,7 +157,11 @@ func (h *cardHub) appendTool(b engine.ChannelBrief, line string) {
 func (c *chatCards) render() []byte {
 	var b strings.Builder
 	if c.userText != "" {
-		b.WriteString("> **用户**：" + c.userText + "\n\n")
+		speaker := c.userSpeaker // T6 说话人措辞（空 = 单用户零变化）
+		if speaker == "" {
+			speaker = "用户"
+		}
+		b.WriteString("> **" + speaker + "**：" + c.userText + "\n\n")
 	}
 	if t := c.text.String(); t != "" {
 		b.WriteString(t + "\n")

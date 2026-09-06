@@ -7,16 +7,10 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-
 	"github.com/jumeng/einox/checkpoint"
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/hitl"
@@ -24,6 +18,11 @@ import (
 	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 	"github.com/jumeng/einox/tools"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 // chanSink 测试渠道出站：全量收集（可 hold 模拟慢消费——投递阻塞，触发
@@ -243,8 +242,8 @@ func TestChannelSuspendDeliveredAndApprove(t *testing.T) {
 			itemID = req.Items[0].ItemID
 		}
 	}
-	if !gw.Approve(s.SID, itemID, contract.ApprovalDecision{Approve: true}) {
-		t.Fatal("决议回写应成功")
+	if err := gw.Approve(s.SID, itemID, nil, contract.ApprovalDecision{Approve: true}); err != nil {
+		t.Fatalf("决议回写应成功：%v", err)
 	}
 	chanWaitFor(t, func() bool { return sink.has(contract.EvSessionEnd) }, func() string {
 		names := make([]string, 0, len(sink.events()))
@@ -269,8 +268,8 @@ func TestChannelSuspendDeliveredAndApprove(t *testing.T) {
 		t.Fatalf("续流应收束 ended，实得 %s", s.StateOf())
 	}
 	// 迟到决议幂等拒绝（挂起已消费）
-	if gw.Approve(s.SID, itemID, contract.ApprovalDecision{Approve: true}) {
-		t.Fatal("迟到决议应拒绝")
+	if err := gw.Approve(s.SID, itemID, nil, contract.ApprovalDecision{Approve: true}); !errors.Is(err, ErrNoPendingDecision) {
+		t.Fatalf("迟到决议应幂等拒绝，实得 %v", err)
 	}
 	m.Channels().Close(2 * time.Second)
 }

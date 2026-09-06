@@ -134,6 +134,15 @@ type Options struct {
 	ContextBudget int
 	// Approval 审批配置（写工具名单/动作名/参数豁免——业务内容）。
 	Approval hitl.ApprovalConfig
+	// ApprovalRouter 审批路由（T6，nil = 不路由——全员可见谁先点谁决议）：
+	// 挂起卡生成时按会话概要与卡面裁决「问谁」，目标随卡下发（前端定向提示）
+	// 并入 pending target（DecisionGuard 校验依据）。判据归应用（机制与内容
+	// 分离：基座只携带身份与执行校验）。
+	ApprovalRouter func(brief SessionBrief, req contract.ApprovalReq) *contract.Participant
+	// DecisionGuard 决议校验缝（T6，nil = 不校验——应用自带认证时的零变化）：
+	// 挂起卡有路由目标且决议带决议者时校验一致性，mismatch 拒绝（fail-closed
+	// ——防越权点批）。
+	DecisionGuard func(targetID, deciderID string) error
 	// WorkspaceRoot 会话工作区根（用户域 workspaces/<sid>——WorkspaceKeep
 	// 声明的持久子区跨任务保留、其余一轮一清；惰性创建）。
 	WorkspaceRoot func(owner, sid string) string
@@ -1336,6 +1345,14 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 					req.RequesterID, req.RequesterName = a.ID, a.Name
 				} else {
 					req.RequesterID = s.Owner
+				}
+				// T6 路由：问谁（应用判据裁决；目标随卡 + 入 pending target）
+				s.SetPendingTarget("")
+				if m.Opt.ApprovalRouter != nil {
+					if tgt := m.Opt.ApprovalRouter(m.briefOf(s), req); tgt != nil && tgt.ID != "" {
+						req.TargetID, req.TargetName = tgt.ID, tgt.Name
+						s.SetPendingTarget(tgt.ID)
+					}
 				}
 				ids := make([]string, 0, len(cards))
 				for _, c := range cards {

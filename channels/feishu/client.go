@@ -23,9 +23,11 @@ type inboundMsg struct {
 	text     string // 纯文本（mention 已剥离）
 }
 
-// cardAction 卡片交互回调（按钮 value 透传）。
+// cardAction 卡片交互回调（按钮 value 透传 + 操作者）。
 type cardAction struct {
-	value map[string]any
+	value    map[string]any
+	chatID   string // 回调所属会话（告警回执寻址）
+	operator string // T6 点按钮的人（operator.open_id——决议者身份，透传 Decider）
 }
 
 // realClient 长连接客户端：事件经 dispatcher 进处理闭包；发消息/更新卡片走
@@ -51,7 +53,14 @@ func newClient(cfg Config, onMsg func(inboundMsg), onCard func(cardAction)) (*re
 		}).
 		OnP2CardActionTrigger(func(_ context.Context, ev *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 			if ev.Event != nil && ev.Event.Action != nil {
-				onCard(cardAction{value: ev.Event.Action.Value})
+				ca := cardAction{value: ev.Event.Action.Value}
+				if ev.Event.Operator != nil { // T6：点按钮的人（OpenID 为值类型）
+					ca.operator = ev.Event.Operator.OpenID
+				}
+				if ev.Event.Context != nil && ev.Event.Context.OpenChatID != "" {
+					ca.chatID = ev.Event.Context.OpenChatID
+				}
+				onCard(ca)
 			}
 			return &callback.CardActionTriggerResponse{}, nil
 		})

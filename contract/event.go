@@ -159,6 +159,10 @@ type ApprovalReq struct {
 	//「问谁」路由与审计「这条指令谁下的」的数据前提）
 	RequesterID   string `json:"requester_id,omitempty"`
 	RequesterName string `json:"requester_name,omitempty"`
+	// T6 路由目标（Options.ApprovalRouter 裁决「问谁」；空 = 不路由——
+	// 全员可见谁先点谁决议）：前端定向提示 + DecisionGuard 校验依据
+	TargetID   string `json:"target_id,omitempty"`
+	TargetName string `json:"target_name,omitempty"`
 }
 
 // ItemDecisionOut 合并决议卡单项决议回执（切回/回放重建逐项终态的真源）。

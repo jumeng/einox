@@ -90,19 +90,20 @@ type Session struct {
 	// 审批域（M3-5）+ ask_user 域（P1a——与审批共用挂起通道）
 	// decisions 按 item_id 的决议表（H4-2 合并决议多槽；"" 键 = 旧单决议——
 	// plan/超时兜底与升级前 checkpoint 重放共用）
-	decisions    map[string]*ApprovalDecision
-	curAppID     string                 // 挂起中的审批/提问 ID（空 = 无）
-	pendingKind  string                 // 挂起类型（"approval"|"ask"——跨重启续表用）
-	pendingDue   time.Time              // 挂起截止时刻（超时兜底跨重启——进程重启丢内存计时器）
-	pendingItems []string               // 合并决议卡项标识清单（kind=approval；超时批量拒与端点覆盖校验依据）
-	askDecision  *AskDecision           // ask_user 作答（answer 端点写入；Resume 消费后清空）
-	turnGrant    bool                   // plan 档本轮写授权（首个批准置位；session_end 清零）
-	taskGrant    bool                   // plan 档任务期写授权（计划批准置位；任务成功收尾/换档/新计划提交清零）
-	planSeq      int                    // 计划文档序号（submit_plan 自增取号；修订递增留痕）
-	turnUserMsg  string                 // 轮次用户消息（跨审批中断保留）
-	notifySpent  int                    // 后台通知连续自续已花费预算（W-3 自激护栏；用户消息消费清零，通知自身不恢复）
-	participants []contract.Participant // T6 参与者名册（多人群聊/坐席协同；落盘随 session.json，变更经 participant_update 事件落流）
-	turnActor    *contract.Participant  // T6 当轮说话人（渠道/应用 Run 前设置；跨审批中断保留保 Requester/Operator 连续；不落盘——轮次事实）
+	decisions     map[string]*ApprovalDecision
+	curAppID      string                 // 挂起中的审批/提问 ID（空 = 无）
+	pendingKind   string                 // 挂起类型（"approval"|"ask"——跨重启续表用）
+	pendingDue    time.Time              // 挂起截止时刻（超时兜底跨重启——进程重启丢内存计时器）
+	pendingItems  []string               // 合并决议卡项标识清单（kind=approval；超时批量拒与端点覆盖校验依据）
+	pendingTarget string                 // T6 挂起审批路由目标（ApprovalRouter 裁决；guard 校验依据——随挂起清空）
+	askDecision   *AskDecision           // ask_user 作答（answer 端点写入；Resume 消费后清空）
+	turnGrant     bool                   // plan 档本轮写授权（首个批准置位；session_end 清零）
+	taskGrant     bool                   // plan 档任务期写授权（计划批准置位；任务成功收尾/换档/新计划提交清零）
+	planSeq       int                    // 计划文档序号（submit_plan 自增取号；修订递增留痕）
+	turnUserMsg   string                 // 轮次用户消息（跨审批中断保留）
+	notifySpent   int                    // 后台通知连续自续已花费预算（W-3 自激护栏；用户消息消费清零，通知自身不恢复）
+	participants  []contract.Participant // T6 参与者名册（多人群聊/坐席协同；落盘随 session.json，变更经 participant_update 事件落流）
+	turnActor     *contract.Participant  // T6 当轮说话人（渠道/应用 Run 前设置；跨审批中断保留保 Requester/Operator 连续；不落盘——轮次事实）
 }
 
 // ApprovalDecision 审批决议（approve 端点 → 包装工具消费；契约形态）。
@@ -291,9 +292,25 @@ func (s *Session) SetPendingApproval(appID string) {
 		s.pendingKind = ""
 		s.pendingDue = time.Time{}
 		s.pendingItems = nil
+		s.pendingTarget = "" // T6 挂起清空同步清目标（防陈旧目标误拒下一卡）
 	}
 	s.UpdatedAt = time.Now()
 	s.mu.Unlock()
+}
+
+// SetPendingTarget 挂起审批的路由目标（T6：Options.ApprovalRouter 裁决后
+// 泵面写入；空 = 不路由）。
+func (s *Session) SetPendingTarget(id string) {
+	s.mu.Lock()
+	s.pendingTarget = id
+	s.mu.Unlock()
+}
+
+// PendingTarget 挂起审批的路由目标（空 = 无目标不校验）。
+func (s *Session) PendingTarget() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pendingTarget
 }
 
 // PendingAppID 当前挂起审批 ID。
@@ -1160,6 +1177,7 @@ type sessionRecord struct {
 	TaskGranted   bool                   `json:"task_granted,omitempty"`   // plan 档任务期写授权（重启续接——批准的计划不因进程重启失效）
 	PlanSeq       int                    `json:"plan_seq,omitempty"`       // 计划文档序号末号（新提交接续递增）
 	Participants  []contract.Participant `json:"participants,omitempty"`   // T6 参与者名册（Fork/Side/Reattach 继承）
+	PendingTarget string                 `json:"pending_target,omitempty"` // T6 挂起审批路由目标（重启续接——guard 校验依据）
 }
 
 // fileChangesCopy 变更表拷贝（持锁块内调用）。
@@ -1213,9 +1231,10 @@ func recordOf(s *Session) sessionRecord {
 		Messages:     historyForRecord(s.history),
 		Pending:      append([]QueuedMsg(nil), s.pendingMsgs...),
 		PendingAppID: s.curAppID, PendingKind: s.pendingKind, PendingDue: s.pendingDue,
-		PendingItems: append([]string(nil), s.pendingItems...),
-		Participants: append([]contract.Participant(nil), s.participants...),
-		TaskGranted:  s.taskGrant, PlanSeq: s.planSeq,
+		PendingItems:  append([]string(nil), s.pendingItems...),
+		PendingTarget: s.pendingTarget,
+		Participants:  append([]contract.Participant(nil), s.participants...),
+		TaskGranted:   s.taskGrant, PlanSeq: s.planSeq,
 	}
 }
 
@@ -1792,6 +1811,7 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 	if st == StatePendingApproval {
 		s.curAppID, s.pendingKind, s.pendingDue = rec.PendingAppID, rec.PendingKind, rec.PendingDue
 		s.pendingItems = append([]string(nil), rec.PendingItems...) // 合并决议项清单续接（超时批量拒依据）
+		s.pendingTarget = rec.PendingTarget                         // T6 路由目标续接
 	}
 	// seq 接续末位事件 ID——不接续则新事件 ID 从 1 重来，与恢复事件撞号
 	if n := len(s.Events); n > 0 {

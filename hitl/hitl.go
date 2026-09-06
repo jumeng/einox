@@ -44,6 +44,11 @@ type ApprovalConfig struct {
 	// 模式与授权状态一律挂起——「判断权在人」的写值（如 status=完成），
 	// auto 档/任务期授权均不豁免，人批准后本次代执行。
 	ArgsForce map[string]func(args string) bool
+	// ArgsForceBy 按人参数级强制（T6，可选）：ArgsForce 的说话人维度变体
+	// ——speakerID 来自 ctx Operator（= 当轮说话人）。命中优先于 ArgsForce
+	//；只能收紧（多一类人也要审批）不能放宽——按人豁免不做（收紧纪律，
+	// 同 ToolWrap/Hooks）。典型：家长控制/按坐席白名单外收紧。
+	ArgsForceBy map[string]func(speakerID string, args string) bool
 	// ForceNotes 强制审批卡说明文案（按工具名；命中 ArgsForce 时覆盖缺省
 	// Note——说明本确认不可被模式授权语义替代）。
 	ForceNotes map[string]string
@@ -132,8 +137,16 @@ func (a *approvalTool) Info() *contract.ToolInfo { return a.t.Info() }
 
 func (a *approvalTool) Invoke(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	forced := false
-	if f := a.cfg.ArgsForce[a.opName]; f != nil && f(string(args)) {
-		forced = true // 参数级强制审批：豁免路径全数让位
+	if func() bool { // 参数级强制（T6 按人变体优先）：豁免路径全数让位
+		if f := a.cfg.ArgsForceBy[a.opName]; f != nil && f(contract.OperatorOf(ctx), string(args)) {
+			return true
+		}
+		if f := a.cfg.ArgsForce[a.opName]; f != nil && f(string(args)) {
+			return true
+		}
+		return false
+	}() {
+		forced = true
 		if a.mode == "bg" {
 			// 后台子代理 fail-closed（W-2）：挂起等人在后台无人决议——一律拒绝
 			// 回喂子代理改道（宁可子代理失败，绝不静默放行写操作）。

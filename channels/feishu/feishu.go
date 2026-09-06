@@ -35,10 +35,10 @@ type client interface {
 // Bot 飞书机器人渠道。实现 engine.ChannelSink（出站）；入站经 client 事件
 // 回调进 handleMsg/handleAction（见 inbound.go）。
 type Bot struct {
-	id   string
-	cfg  Config
-	cli  client
-	gw   *engine.ChannelGateway
+	id    string
+	cfg   Config
+	cli   client
+	gw    *engine.ChannelGateway
 	cards cardHub
 
 	cancel context.CancelFunc

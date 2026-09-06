@@ -40,7 +40,7 @@
 |---|---|
 | 生成流 | `text_delta` / `thinking_delta` / `usage`（含整形后出站口径估算与“整形节省”注记；`spawn_id` 非空 = 后台子代理面用量上卷〔估算四项为零〕；est_tools 口径 = 名+描述+参数 schema JSON、含会话域件，存量值较早期版本偏大属纠偏） |
 | 工具 | `tool_call`（参数摘要 + 行为标记）/ `tool_result`（Digest+Preview、文件变更信封 `+A -D`） |
-| 挂起交互 | `approval_request/decision/timeout`（**合并决议卡**：一轮并行写聚合一卡 N 项、逐项决议；T6：request 载荷 `requester_id/name`〔谁的动作——当轮说话人，回退 Owner〕、decision 载荷 `decider_id/name`〔谁决议的〕）/ `ask_user_request/decision/timeout/ignored` / `plan_request/decision/timeout` |
+| 挂起交互 | `approval_request/decision/timeout`（**合并决议卡**：一轮并行写聚合一卡 N 项、逐项决议；T6：request 载荷 `requester_id/name`〔谁的动作——当轮说话人，回退 Owner〕 + `target_id/name`〔路由「问谁」——Options.ApprovalRouter 裁决，空 = 不路由〕、decision 载荷 `decider_id/name`〔谁决议的——DecisionGuard 启用时校验目标一致性，mismatch fail-closed 拒绝〕）/ `ask_user_request/decision/timeout/ignored` / `plan_request/decision/timeout` |
 | steering 与通知 | `steer_queued/updated/removed/reordered/injected` / `notify_queued/notify_injected`（后台子代理完成回传）/ `user_message`（T6 多参与者：载荷 `speaker_id/speaker_name`——谁说的，空 = 单用户） |
 | 过程 | `todo_update` / `harness_note`（系统通知卡，**Kind 取值封闭集**：`offload` 外置 / `compaction` 摘要压缩 / `gate` 质量门回灌 / `failover` 降级链装配失败留痕 / `budget` 常驻面超预算告警 / `fork` 会话分叉血缘 / `side` 辅助对话血缘 / `channel_push` 渠道主动推送——新 Kind 属前端可观察的软契约增长，增改须同步本表）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态〔载荷 `stop_reason`：completed/aborted/error/max_tokens 细分 + failed 附 `partial` 半成品——dsh stopReason 形态对齐〕）/ `participant_update`（T6 参与者名册变更，Kind 封闭集 joined|updated|left——回放重建 roster 的真源）/ `model_change` / `transport_retry`（重连在途——前端回卷当前段半截显示） |
 | 收束 | `session_end`（摘要 + 文件变更清单 + HistLen 轮末历史长度——ForkAt 锚定数据）/ `error`（Code：CONFIG / SERVER / TRANSPORT / ABORTED / AUTH / RATE_LIMIT / OVERFLOW——超窗：manager 裁剪重装配有界重试一次后才如实报错）/ `interrupted`（打断收尾，非故障形态） |

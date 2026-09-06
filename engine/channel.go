@@ -267,18 +267,36 @@ func (g *ChannelGateway) Handle(msg InboundMsg) error {
 	return errors.New("engine: 渠道消息分流失败（会话状态竞态，可重发）")
 }
 
+// ErrNoPendingDecision 无挂起决议可恢复（已续流/超时翻转/并发迟到——幂等
+// 语义，渠道侧把迟到按钮当已处理：静默而非告警）。
+var ErrNoPendingDecision = errors.New("engine: 会话无挂起决议（已处理或超时）")
+
 // Approve 审批/计划决议回写续流（决议端点编排收编：登记 → 回执落流 →
 // 落盘 → 续流）。itemID 空 = 单决议/计划卡（plan 档回执走 plan_decision），
-// 非空 = 合并决议卡逐项。false = 无挂起可恢复（已续流/超时翻转/并发迟到
-// ——幂等拒绝，渠道侧把迟到按钮当已处理）。
-func (g *ChannelGateway) Approve(sid, itemID string, d contract.ApprovalDecision) bool {
+// 非空 = 合并决议卡逐项。decider（T6，可空）= 点按钮的人——随决议落回执
+// 可审计；DecisionGuard 启用且卡有路由目标时校验一致性，mismatch 拒绝
+// （fail-closed 防越权点批）。ErrNoPendingDecision = 幂等迟到；其余 error
+// = 决议被拒（渠道侧告警可见）。
+func (g *ChannelGateway) Approve(sid, itemID string, decider *contract.Participant, d contract.ApprovalDecision) error {
 	s, ok := g.m.reg.Get(sid)
 	if !ok {
-		return false
+		return ErrNoPendingDecision
 	}
 	appID := s.PendingAppID()
 	if appID == "" {
-		return false
+		return ErrNoPendingDecision
+	}
+	if decider != nil && d.DeciderID == "" {
+		d.DeciderID, d.DeciderName = decider.ID, decider.Name
+	}
+	// T6 决议校验缝：卡有目标且决议带人——mismatch 拒绝；缝未挂或任一侧
+	// 缺席 = 不校验（零变化）。
+	if g.m.Opt.DecisionGuard != nil {
+		if tgt := s.PendingTarget(); tgt != "" && d.DeciderID != "" {
+			if err := g.m.Opt.DecisionGuard(tgt, d.DeciderID); err != nil {
+				return fmt.Errorf("决议被拒（目标 %s ≠ 决议者 %s）：%w", tgt, d.DeciderID, err)
+			}
+		}
 	}
 	kind, _ := s.PendingDueOf()
 	if itemID != "" {
@@ -299,12 +317,12 @@ func (g *ChannelGateway) Approve(sid, itemID string, d contract.ApprovalDecision
 	}
 	g.m.reg.Persist(s)
 	go g.m.Resume(context.Background(), s, noopEmit) // 原子抢占归 Resume 首行（BeginResume）
-	return true
+	return nil
 }
 
 // Answer 提问作答回写续流（ask_user 挂起——语音渠道口头回答经适配器解析
 // 后同路）。false 同 Approve（幂等拒绝）。
-func (g *ChannelGateway) Answer(sid string, d contract.AskDecision) bool {
+func (g *ChannelGateway) Answer(sid string, decider *contract.Participant, d contract.AskDecision) bool {
 	s, ok := g.m.reg.Get(sid)
 	if !ok {
 		return false
@@ -312,6 +330,9 @@ func (g *ChannelGateway) Answer(sid string, d contract.AskDecision) bool {
 	askID := s.PendingAppID()
 	if askID == "" {
 		return false
+	}
+	if decider != nil && d.DeciderID == "" { // T6：谁作答的（回执可审计）
+		d.DeciderID, d.DeciderName = decider.ID, decider.Name
 	}
 	s.SetAskDecision(d)
 	s.RecordAskDecision(askID, d)

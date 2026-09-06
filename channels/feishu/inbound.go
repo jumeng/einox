@@ -3,6 +3,8 @@
 package feishu
 
 import (
+	"errors"
+
 	"github.com/jumeng/einox/contract"
 	"github.com/jumeng/einox/engine"
 )
@@ -32,17 +34,31 @@ func (b *Bot) handleAction(a cardAction) {
 	if sid == "" {
 		return
 	}
-	var ok bool
+	var decider *contract.Participant // T6：点按钮的人（决议者落回执可审计）
+	if a.operator != "" {
+		decider = &contract.Participant{ID: a.operator}
+	}
 	switch act {
 	case "approve":
-		ok = b.gw.Approve(sid, "", contract.ApprovalDecision{Approve: true})
+		if err := b.gw.Approve(sid, "", decider, contract.ApprovalDecision{Approve: true}); err != nil {
+			b.actionFailure(a, err)
+		}
 	case "reject":
-		ok = b.gw.Approve(sid, "", contract.ApprovalDecision{Approve: false})
+		if err := b.gw.Approve(sid, "", decider, contract.ApprovalDecision{Approve: false}); err != nil {
+			b.actionFailure(a, err)
+		}
 	case "answer":
-		ok = b.gw.Answer(sid, contract.AskDecision{FreeText: val}) // 选项按钮按自由文本作答
+		if !b.gw.Answer(sid, decider, contract.AskDecision{FreeText: val}) { // 选项按钮按自由文本作答
+			// 迟到/已处理：静默（卡片已被 settlePend 定格，用户可见终态）
+		}
 	}
-	if !ok {
-		// 迟到/已处理：静默（卡片已被 settlePend 定格，用户可见终态）
-		_ = ok
+}
+
+// actionFailure 决议失败回执：幂等迟到（ErrNoPendingDecision）静默——卡片
+// 已定格用户可见终态；其余（DecisionGuard 拒绝等）告警卡可见。
+func (b *Bot) actionFailure(a cardAction, err error) {
+	if errors.Is(err, engine.ErrNoPendingDecision) || a.chatID == "" {
+		return
 	}
+	b.cards.sendStandalone(engine.ChannelBrief{Channel: b.id, Chat: a.chatID}, "⚠️ "+err.Error())
 }

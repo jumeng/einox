@@ -9,8 +9,12 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -214,5 +218,149 @@ func TestParticipantTranscriptSignature(t *testing.T) {
 	}
 	if !strings.Contains(text, "## assistant\n") || strings.Count(text, "## user（张三）") != 1 {
 		t.Fatalf("无署名消息应保持纯「## user」头（零变化）：\n%s", text)
+	}
+}
+
+// TestApprovalRouterAndGuard T6 批次二：路由目标随卡（问谁）+ DecisionGuard
+// mismatch fail-closed 拒绝 / match 放行；幂等迟到语义不变。
+func TestApprovalRouterAndGuard(t *testing.T) {
+	var calls int32
+	wt, _ := tools.InferTool("write_tool", "写桩", func(context.Context, struct{}) (map[string]any, error) {
+		atomic.AddInt32(&calls, 1)
+		return map[string]any{"ok": true}, nil
+	})
+	fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+		if n == 1 {
+			send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+				tcOf("cw", "write_tool", `{}`)}})
+			return
+		}
+		send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+	}}
+	m := newSeamManager(t, func(o *Options) {
+		o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
+		o.Approval = hitl.ApprovalConfig{WriteTools: map[string]bool{"write_tool": true}}
+		o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+			return fm, nil
+		}
+		o.ApprovalRouter = func(SessionBrief, contract.ApprovalReq) *contract.Participant {
+			return &contract.Participant{ID: "u_boss", Name: "值班主任"} // 路由：写操作问值班主任
+		}
+		o.DecisionGuard = func(target, decider string) error {
+			if target != decider {
+				return fmt.Errorf("仅目标本人可决议")
+			}
+			return nil
+		}
+	})
+	s := m.Registry().Create("u_li", "审批", "manual", contract.UserPrefs{Model: "p/m"})
+	s.SetState(session.StateRunning)
+	var card *contract.ApprovalReq
+	m.Run(context.Background(), s, "写", nil, func(ev session.Event) {
+		if ev.Event == contract.EvApprovalRequest {
+			req := ev.Data.(contract.ApprovalReq)
+			card = &req
+		}
+	})
+	t.Cleanup(func() { stopApprovalTimer(s.SID) })
+	if card == nil {
+		t.Fatal("manual 档应挂起")
+	}
+	if card.TargetID != "u_boss" || card.TargetName != "值班主任" {
+		t.Fatalf("路由目标应随卡：实得 %s/%s", card.TargetID, card.TargetName)
+	}
+	if s.PendingTarget() != "u_boss" {
+		t.Fatalf("pending target 应入会话域，实得 %q", s.PendingTarget())
+	}
+	gw := m.Channels()
+	// mismatch：王五点批 → fail-closed 拒绝，工具未执行、仍挂起
+	err := gw.Approve(s.SID, card.Items[0].ItemID, &contract.Participant{ID: "u_wang", Name: "王五"},
+		contract.ApprovalDecision{Approve: true})
+	if err == nil || errors.Is(err, ErrNoPendingDecision) {
+		t.Fatalf("越权点批应拒绝，实得 %v", err)
+	}
+	if calls != 0 || s.PendingAppID() == "" {
+		t.Fatalf("拒绝后应仍挂起零执行：calls=%d pending=%q", calls, s.PendingAppID())
+	}
+	// match：值班主任本人 → 放行续流（Resume 异步——轮询等待收束）
+	if err := gw.Approve(s.SID, card.Items[0].ItemID, &contract.Participant{ID: "u_boss", Name: "值班主任"},
+		contract.ApprovalDecision{Approve: true}); err != nil {
+		t.Fatalf("目标本人决议应放行：%v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&calls) == 1 && s.StateOf() == session.StateEnded {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	waitTitleFlight(t, s)
+	if calls != 1 || s.StateOf() != session.StateEnded {
+		t.Fatalf("放行后应执行收束：calls=%d state=%s", calls, s.StateOf())
+	}
+	for _, ev := range s.SnapshotEvents() {
+		if ev.Event == contract.EvApprovalDecision {
+			if d := ev.Data.(contract.DecisionOut); d.DeciderID != "u_boss" || d.DeciderName != "值班主任" {
+				t.Fatalf("决议回执应带决议者，实得 %s/%s", d.DeciderID, d.DeciderName)
+			}
+		}
+	}
+}
+
+// TestArgsForceBySpeaker 按人参数级强制（T6）：auto 档对特定说话人强制审批、
+// 他人零变化——speakerID 取 ctx Operator（= 当轮说话人）；只能收紧。
+func TestArgsForceBySpeaker(t *testing.T) {
+	var calls int32
+	wt, _ := tools.InferTool("write_tool", "写桩", func(context.Context, struct{}) (map[string]any, error) {
+		atomic.AddInt32(&calls, 1)
+		return map[string]any{"ok": true}, nil
+	})
+	mk := func() *Manager {
+		fm := &scriptedModel{onStream: func(n int, send func(*schema.Message)) {
+			if n == 1 {
+				send(&schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{
+					tcOf("cw", "write_tool", `{}`)}})
+				return
+			}
+			send(&schema.Message{Role: schema.Assistant, Content: "完成"})
+		}}
+		return newSeamManager(t, func(o *Options) {
+			o.Tools = func(SessionBrief) []contract.Tool { return []contract.Tool{wt} }
+			o.Approval = hitl.ApprovalConfig{
+				WriteTools: map[string]bool{"write_tool": true},
+				ArgsForceBy: map[string]func(string, string) bool{
+					"write_tool": func(speakerID, args string) bool { return speakerID == "u_child" }, // 家长控制：未成年人强制审批
+				},
+			}
+			o.NewModel = func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+				return fm, nil
+			}
+		})
+	}
+	// 说话人 u_child（auto 档仍被按人强制 → 挂起）
+	m1 := mk()
+	s1 := m1.Registry().Create("u_parent", "控制", "auto", contract.UserPrefs{Model: "p/m"})
+	s1.SetTurnActor(&contract.Participant{ID: "u_child", Name: "小孩"})
+	s1.SetState(session.StateRunning)
+	var card1 *contract.ApprovalReq
+	m1.Run(context.Background(), s1, "写", nil, func(ev session.Event) {
+		if ev.Event == contract.EvApprovalRequest {
+			c := ev.Data.(contract.ApprovalReq)
+			card1 = &c
+		}
+	})
+	t.Cleanup(func() { stopApprovalTimer(s1.SID) })
+	if card1 == nil {
+		t.Fatal("auto 档下按人强制应挂起（家长控制）")
+	}
+	// 说话人 u_parent（auto 档直执零变化——按人强制不命中）
+	m2 := mk()
+	s2 := m2.Registry().Create("u_parent", "控制", "auto", contract.UserPrefs{Model: "p/m"})
+	s2.SetTurnActor(&contract.Participant{ID: "u_parent", Name: "家长"})
+	s2.SetState(session.StateRunning)
+	m2.Run(context.Background(), s2, "写", nil, func(session.Event) {})
+	waitTitleFlight(t, s2)
+	if calls != 1 || s2.StateOf() != session.StateEnded {
+		t.Fatalf("非命中说话人 auto 档应直执收束：calls=%d state=%s", calls, s2.StateOf())
 	}
 }
