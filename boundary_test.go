@@ -123,10 +123,12 @@ var internalDepRules = []struct {
 }{
 	{modPath + "/contract", modPath + "/", modPath + "/contract", nil,
 		"契约纯度：contract 不依赖任何基座内包"},
-	{modPath, modPath + "/engine", "", []string{modPath + "/engine", modPath + "/channels"},
-		"engine 是组装根（channels 官方通用件在装配位之上同享豁免），其余包反向依赖引擎即分层穿透"},
+	{modPath, modPath + "/engine", "", []string{modPath + "/engine", modPath + "/channels", modPath + "/ui"},
+		"engine 是组装根（channels/ui 官方通用件在装配位之上同享豁免），其余包反向依赖引擎即分层穿透"},
 	{modPath, modPath + "/channels", modPath + "/channels", nil,
 		"官方通用渠道件在装配位之上，基座内包不反向依赖（channels 子树内部自治除外）"},
+	{modPath, modPath + "/ui", modPath + "/ui", nil,
+		"官方通用界面件在装配位之上（T9），基座内包不反向依赖（ui 子树内部自治除外）"},
 }
 
 func TestInternalDependencyDirections(t *testing.T) {
