@@ -40,6 +40,7 @@ var approvedModules = []string{
 	"github.com/mark3labs/mcp-go",
 	"golang.org/x/net",
 	"golang.org/x/sys",
+	"golang.org/x/term", // ui TUI 原始模式（MIT——T9 M3 唯一新依赖，有意决策）
 	"gopkg.in/yaml.v3",
 }
 
