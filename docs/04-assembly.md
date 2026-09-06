@@ -23,7 +23,9 @@
 | `AgentsMD` | | AGENTS.md 注入清单（`func(SessionBrief) []string` 绝对路径按序注入；nil/空 = 不挂零变化。发现逻辑归应用——ZCode 双层形态即用户级文件先、工作区级文件后进清单；注入纪律归 eino agentsmd 中间件：transient 不入历史、@import 递归、挂 summarization 之后不被压缩） |
 | `AgentsMDMaxBytes` | | 注入字节预算（0 = 缺省 32KiB；超限余下文件跳过——防提示词面失控） |
 | `ContextBudget` | | 常驻上下文预算告警线（token；0 = 缺省关，`EINO_CONTEXT_BUDGET` 可覆盖——nil 纪律零配置零变化。推荐值 **8192**：Instruction + 常驻工具面〔业务+进程件+会话域件+spawn，名+描述+参数 schema〕合计超线发一张 harness_note〔Kind: budget，含分类账本〕+ 日志、不阻断；会话内只发一次。toolsearch 名单内不计——只有常驻面计费） |
-| `Approval` | | 审批配置（写工具名单/动作名/ArgsForce——业务内容） |
+| `Approval` | | 审批配置（写工具名单/动作名/ArgsForce——业务内容；`ArgsForceBy` 为按说话人维度变体〔speakerID 取 ctx Operator=当轮说话人〕——只能收紧，按人豁免不做） |
+| `ApprovalRouter` | | 审批路由缝（T6 多参与者，nil = 不路由——全员可见谁先点谁决议）：挂起卡生成时裁决「问谁」，`target_id/name` 随卡 + 入会话域 pending target；判据归应用 |
+| `DecisionGuard` | | 决议校验缝（T6，nil = 不校验——应用自带认证时零变化）：卡有目标且决议带人时校验一致性，mismatch fail-closed 拒（防越权点批） |
 | `SubAgents` | | spawn 子代理装配（nil = 不装配 spawn） |
 | `Topology` | | 确定性多 agent 拓扑（nil = 单 agent react 主线） |
 | `ToolSearchPolicy` | | 动态工具装载（nil = 全量常驻零变化） |
@@ -90,6 +92,9 @@ m.FlushQueue(sess)          // 排队消息落回轮
 | 优雅停机收尾 | `reg.Drain(15 * time.Second)`——取消全部 running 会话并等收尾（终态+检查点+中断注记全落）；应用停机序 = HTTP Shutdown → Drain → store Close |
 | 确定性场景多 agent | `Topology{Kind, SubAgents}`（supervisor/deep；默认单 agent） |
 | 子代理限权 | `SubAgentsConfig{Tools: 白名单, DenyTools: 硬拒名单}`——交集或含全量面未同名 = 装配期报错（白名单写漏即暴露，fail-fast） |
+| 子代理结构化回传 | `SubAgentsConfig{Output: &SpawnOutput{Schema}}`（nil = 自由文本零变化；根形必须 object 构造期拒收）——子面注入 `spawn_submit`：校验失败信封回喂自纠、合法提交即收束（零空跑模型轮），canonical JSON 回父；未提交 = error 终态不静默降级 |
+| 工具输出契约 | 工具实现 `contract.OutputContract`（可选接口 `OutputSchema()+Render()`，未实现零变化）——装配期探测最内层包装：成功路径 schema 校验（required 在场）、Render 产出模型可见投影（大 JSON 工具只回喂渲染视图） |
+| 默认界面（web/TUI） | `ui.New(m, ui.Config{Authorize})` → http.Handler（回放+交互+live；应用不 import 不进构建）；`ui.TUI(m, sid)` 终端回放浏览器（进程内零协议层，SSH/loong64）。装配先例同 channels/ |
 | 基座件按需 | `ProcessTools` 只放你要的（时钟/网页抓取各自独立构造） |
 
 **沙箱装配**（OS 后端 = re-exec 哨兵协议——应用 main 需挂 `sandbox.RunHelper` 钩子，装配期经沙箱 Provider 探测，内核不可用启动告警；`SandboxProvider` 注入容器等后端时无哨兵依赖；部署前提与平台限制见 [05-sandbox.md](05-sandbox.md)）：

@@ -6,6 +6,7 @@ package ui
 // 映射 409——前端把迟到按钮当已处理。
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -59,7 +60,9 @@ func (h *server) run(w http.ResponseWriter, r *http.Request) {
 			if actor != nil {
 				s.SetTurnActor(actor)
 			}
-			go h.m.Run(r.Context(), s, in.Text, in.Attachments, func(session.Event) {})
+			// 执行体脱离请求生命周期（真实服务 handler 返回即取消请求 ctx——
+			// httptest 感知不到此差异；channel.go Handle 同款用 Background，实锚）
+			go h.m.Run(context.Background(), s, in.Text, in.Attachments, func(session.Event) {})
 			writeJSON(w, map[string]any{"ok": true, "started": true})
 			return
 		}
@@ -76,7 +79,7 @@ func (h *server) resume(w http.ResponseWriter, r *http.Request) {
 	if s == nil {
 		return
 	}
-	go h.m.Resume(r.Context(), s, func(session.Event) {}) // 原子抢占归 Resume 首行（BeginResume）
+	go h.m.Resume(context.Background(), s, func(session.Event) {}) // 脱离请求生命周期；原子抢占归 Resume 首行（BeginResume）
 	writeJSON(w, map[string]any{"ok": true})
 }
 
