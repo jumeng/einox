@@ -58,6 +58,20 @@ m.Run(ctx, sess, userMsg, attachments, func(ev session.Event) { /* 编码转发 
 
 四项必填之外全部可选（nil 即不生效）；运行面全貌（Resume/FlushQueue）、业务工具与审批接入见 [docs/04-assembly.md](docs/04-assembly.md)。完整可运行示例见 [einox-examples](https://github.com/jumeng/einox-examples)（最小装配 / hitl 审批续流 / 多轮与跨进程续聊，剧本假模型驱动、零端点零密钥可跑）。
 
+### AI 装配（einox-assemble）
+
+不必手写装配样板：让 AI 编码代理按装配知识层（skill + 清单格式 + 规则 + 预设 + 套路）引导选型并生成 agent 内核。知识层随 module 分发——import 即有，**无需克隆本仓**：
+
+```bash
+go list -m -f '{{.Dir}}' github.com/jumeng/einox   # 知识层在 <dir>/assemble/
+```
+
+推荐在业务仓 `AGENTS.md` 贴入一行，代理常驻知晓：
+
+> 本仓基于 einox 开发 agent。装配走 einox-assemble 知识层：经 `go list -m -f '{{.Dir}}' github.com/jumeng/einox` 定位 einox 后，读 `<dir>/assemble/SKILL.md` 并按其流程执行。
+
+流程：选预设组合（minimal/coding/support/data-analysis）打底 → 九域逐项确认（可随时问详情）→ 产出 `einox.agent.yaml` 能力装配清单 → 按套路样板生成内核 → `go build` + 清单对账验收。要 skill 常驻（`/einox-assemble` 引导式）见 [assemble/SKILL.md](assemble/SKILL.md) 安装节。
+
 ## 文档
 
 | 关注点 | 文档 |

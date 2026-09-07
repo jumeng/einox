@@ -62,10 +62,31 @@ description: 在 einox 基座上开发业务 agent 时使用——逐能力确�
 - [patterns/](patterns/) 装配套路(00-skeleton + 九域样板)
 - einox 仓 docs/03(能力全量清单)与 docs/04(装配面)——本目录复制出仓后不随行,需深处语义时读 einox 仓内文件
 
-## 安装
+## 获取与安装(无需克隆 einox 仓)
+
+知识层随 Go module 分发——业务仓 `require github.com/jumeng/einox` 后,本地 module cache 即含全部知识层文件。定位:
 
 ```bash
-cp -r <einox仓>/assemble ~/.agents/skills/einox-assemble
+go list -m -f '{{.Dir}}' github.com/jumeng/einox   # → <dir>,知识层在 <dir>/assemble/
 ```
 
-目录自含(参考文件全部相对路径引用)。不装 skill 亦可:AI 编程代理直接读 einox 仓 `assemble/` 知识层 + 业务仓清单自主装配——skill 只是流程封装,知识层不依赖 skill 生态。升级 = 从新版 einox 重新复制。
+(知识层版本 = go.mod require 的版本,与基座代码严格同版,不存在文档漂移;升级基座后 `go mod tidy` 重新定位即得新版知识层。)
+
+两种消费方式:
+
+1. **零安装(AI 自主装配)**——不装 skill,AI 编码代理直接读知识层按本文件流程执行。推荐在业务仓 `AGENTS.md` 贴入一行,代理常驻知晓:
+
+   ```markdown
+   本仓基于 einox 开发 agent。装配走 einox-assemble 知识层:经
+   `go list -m -f '{{.Dir}}' github.com/jumeng/einox` 定位 einox 后,
+   读 `<dir>/assemble/SKILL.md` 并按其流程执行。
+   ```
+
+2. **skill 常驻(引导式逐项确认)**——从 module cache 复制安装:
+
+   ```bash
+   cp -r "$(go list -m -f '{{.Dir}}' github.com/jumeng/einox)/assemble" \
+         ~/.agents/skills/einox-assemble
+   ```
+
+   目录自含(参考文件全部相对路径引用);升级基座后重跑此命令。
