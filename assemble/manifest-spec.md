@@ -93,4 +93,19 @@ ui: {web: false, tui: false}          # ⑨ 界面
 
 ## 示例清单
 
-- minimal 与 coding 两份完整示例:见 [recipes/](recipes/) 对应篇(各篇内含直出清单)。
+最短可用清单(minimal 场景,可直接抄):
+
+```yaml
+apiVersion: einox/v1
+name: my-minimal-agent
+preset: minimal
+model:
+  providers: [deepseek]
+engine:
+  checkpoint: file
+  workspace-root: ./data/workspaces
+tools:
+  session-tools-off: [fs, cmd, patch]
+```
+
+四场景完整示例见 [recipes/](recipes/)(minimal / coding / support / data-analysis,各篇内含直出清单与装配要点)。
