@@ -76,7 +76,7 @@ reg.Persist(s)
 m.Resume(ctx, s, fn)             // 续流:file_ticket 等写操作在任务期授权内直落
 ```
 
-要点:批准后任务期内写工具不再逐项挂起(事件流全程无 `approval_request`);挂起 + Resume 收尾的首轮**不触发异步标题生成**(挂起时半轮 assistant 消息已入史,firstTurn 判定 false,标题回退 Task——剧本槽位对齐注意)。
+要点:批准后任务期内写工具不再逐项挂起(事件流全程无 `approval_request`);挂起 + Resume 收尾的首轮照常触发异步标题生成(首轮标记锚定 Run 入口——llmtest 剧本记得留标题槽位,genTitle 走 Generate 同耗剧本)。
 
 ## 验证
 

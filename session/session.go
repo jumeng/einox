@@ -106,6 +106,7 @@ type Session struct {
 	taskGrant     bool                   // plan 档任务期写授权（计划批准置位；任务成功收尾/换档/新计划提交清零）
 	planSeq       int                    // 计划文档序号（submit_plan 自增取号；修订递增留痕）
 	turnUserMsg   string                 // 轮次用户消息（跨审批中断保留）
+	turnFirst     bool                   // 本轮开始前历史无 assistant（首轮标记——Run 入口判定跨挂起保留，U-1；不落盘：跨进程恢复的挂起轮零值回退，与标题输入 turnUserMsg 同降级）
 	notifySpent   int                    // 后台通知连续自续已花费预算（W-3 自激护栏；用户消息消费清零，通知自身不恢复）
 	participants  []contract.Participant // T6 参与者名册（多人群聊/坐席协同；落盘随 session.json，变更经 participant_update 事件落流）
 	turnActor     *contract.Participant  // T6 当轮说话人（渠道/应用 Run 前设置；跨审批中断保留保 Requester/Operator 连续；不落盘——轮次事实）
@@ -436,6 +437,21 @@ func (s *Session) TurnUserMsgOf() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.turnUserMsg
+}
+
+// SetTurnFirst 轮次首轮标记（Run 入口判定：本轮开始前历史无 assistant；
+// 跨审批中断保留——挂起段 flushAcc 入史不污染判定，Resume 收尾消费）。
+func (s *Session) SetTurnFirst(first bool) {
+	s.mu.Lock()
+	s.turnFirst = first
+	s.mu.Unlock()
+}
+
+// TurnFirstOf 轮次首轮标记读取（settleTurn 标题触发依据）。
+func (s *Session) TurnFirstOf() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnFirst
 }
 
 // SetTitle / TitleOf 标题读写（genTitle 异步写）。

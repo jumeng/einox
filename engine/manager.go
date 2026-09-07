@@ -375,6 +375,10 @@ func (m *Manager) beginTurn(ctx context.Context, s *session.Session, fn emitFn) 
 
 // steering 排队兜底：上轮运行中排队的消息前置并入本轮输入。
 func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, atts []session.Attachment, fn emitFn) {
+	// 首轮标记锚定 Run 入口（U-1）：挂起段会 flushAcc 入史，收尾时再判
+	// 「历史已有 assistant」会把被挂起切断的首轮误判为非首轮——标题恒回退。
+	// 此处判定先于本轮任何入史，跨挂起保留到 Resume 收尾消费。
+	s.SetTurnFirst(!hasAssistant(s.CloneHistory()))
 	s.ClearTurnGrant()
 	s.SetPendingApproval("")
 	actor := s.TurnActorOf() // T6 当轮说话人（nil = 单用户零变化）
@@ -553,7 +557,7 @@ func (m *Manager) settleTurn(s *session.Session, acc *runAccum, endState string,
 	if s.Stopped() || endState == session.StatePendingApproval || endState == "" {
 		return // 挂起/静默收线：轮次未完或无产出
 	}
-	firstTurn := !hasAssistant(s.CloneHistory())
+	firstTurn := s.TurnFirstOf() // Run 入口的锚定值（挂起段入史不污染——U-1）
 	turnUser := s.TurnUserMsgOf()
 	// 收尾顺序：session_end 先记录（与回放一致）→ 历史追加 → 终态落盘 →
 	// 最后写事件——客户端见 end 时状态已在写队列。HistLen 在记录时点先于

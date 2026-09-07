@@ -71,7 +71,18 @@ SkillsDir: func(sess engine.SessionBrief) string {
 ## agentsmd 验证锚点
 
 - 注入形态:AGENTS.md 内容作为 **transient user 消息**进模型输入(不入历史/检查点)——断言面在模型输入侧(llmtest 经 `Model.Inputs()` 直查),不在事件流。
-- 记忆文件不存在(首会话「记忆从零增长」)属合法路径:上游日志一条 `warning: file not found, skipping` 是预期噪音,无害。
+- 记忆环场景**建议在 AgentsMD 闭包内保证记忆文件存在**(空文件占位)——否则首会话「记忆从零增长」时,每次模型调用上游日志打一条 `warning: file not found, skipping`(einox 有意的留痕面:清单文件缺失可能是装配路径写错,静音会失去排障线索;应用侧占位即两全——噪音消失、排障能力不损失):
+
+```go
+AgentsMD: func(sess engine.SessionBrief) []string {
+    mem := filepath.Join(dataDir, "owners", sess.Owner, "memory.md")
+    if _, err := os.Stat(mem); os.IsNotExist(err) { // 幂等占位,消 not found 留痕
+        os.MkdirAll(filepath.Dir(mem), 0o755)
+        os.WriteFile(mem, nil, 0o644)
+    }
+    return []string{mem}
+},
+```
 
 ## 验证
 

@@ -1,12 +1,34 @@
 package engine
 
-// DayHeader 表测（提示词日期头）：ISO 周界数学——周一开新周、周日归上一周、
-// 年边界（跨年周归属 ISO 年，2026 有 53 周）、闰年二月末；W 号两位零填充格式。
+// 标题行为测：DayHeader 表测（提示词日期头）与首轮标题生成（含挂起+Resume
+// 场景的 firstTurn 判定——U-1，2026-09-07）。
 
 import (
 	"testing"
 	"time"
+
+	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/session"
 )
+
+// TestSuspendedFirstTurnGeneratesTitle U-1：经审批挂起 + Resume 收尾的首轮
+// 应生成标题。此前 settleTurn 在收尾时以「历史已有 assistant」判非首轮——
+// 挂起段已 flushAcc 入史，同一首轮被污染，标题恒回退 Task（实测踩坑记录
+// findings/2026-09-07-assembly-skill-fieldtest.md）。修后 firstTurn 锚定
+// Run 入口（挂起发生前），跨挂保持到 Resume 收尾。
+func TestSuspendedFirstTurnGeneratesTitle(t *testing.T) {
+	m, s, _, _, _ := mergedSetup(t)
+	if err := m.Channels().Approve(s.SID, "", nil, contract.ApprovalDecision{Approve: true}); err != nil {
+		t.Fatalf("批量决议应成功：%v", err)
+	}
+	waitFor(t, "批准应正常收口", func() bool { return s.StateOf() == session.StateEnded })
+	waitTitleFlight(t, s)
+	// scriptedModel.Generate 固定回「非流式答复」——genTitle 走 Generate，
+	// 修复生效即以此为标题；未生成时 TitleOf 为空（Task 回退是消费侧行为）。
+	if got := s.TitleOf(); got != "非流式答复" {
+		t.Fatalf("挂起+Resume 收尾的首轮应生成标题，实得 %q", got)
+	}
+}
 
 func TestDayHeader(t *testing.T) {
 	cases := []struct {
