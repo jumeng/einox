@@ -9,7 +9,7 @@
 | 规则 | 锚 |
 |---|---|
 | 四必填:`Providers` / `Instruction` / `CheckPoints` / `WorkspaceRoot`——缺一 `NewManager` 即拒(不拖到首会话) | engine/manager.go `NewManager` |
-| fs/cmd/patch 族在场(未裁)→ `Instruction` 必拼 `prompts.Coding()`(编码工作模式:编辑纪律/验证纪律/补丁格式) | prompts 包 |
+| fs/cmd/patch 三族**任一在场**(未全裁)→ `Instruction` 必拼 `prompts.Coding()`(编码工作模式:编辑纪律/验证纪律/补丁格式——已裁族相关段落属可接受噪音);三族全裁 → 勿拼 | prompts 包 |
 | subagents 启用 → `Instruction` 必拼 `prompts.Orchestration()`(派发纪律/后台派生纪律) | prompts 包 |
 | Instruction 拼装序:业务职责段(应用写)+ `prompts.Coding()`(工具面在场时)+ `prompts.Orchestration()`(spawn 装配时)+ 会话配置段(mode 语义) | docs/04 最小装配 |
 

@@ -50,6 +50,11 @@ Recall: true, // opt-in:装配即知情决策
 
 记忆完整读写环 = `recall`(拉)+ `TurnEpilogue` + `AgentsMD`(推,见 [engine.md](engine.md))。
 
+## recall 验证锚点
+
+- recall 结果以**信封文本**回喂模型(含 sid 与标题,标题空回退 Task)——断言面在模型输入侧(llmtest 经 `Model.Inputs()` 直查 tool_result 后续输入),不在事件流。
+- 恒排除当前会话、恒 owner 域隔离:跨 owner 断言检索不到是正确行为。
+
 ## 验证
 
 - `go build ./...` 过。

@@ -61,6 +61,23 @@ DecisionGuard: func(targetID, deciderID string) error {
 
 配套:多参与者场景下说话人身份经 `m.Dispatch(s, actor, text, atts, mode)` 的 actor 携带([ui.md](ui.md) / [channels.md](channels.md) 同源编排)。
 
+## plan 档决议链路(应用侧 API)
+
+plan 卡挂起后的批准/拒绝链路(manual 档审批走 `Channels().Approve` 或同款 session API;plan 档专用回执):
+
+```go
+// Run 同步返回时状态 = StatePendingApproval、PendingDueOf() = "plan"
+planID := s.PendingAppID()
+d := contract.ApprovalDecision{Approve: true}
+
+s.SetDecision(d)                 // 决议入槽(Resume 时 plan 工具消费——批准 = 授任务期写)
+s.RecordPlanDecision(planID, d)  // 回执落流(回放重建卡片终态的真源;≠ approval 的 RecordDecision)
+reg.Persist(s)
+m.Resume(ctx, s, fn)             // 续流:file_ticket 等写操作在任务期授权内直落
+```
+
+要点:批准后任务期内写工具不再逐项挂起(事件流全程无 `approval_request`);挂起 + Resume 收尾的首轮**不触发异步标题生成**(挂起时半轮 assistant 消息已入史,firstTurn 判定 false,标题回退 Task——剧本槽位对齐注意)。
+
 ## 验证
 
 - `go build ./...` 过。

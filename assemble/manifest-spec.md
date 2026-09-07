@@ -15,7 +15,7 @@
 
 | 域 | 字段 | 类型 | 说明 |
 |---|---|---|---|
-| ① model | `providers` | list | 必填。供应商清单:`BuiltinProviders` 名(deepseek/glm)或自定义 spec(baseurl+key+kind) |
+| ① model | `providers` | list | 必填。供应商清单:`BuiltinProviders` 名(deepseek/glm)/ 自定义 spec(baseurl+key+kind)/ `fake`(测试形态:`NewModel` 注入 llmtest 剧本时 providers 仅作声明占位,接真实端点时替换) |
 | | `fallback-chain` | list | 主模型 Failover 降级链(provider/model 复合键) |
 | | `vision` | bool | 图片引用解析 + 模型视觉位 |
 | ② engine | `checkpoint` | string | 必填。检查点存储形态(样板 = `checkpoint.FileCheckPointStore`) |
@@ -90,6 +90,10 @@ security:                             # ⑦ 安全面
 channels: []                          # ⑧ 渠道
 ui: {web: false, tui: false}          # ⑨ 界面
 ```
+
+## 占位符语法
+
+`workspace-root` / `agentsmd` 等路径字段支持 `{owner}` / `{sid}` 占位符(装配时按会话身份展开——对应 `Options` 闭包入参 `SessionBrief`)。样例中的具体路径形态只是示意,应用按自身数据布局对齐(如用户域子树 `users/<owner>/…`)。
 
 ## 示例清单
 

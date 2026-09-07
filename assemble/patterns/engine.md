@@ -43,12 +43,16 @@ AgentsMDMaxBytes: 8192, // 0 = 缺省 32KiB;按序装载超限即跳过余下文
 
 ```go
 TurnEpilogue: func(sum engine.TurnEndSummary) { // 自然收束每轮触发;同步调用应快速返回
-    // 最小用法:摘要追加进 owner 域记忆 markdown,下一会话经 AgentsMD 注入
+    // 时序:epilogue 先于异步标题生成执行——首轮 sum.Title 为空,回退 Task
+    title := sum.Title
+    if title == "" {
+        title = sum.Task
+    }
     path := filepath.Join(dataDir, "owners", sum.Owner, "memory.md")
     os.MkdirAll(filepath.Dir(path), 0o755)
     f, _ := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
     defer f.Close()
-    fmt.Fprintf(f, "\n## %s\n%s\n", sum.Title, sum.Summary)
+    fmt.Fprintf(f, "\n## %s\n- 任务: %s\n- 摘要: %s\n", title, sum.Task, sum.Summary)
 },
 ```
 
@@ -63,6 +67,11 @@ SkillsDir: func(sess engine.SessionBrief) string {
 ```
 
 指向物化目录即挂 skill middleware(agentskills.io 标准发现)。与 `Tools` 同契约:每轮 assemble 求值、并发安全(闭包应快速返回且无共享可变态)。
+
+## agentsmd 验证锚点
+
+- 注入形态:AGENTS.md 内容作为 **transient user 消息**进模型输入(不入历史/检查点)——断言面在模型输入侧(llmtest 经 `Model.Inputs()` 直查),不在事件流。
+- 记忆文件不存在(首会话「记忆从零增长」)属合法路径:上游日志一条 `warning: file not found, skipping` 是预期噪音,无害。
 
 ## 验证
 

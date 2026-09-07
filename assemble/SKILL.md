@@ -37,8 +37,10 @@ description: 在 einox 基座上开发业务 agent 时使用——逐能力确�
 
 1. [patterns/00-skeleton.md](patterns/00-skeleton.md) 为底(四必填 + 演示级 Store);
 2. 清单每个启用项叠加对应 patterns 段(逐域文件,段自足可拼装);
-3. Instruction 按拼装序:业务职责段(与用户协作产出)+ `prompts.Coding()`(fs/cmd/patch 在场)+ `prompts.Orchestration()`(subagents)+ 会话配置段;
-4. 产出:main.go + filestore.go + go.mod + README.md(装配说明与运行方法);
+3. Instruction 按拼装序:业务职责段(与用户协作产出)+ `prompts.Coding()`(fs/cmd/patch 未全裁)+ `prompts.Orchestration()`(subagents)+ 会话配置段;
+4. 产出形态二选一:
+   - **绿地模式**(空业务仓):main.go + filestore.go + go.mod + README.md(装配说明与运行方法);
+   - **嵌入既有仓模式**(业务仓已有代码/底座/纪律):遵循该仓 AGENTS.md 约定——复用其既有 Store/打印器等共享底座、示例目录形态与测试纪律;清单落仓根,装配代码形态向仓内惯例对齐(skeleton 的 filestore.go 在已有 Store 实现时不复制);
 5. 装配中逐项对照 [rules.md](rules.md) 依赖/互斥律自查——**违律即停,回用户改清单**。
 
 ### ⑤ 验收门
