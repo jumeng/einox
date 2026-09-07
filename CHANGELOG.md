@@ -1,6 +1,6 @@
 # Changelog
 
-einox 版本日志。本文件自 v0.5.0 起入库维护；更早版本未回溯整理，变更见 git log 与各 tag 区间提交信息。
+einox 版本日志。v0.5.0 起发布时实时维护；更早四版于 2026-09-07 回溯补档——v0.2.0/v0.4.0 为 tag 注文原文搬运（零转述失真），v0.1.1/v0.3.0 为区间提交提炼（无版本说明原文，细节以 git log 区间为准）。
 
 ## v0.5.1（2026-09-07）
 
@@ -89,11 +89,63 @@ einox 版本日志。本文件自 v0.5.0 起入库维护；更早版本未回溯
 
 22 包 `-count=1` 全绿；`-race`（engine/session/channels/ui）绿；交叉编译 linux/{amd64,arm64}、windows/amd64、darwin/{amd64,arm64}、linux/loong64 全过；gofmt/vet 干净。五轮独立审查收口（详见提交信息）。
 
-## 更早版本
+## v0.4.0（2026-09-03）
 
-| 版本 | 日期 | 说明 |
-|---|---|---|
-| v0.4.0 | 2026-09-03 | 未维护 changelog，变更见 git log |
-| v0.3.0 | 2026-08-31 | 同上 |
-| v0.2.0 | 2026-08-29 | 同上 |
-| v0.1.1 | 2026-08-29 | 同上 |
+> tag 注文原文搬运。自 v0.3.0 以来 10 个提交、51 文件 +2851/−1089。
+
+**破坏性变更：**
+
+- repo 挂载族下沉应用层：repo 工具族与工作区持久/写保护机制移出基座默认面、转装配面能力件——应用自备挂载族（勘察件/写保护/只读按需装配），基座只留契约与注入缝
+- 会话 Session.Scope 字段整删：准遗留展示字段（创建写死、此后无机制消费），记录/列表/详情/分叉链不再携带 scope；存量 JSON 旧字段回放自然忽略，零迁移
+
+**新增：**
+
+- 消息渠道能力面三层：engine 渠道编排泵（入站 Handle 分流/出站事件订阅补投/决议回写续流/Cancel/Push/(channel,chat)→sid 绑定表落盘重启找回）+ 官方件 channels/feishu（长连接+出站卡片流式+审批提问卡按钮）+ channels/voice 流型语音占位 + Options.Channels 装配缝（nil 零变化+构造期校验）
+- 应用预置注入面与挑选权：ResolveFileCatalog/ResolveCatalog 应用自备完整目录（呈现与运行时同源、目录外条目不被补全）、MergeProviders 泛化合并原语、llm.RewriteSpec 规格改写工厂缝（厂家私有适配归应用层，基座只按改写后规格构造客户端）
+- 模型切换标志调用边界语义：选择器切换只写快照不发事件；NoteModelCall 每次模型调用前比对「本次将用 vs 上次实际调用」不同才落 model_change；last_used_model 随会话记录持久化跨重启不断
+- webfetch TLS 姿态注入口：Config.Insecure/RootCAs——缺省严格校验；企业自签内网装根为正解、显式跳过为逃生口
+
+**调整：**
+
+- 内置目录裁撤 deepseek-anthropic 兼容端点条目（只留官方 openai 协议端点；存量引用转未命中原样透传，零迁移）
+
+**修复：**
+
+- 质量审查轮批次：feishu 出站断线（cards.cli 漏接+sendStandalone nil 防御）、三竞态闭合（sanitizeHistory 深拷贝×persist 锁外 marshal、审批超时 ClearPendingIf 单锁原子清挂起、guardTool 有状态加锁）、吞错日志化四处（tag 注文截于此，余见 v0.3.0..v0.4.0 区间提交）
+
+## v0.3.0（2026-08-31）
+
+> 区间提炼（无版本说明原文）。自 v0.2.0 以来 8 个提交、29 文件 +1403/−133。主线：**模型面双供应商 + 引擎机制批 + 选型文档定稿**。
+
+- 智谱（BigModel）供应商落地：BuiltinProviders 增 zhipu 条目（glm-5.3 纯文本 / glm-5.3-flash 多模态）、`dialect=glm` 思考方言（线格式与 deepseek 同形共用）、Classify 业务码细化（智谱 429 族欠费/套餐类致命码不空转重试）
+- 思考等级四档化（关档回归）：NormalizeEffort 增 off 一等档——旧值 on/max→max、off 恢复关档本义、未知→默认 low（**旧值归一行为变化**，消费面详见区间提交 9f15879）；anthropic 关档不发思考块 / deepseek·glm 方言关档 disabled / 通用 effort 方言 off→none
+- 优化方案评审修订版落地（fa2e6ea，18 个测试）：Resume 入口整备（BeginResume 单锁原子查清挂起域，重复/并发第二 Resume 明确 error）、审批超时器 recover、hitl/askuser/plan 三包 gob round-trip 兼容回归、ModelSpec.NoToolCalls 能力门控（assemble 期 CONFIG 拒）、Registry.Drain 优雅停机、Options.ContextBudget 常驻面预算告警、后台子代理 usage 上卷、Registry.Fork 全量快照分叉、tool_result 后节流 persist
+- store 逻辑键拼接统一 path.Join（UserTree 读写跨平台键形态一致，Windows 反斜杠修复）
+- docs/01 五路线叙事四连精化（总表/复合形态分析法/README 定位句）
+
+## v0.2.0（2026-08-29）
+
+> tag 注文原文搬运。自 v0.1.1 以来 17 个提交、60 文件 +4791/−377。
+
+**变更（不兼容）：**
+
+- engine.NewManager 返回值改为 (*Manager, error)，必填项缺失在构造期报错
+- Options.Tools / SkillsDir 闭包签名改为 func(SessionBrief)，支持按会话身份裁剪
+- 移除 EINO_RUN_DOCKER 环境变量，容器沙箱改由 Options.SandboxProvider 注入
+- 会话域工具族构造失败由静默跳过改为报错
+- 文档篇目改号（能力 02→03、装配 03→04），旧链接失效
+
+**新增：**
+
+- 模型故障转移（FallbackModels）：主模型重试耗尽后按序切换备用模型
+- FinalGate 收束质量门：轮次结束按应用判据验证，不合格自动重跑
+- 跨会话记忆：recall 检索历史会话，TurnEpilogue 轮收尾回调
+- 容器沙箱后端（sandbox.DockerProvider）
+- AGENTS.md 注入（AgentsMD）
+
+## v0.1.1（2026-08-29）
+
+> 区间提炼（无版本说明原文）。初版建档：Initial commit 后 6 个提交、128 文件 +24240——einox 通用 agent 基座初始公开面。
+
+- 循环引擎（Manager/ReAct）、会话域（Registry/Store/快照）、HITL 审批（挂起-续流）、四平台沙箱、通用工具族（fsutil/runcommand/applypatch/todo/askuser/plan）、契约面 contract（零 eino）初始形态
+- AGENTS.md 仓库工作说明定稿；boundary_test 边界守卫（contract 零 eino + 外部依赖白名单——清单外 import 即测试失败）；装配指南与装配缝设计文档（五缝逐缝论证）
