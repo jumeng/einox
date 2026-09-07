@@ -2,6 +2,20 @@
 
 einox 版本日志。本文件自 v0.5.0 起入库维护；更早版本未回溯整理，变更见 git log 与各 tag 区间提交信息。
 
+## v0.5.1（2026-09-07）
+
+自 v0.5.0（2026-09-06）以来 11 个提交、21 文件 +1387/−3。版本主线：**装配知识层（einox-assemble）+ 挂起轮首轮标题修复**。无破坏性变更、无 Go API 变化——消费者零改动升级。
+
+### 修复
+
+- **经挂起 + Resume 收尾的首轮不生成会话标题**（U-1，装配知识层实测发现）：挂起时 `flushAcc` 已把半轮 assistant 消息入史，轮收尾以「历史已有 assistant」判非首轮——被挂起切断的首轮误判，标题恒回退 Task。修法：`session` 增内存态 `turnFirst` 标记（`Run` 入口锚定 `!hasAssistant`、跨挂起保留、Resume 收尾消费；不落盘——跨进程恢复的挂起轮零值回退，与标题输入 `turnUserMsg` 同降级），`settleTurn` 改读标记。红→绿护栏 `TestSuspendedFirstTurnGeneratesTitle`。
+- **消费面注意**：依赖「挂起轮无标题槽位」的 llmtest 剧本需补标题槽（`genTitle` 走 Generate 同耗剧本）；`TurnEpilogue` 先于异步标题执行的既有时序不变（记忆环首条仍是 Task 回退）。
+
+### 新增
+
+- **`assemble/` 装配知识层（einox-assemble skill，纯文档资产零代码）**：业务 agent 开发的选型与装配知识真源——`SKILL.md`（六步流程：场景定位/逐域确认/清单落盘/生成内核/对账验收/增量模式）+ `manifest-spec.md`（`einox.agent.yaml` 能力装配清单格式，九域三态）+ `rules.md`（必选/依赖/互斥律 + 档位语义 + 选型域序）+ `recipes/`×4（minimal/coding/support/data-analysis 预设组合）+ `patterns/`（骨架 + 九域装配套路样板，骨架经 `/tmp` 实测 `go build` 通过）。知识层随 module 分发（`go list -m -f '{{.Dir}}'` 定位，与 require 版本严格同版）；复制到 `~/.agents/skills/einox-assemble` 即成引导式 skill。经零上下文子代理全流程实测（产物 = einox-examples memory 示例），八处实测缺口已回改。
+- README 快速开始增「AI 装配」节（零克隆分发通道与业务仓 AGENTS.md 自发现指引）。
+
 ## v0.5.0（2026-09-06）
 
 自 v0.4.0（2026-09-03）以来 12 个提交、144 文件 +10991/−3284。版本主线：**多参与者会话模型 + 装配式默认界面（web/TUI）+ 会话派生族**三块新能力面，配套全仓五轮审查修复（含竞态与安全面）。事件词表自此冻结（只增不改名不删除）。
