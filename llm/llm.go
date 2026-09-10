@@ -99,7 +99,7 @@ type ModelOpt struct {
 }
 
 // builtinModels / builtinDefaultEffort 旧结构迁移用（v1 清单缺省）。
-var builtinModels = []string{"deepseek-v4-flash", "deepseek-v4-pro"}
+var builtinModels = []string{"deepseek-flash", "deepseek-v4-pro"}
 
 const builtinDefaultEffort = "low"
 
@@ -297,7 +297,7 @@ func envProvider() (ProviderSpec, bool) {
 		kind = "anthropic"
 	}
 	if m == "" {
-		m = "deepseek-v4-flash"
+		m = "deepseek-flash"
 	}
 	return ProviderSpec{
 		ID: "env", Name: "环境变量端点", Kind: kind, BaseURL: base, APIKey: key, Enabled: true,
@@ -378,7 +378,7 @@ func inferContextWindow(id string) int {
 		return 200_000
 	case hit("gemini"):
 		return 1_000_000
-	case hit("deepseek"): // 官方定价页：现行三模型上下文均 1M（BuiltinProviders 同源）
+	case hit("deepseek"): // 官方定价页：现行两模型上下文均 1M（BuiltinProviders 同源）
 		return 1_000_000
 	case hit("gpt-4.1"):
 		return 1_000_000

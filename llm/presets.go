@@ -22,12 +22,15 @@ package llm
 //     走原样盘，合并只发生在 resolve 视图）
 //
 // DeepSeek 官方推荐 openai 协议端点（api.deepseek.com，dialect=deepseek
-// 思考字段）；模型三只（flash/pro/vision-exp，1M 上下文预开；输出上限取
-// m1m 共用预设 128K——2026-09-06 与代码对齐，此前注释称 384K 与
-// Limit.Output=128_000 漂移，spec 真值以官方文档为准可再调），vision-exp
-// 定价与 flash 一致。/anthropic 兼容端点不预置（2026-09-01 裁撤内置条目，
-// 只留官方推荐接入口）——需要时自定义 Kind=anthropic 接，思考走协议原生
-// 预算档零方言。
+// 思考字段）；模型两只（2026-09-10 对齐官方文档目录更新：deepseek-flash =
+// V4.1-Flash，原生图像理解接管原 vision-exp 的图片输入；deepseek-v4-pro
+// 计划有序下线——北京时间 2026-09-14 12:00 后请求路由 V4.1-Flash 并按
+// Flash 计费，官方能力表仍标纯文本，预置按路由后实际能力面标图片输入
+// 〔预制面向常态而非四天过渡窗〕；旧名 deepseek-v4-flash / -vision-exp
+// 已下线仍可调、同路由），两模型 1M 上下文 / 384K 输出上限（官方模型&
+// 价格页口径；智谱文档同页异口径 128K，故 m1m 输出上限参数化分档）。/anthropic 兼容端点不预置（2026-09-01
+// 裁撤内置条目，只留官方推荐接入口）——需要时自定义 Kind=anthropic 接，
+// 思考走协议原生预算档零方言。
 //
 // 智谱（BigModel）单条目：GLM-5.3（纯文本）+ GLM-5.3-Flash（原生多模态，
 // 图片经 image_url 传 URL/Base64），上下文 1M、最大输出 128K（两模型文档
@@ -43,10 +46,10 @@ package llm
 // BuiltinProviders 预置供应商目录（纯数据、版本化随基座、不含密钥；模型页
 // 「厂家」下拉加载模板同源）。
 func BuiltinProviders() []ProviderSpec {
-	m1m := func(id string, image bool, pri int) ModelSpec {
+	m1m := func(id string, image bool, pri, output int) ModelSpec {
 		m := ModelSpec{
 			ID: id, Input: []string{"text"},
-			Limit:    &Limit{Context: 1_000_000, Output: 128_000}, // 1M 上下文预开
+			Limit:    &Limit{Context: 1_000_000, Output: output}, // 1M 上下文预开
 			Priority: pri,
 		}
 		if image {
@@ -59,17 +62,16 @@ func BuiltinProviders() []ProviderSpec {
 			ID: "deepseek", Name: "DeepSeek", Kind: "openai",
 			BaseURL: "https://api.deepseek.com", Dialect: "deepseek", Enabled: true,
 			Models: []ModelSpec{
-				m1m("deepseek-v4-flash", false, 100),
-				m1m("deepseek-v4-pro", false, 101),
-				m1m("deepseek-v4-flash-vision-exp", true, 102),
+				m1m("deepseek-flash", true, 100, 384_000),  // V4.1-Flash：多模态（图片输入）
+				m1m("deepseek-v4-pro", true, 101, 384_000), // 表列纯文本；9-14 路由 flash 后实为多模态——按实际能力面预制
 			},
 		},
 		{
 			ID: "zhipu", Name: "智谱（GLM）", Kind: "openai",
 			BaseURL: "https://open.bigmodel.cn/api/paas/v4", Dialect: "glm", Enabled: true,
 			Models: []ModelSpec{
-				m1m("glm-5.3-flash", true, 103), // 原生多模态：图片输入
-				m1m("glm-5.3", false, 104),      // 纯文本
+				m1m("glm-5.3-flash", true, 103, 128_000), // 原生多模态：图片输入
+				m1m("glm-5.3", false, 104, 128_000),      // 纯文本
 			},
 		},
 	}

@@ -52,11 +52,14 @@ func TestMergeBuiltinSemantics(t *testing.T) {
 	if d.APIKey != "sk-x" || !d.Enabled {
 		t.Fatalf("密钥/启用权不得受内置影响：%+v", d)
 	}
-	if len(d.Models) != 3 || d.Models[0].ID != "deepseek-v4-flash" {
+	if len(d.Models) != 2 || d.Models[0].ID != "deepseek-flash" {
 		t.Fatalf("空模型清单应取内置全套：%+v", d.Models)
 	}
-	if d.Models[2].Input == nil || !SupportsImage(d.Models[2]) {
-		t.Fatalf("vision 模型能力标记应随内置带出")
+	if d.Models[0].Input == nil || !SupportsImage(d.Models[0]) {
+		t.Fatalf("flash 模型能力标记应随内置带出（V4.1-Flash 原生图像理解）")
+	}
+	if !SupportsImage(d.Models[1]) {
+		t.Fatalf("v4-pro 应按 9-14 路由后实际能力面标图片输入：%+v", d.Models[1])
 	}
 
 	a := got[1]
@@ -100,7 +103,7 @@ func TestMergeBuiltinSemantics(t *testing.T) {
 func TestResolveFileMerged(t *testing.T) {
 	st := &memStore{data: []byte(`{"providers":[{"id":"deepseek","api_key":"sk-x","enabled":true}]}`)}
 	ps := ResolveFileMerged(st)
-	if len(ps) != 1 || ps[0].BaseURL == "" || ps[0].Dialect != "deepseek" || len(ps[0].Models) != 3 {
+	if len(ps) != 1 || ps[0].BaseURL == "" || ps[0].Dialect != "deepseek" || len(ps[0].Models) != 2 {
 		t.Fatalf("文件层合并应得完整 deepseek 条目：%+v", ps)
 	}
 	// 空配置 = 空（内置不独立出现）
@@ -211,7 +214,7 @@ func TestResolveFileCatalog(t *testing.T) {
 	catalog := append(extraPreset(), ProviderSpec{ // 挑选的基座子集 + 私有全集
 		ID: "deepseek", Name: "DeepSeek", Kind: "openai",
 		BaseURL: "https://api.deepseek.com", Dialect: "deepseek", Enabled: true,
-		Models: []ModelSpec{{ID: "deepseek-v4-flash", Input: []string{"text"}}},
+		Models: []ModelSpec{{ID: "deepseek-flash", Input: []string{"text"}}},
 	})
 	ps := ResolveFileCatalog(st, catalog)
 	if len(ps) != 3 {
