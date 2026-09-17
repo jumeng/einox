@@ -93,6 +93,19 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("等待超时：%s", what)
 }
 
+// waitBgQuiescent 后台通知链收口 join（TempDir 清理竞态锚）：后台完成经
+// NotifyOwner 自激父会话自续轮（go m.Run 逃逸测试 join 面——waitTitleFlight
+// 只 join 首轮标题），其 persist/wipeWorkspace 写尾与 t.TempDir 的 RemoveAll
+// 竞态（TestBgSessionGateReserve 实测 4/30 ENOTEMPTY，两 eino 版本同率）。
+// 判据次序有讲究：队列先判（done 后无新生产者，队列空 ⇒ 不再可能有执行体
+// 起跑）、runDone 后判（nil = RunFinished 已摘通道，settle 写尾全落）。
+func waitBgQuiescent(t *testing.T, s *session.Session) {
+	t.Helper()
+	waitFor(t, "后台自续链收口（队列排空+执行体收尾）", func() bool {
+		return s.QueueLen() == 0 && s.RunDone() == nil
+	})
+}
+
 // subeventsOf 事件流里取全部 EvSubAgent 载荷。
 func subeventsOf(s *session.Session) []contract.SubAgentEvent {
 	var out []contract.SubAgentEvent
@@ -162,6 +175,7 @@ func TestBgSpawnImmediateReturnAndKey(t *testing.T) {
 	if strings.Contains(string(b), "spawn_id") {
 		t.Fatalf("零值 spawn_id 应省略（回放兼容），实得 %s", b)
 	}
+	waitBgQuiescent(t, s) // done 通知自续轮收口后再交还 TempDir
 }
 
 // TestBgConclusionSpill B-2 配套：超长结论（>4000 rune）外置 spill 域——
@@ -208,6 +222,7 @@ func TestBgConclusionSpill(t *testing.T) {
 	if !ok || len([]rune(string(full))) != 5000 {
 		t.Fatalf("spill 全文应 5000 rune 落盘可读回，实得 ok=%v len=%d", ok, len(full))
 	}
+	waitBgQuiescent(t, s) // done 通知自续轮收口后再交还 TempDir
 }
 
 // TestBgNotifyQueuedWhileRunning B-2：父 running 时通知入队（notify_queued），
@@ -283,6 +298,7 @@ func TestBgNotifyIdleContinues(t *testing.T) {
 	if !found {
 		t.Fatalf("自续轮输入应含通知结论（B-3），实得 %+v", last)
 	}
+	waitBgQuiescent(t, s) // settle 写尾（state Ended 先于 persist/wipe 落定）join 后再交还
 }
 
 // TestBgCancelSpawns B-5：全停（停止按钮/删除钩子）→ 后台任务取消收线、
@@ -405,6 +421,7 @@ func TestBgNotifyBudgetGuard(t *testing.T) {
 	m.NotifyOwner(s, "[后台子代理完成] t5\n结论：\nx5")
 	waitFor(t, "预算恢复后自续发生", func() bool { return s.StateOf() == session.StateRunning })
 	waitFor(t, "恢复的自续轮收口", func() bool { return s.StateOf() == session.StateEnded })
+	waitBgQuiescent(t, s) // settle 写尾 join 后再交还 TempDir
 }
 
 // TestBgNotifyTailErrorTerminal B-9：error 终态（用户停止）通知只入队不自续
@@ -494,4 +511,5 @@ func TestBgSessionGateReserve(t *testing.T) {
 	if len(ids) != 2 {
 		t.Fatalf("应有两个唯一 spawn_id，实得 %v", ids)
 	}
+	waitBgQuiescent(t, s) // 双通知自续链（C1+C2）收口后再交还 TempDir——本 flake 原发位
 }
