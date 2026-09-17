@@ -5,19 +5,19 @@ go 1.26.1
 require (
 	github.com/anthropics/anthropic-sdk-go v1.66.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
-	github.com/cloudwego/eino v0.9.13
+	github.com/cloudwego/eino v0.9.19
 	github.com/cloudwego/eino-ext/components/model/claude v0.1.25
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
-	github.com/cloudwego/eino-ext/components/tool/bingsearch v0.0.0-20260820123736-6752ff8da9b1
-	github.com/cloudwego/eino-ext/components/tool/browseruse v0.0.0-20260820123736-6752ff8da9b1
-	github.com/cloudwego/eino-ext/components/tool/commandline v0.0.0-20260820123736-6752ff8da9b1
-	github.com/cloudwego/eino-ext/components/tool/duckduckgo v0.0.0-20260820123736-6752ff8da9b1
-	github.com/cloudwego/eino-ext/components/tool/googlesearch v0.0.0-20260820123736-6752ff8da9b1
-	github.com/cloudwego/eino-ext/components/tool/httprequest v0.0.0-20260820123736-6752ff8da9b1
+	github.com/cloudwego/eino-ext/components/tool/bingsearch v0.0.0-20260916065400-2607f61e807f
+	github.com/cloudwego/eino-ext/components/tool/browseruse v0.0.0-20260916065400-2607f61e807f
+	github.com/cloudwego/eino-ext/components/tool/commandline v0.0.0-20260916065400-2607f61e807f
+	github.com/cloudwego/eino-ext/components/tool/duckduckgo v0.0.0-20260916065400-2607f61e807f
+	github.com/cloudwego/eino-ext/components/tool/googlesearch v0.0.0-20260916065400-2607f61e807f
+	github.com/cloudwego/eino-ext/components/tool/httprequest v0.0.0-20260916065400-2607f61e807f
 	github.com/cloudwego/eino-ext/components/tool/mcp v0.0.9
-	github.com/cloudwego/eino-ext/components/tool/searxng v0.0.0-20260820123736-6752ff8da9b1
-	github.com/cloudwego/eino-ext/components/tool/sequentialthinking v0.0.0-20260820123736-6752ff8da9b1
-	github.com/cloudwego/eino-ext/components/tool/wikipedia v0.0.0-20260820123736-6752ff8da9b1
+	github.com/cloudwego/eino-ext/components/tool/searxng v0.0.0-20260916065400-2607f61e807f
+	github.com/cloudwego/eino-ext/components/tool/sequentialthinking v0.0.0-20260916065400-2607f61e807f
+	github.com/cloudwego/eino-ext/components/tool/wikipedia v0.0.0-20260916065400-2607f61e807f
 	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/larksuite/oapi-sdk-go/v3 v3.11.0
 	github.com/mark3labs/mcp-go v0.58.0
