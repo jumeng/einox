@@ -580,6 +580,15 @@ func (m *Manager) settleTurn(s *session.Session, acc *runAccum, endState string,
 	if acc != nil && len(acc.msgs) > 0 {
 		s.AppendHistory(acc.msgs...) // 用户消息已由 Run 开头入史（中断保险）
 	}
+	// 标题在途注册必须先于 finish（状态可观测）：观察者轮到 StateEnded 后即查
+	// TitleFlight join，注册晚于翻转即开窗——nil 被误读为「无在途」，断言抢在
+	// genTitle 写入前读标题（TestSuspendedFirstTurnGeneratesTitle 实测 flake）。
+	// goroutine 起点不动，只提前发布信号。
+	launchTitle := firstTurn && s.TitleOf() == ""
+	var titleDone func()
+	if launchTitle {
+		titleDone = s.MarkTitleFlight() // 在途信号挂会话：Run 后写可 join（测试收尾/删除方等待锚点）
+	}
 	finish(endState)
 	if endState == session.StateEnded {
 		m.wipeWorkspace(s) // 任务正常收尾：临时区即清（挂起/异常保留待续）
@@ -591,10 +600,9 @@ func (m *Manager) settleTurn(s *session.Session, acc *runAccum, endState string,
 	if m.Opt.TurnEpilogue != nil && endState == session.StateEnded {
 		m.turnEpilogue(s) // 记忆写通道：自然收束触发（挂起/中断/删除路径不触发）
 	}
-	if firstTurn && s.TitleOf() == "" {
-		done := s.MarkTitleFlight() // 在途信号挂会话：Run 后写可 join（测试收尾/删除方等待锚点）
+	if launchTitle {
 		go func() {
-			defer done()
+			defer titleDone()
 			// 游离 goroutine 护栏（timers 同纪律）：genTitle 走应用注入的
 			// NewModel 与外网 Generate——panic 不拖垮进程，收敛为日志。
 			defer func() {
