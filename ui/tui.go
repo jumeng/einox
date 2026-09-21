@@ -164,7 +164,8 @@ func tuiDomainOf(kind string) tuiDomain {
 		kind == contract.EvUserMessage || kind == contract.EvParticipantUpdate:
 		return domSteer
 	case kind == contract.EvTodoUpdate || kind == contract.EvHarnessNote || kind == "subagent" ||
-		kind == "model_change" || kind == contract.EvInstructionChange || kind == contract.EvImageOffload || kind == contract.EvTransportRetry:
+		kind == "model_change" || kind == contract.EvInstructionChange || kind == contract.EvImageOffload || kind == contract.EvTransportRetry ||
+		kind == contract.EvGoalChange:
 		return domProc
 	case kind == contract.EvSessionEnd || kind == contract.EvError || kind == "interrupted":
 		return domEnd
@@ -290,6 +291,15 @@ func tuiSummary(ev session.Event) string {
 		return "通知注入：" + g("text")
 	case contract.EvModelChange:
 		return "模型 " + g("from") + " → " + g("to")
+	case contract.EvGoalChange:
+		// C4 目标变更：goal 载荷是嵌套对象（map 形态取相位），clear 走墓碑字段
+		if gc, ok := session.EventAs[contract.GoalChange](ev); ok {
+			if gc.Goal != nil {
+				return "目标 " + gc.Operation + "：" + gc.Goal.Objective + "（" + gc.Goal.Phase + "）"
+			}
+			return "目标清除：" + gc.ClearedID
+		}
+		return "目标 " + g("operation")
 	case contract.EvHarnessNote:
 		return g("kind") + "：" + g("title")
 	case "subagent":

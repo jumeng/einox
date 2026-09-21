@@ -46,6 +46,7 @@ const (
 	EvInstructionChange = "instruction_change"
 	EvImageOffload      = "image_offload"
 	EvTransportRetry    = "transport_retry"
+	EvGoalChange        = "goal_change"
 )
 
 // Event 已发事件（回放/订阅的统一载体；Data 为下方载荷类型之一或 map）。
@@ -315,6 +316,38 @@ type SessionEnd struct {
 type TransportRetry struct {
 	Attempt int `json:"attempt"` // 第几次重试（1 起）
 	Max     int `json:"max"`     // 重试上限（llm.MaxRetries）
+}
+
+// goal 相位封闭集（Goal.Phase 取值）。
+const (
+	GoalActive   = "active"
+	GoalPaused   = "paused"
+	GoalBlocked  = "blocked"
+	GoalComplete = "complete"
+)
+
+// Goal 持久完成目标快照（C4——每会话一个跨轮次目标；dsh GoalSnapshot 对位）。
+// goal_change 事件载荷与 session 快照共用此形态：Revision 为 CAS 依据
+// （每次持久变异 +1）；MaxGoalRounds 是目标轮预算上限（自动续行装配面消费，
+// 持久承载先行）。BlockedCode/BlockedMsg 仅 Phase=blocked 时在场。
+type Goal struct {
+	ID            string `json:"id"`                     // 会话域唯一（随机 hex——无进程态计数依赖，跨重启天然不撞）
+	Revision      int    `json:"revision"`               // 正整数；CAS 比对依据
+	Objective     string `json:"objective"`              // 非空完成目标
+	Phase         string `json:"phase"`                  // active | paused | blocked | complete
+	BlockedCode   string `json:"blocked_code,omitempty"` // blocked 时在场（lower-kebab 分类）
+	BlockedMsg    string `json:"blocked_msg,omitempty"`  // blocked 时在场（非空人读解释）
+	MaxGoalRounds int    `json:"max_goal_rounds"`        // 正整数轮上限（缺省 256）
+}
+
+// GoalChange goal_change 事件载荷（C4——全快照形态：变更后完整 Goal 直接随
+// 事件携带，回放渲染无需 fold 前序状态；dsh「goal/change 唯一持久源」同款）。
+// clear 为墓碑形态（Goal 省缺 + Cleared 携 ref）。
+type GoalChange struct {
+	Operation  string `json:"operation"`             // create|edit|pause|resume|complete|block|clear
+	Goal       *Goal  `json:"goal,omitempty"`        // 变更后全快照（clear 省缺）
+	ClearedID  string `json:"cleared_id,omitempty"`  // clear 墓碑：被清目标 id
+	ClearedRev int    `json:"cleared_rev,omitempty"` // clear 墓碑：清后递增 revision
 }
 
 // 错误码封闭词表（ErrorOut.Code 的唯一常量源——llm.Classify 归约、engine/

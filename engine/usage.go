@@ -74,6 +74,9 @@ func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
 	if sts, err := m.sessionTools(s); err == nil { // 会话域件实际面（族裁剪后）；构造失败随 assemble 报，此处不计
 		addFace(sts)
 	}
+	if m.Opt.Goal != nil { // C4 goal 面装配即恒常驻（主面专属）——同会话域件计费
+		addFace(newGoalTools(s, m.Opt.Goal))
+	}
 	if m.Opt.Recall {
 		if rt, err := newRecallTool(m.reg, s); err == nil {
 			addFace([]contract.Tool{rt})

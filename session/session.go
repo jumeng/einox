@@ -81,10 +81,18 @@ type Session struct {
 	// 省略结果）。imgOffloadedIDs 为同数据的 ID 索引（查询面 O(1)）。
 	imgOffloads     []contract.ImageOffloadItem
 	imgOffloadedIDs map[string]bool
-	parentSID       string    // 辅助对话父会话（空 = 普通会话；构造后不变——工作区/spill 共享父域的寻址键）
-	StartedAt       time.Time `json:"started_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-	Events          []Event   `json:"events"`
+	// goal 持久完成目标（C4——nil = 无；goal_change 事件为回放真源、本字段
+	// 为活态快照，随记录持久化、fork/Side/Reattach 继承；变异方法见 goal.go）。
+	goal *contract.Goal
+	// turnHumanInput 当轮 direct-human 标记（C4 goal 工具权威依据）：本轮
+	// Run 输入含直接用户输入/非 notify 排队消息即置（steering 运行中注入点
+	// 补置）；notify 注入不置（系统通知非人类输入）。跨审批挂起保留；不落盘
+	// （轮次事实——跨进程重启的挂起轮零值回退，turnFirst/turnUserMsg 同款）。
+	turnHumanInput bool
+	parentSID      string    // 辅助对话父会话（空 = 普通会话；构造后不变——工作区/spill 共享父域的寻址键）
+	StartedAt      time.Time `json:"started_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	Events         []Event   `json:"events"`
 
 	// History 跨轮消息历史（续聊回传模型——adk checkpoint 仅覆盖中断/取消恢复，
 	// 正常续聊由调用方自持历史，M3-3 实测定案；不进 Events/回放载荷）
@@ -272,6 +280,29 @@ func (s *Session) TurnActorOf() *contract.Participant {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.turnActor
+}
+
+// SetTurnHumanInput 当轮 direct-human 置位（C4 goal 权威）：Run 入口按本轮
+// 输入组成重置、steering 注入点补置（见字段注释的语义边界）。
+func (s *Session) SetTurnHumanInput(v bool) {
+	s.mu.Lock()
+	s.turnHumanInput = v
+	s.mu.Unlock()
+}
+
+// MarkTurnHuman 运行中用户补充到达——单设置位（不覆盖已置真值；steering
+// 注入点专用，Run 入口的重置语义走 SetTurnHumanInput）。
+func (s *Session) MarkTurnHuman() {
+	s.mu.Lock()
+	s.turnHumanInput = true
+	s.mu.Unlock()
+}
+
+// TurnHumanInputOf 当轮 direct-human 读取（goal 工具权威判定面）。
+func (s *Session) TurnHumanInputOf() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnHumanInput
 }
 
 // RecordDecision 决议回执落流（approve 端点在 SetDecision 后调用）。事件流是

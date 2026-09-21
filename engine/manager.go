@@ -213,6 +213,14 @@ type Options struct {
 	// 归应用——build/test 命令或自包的对抗审查；基座只持门循环机制）。
 	// 挂起/中断/错误轮不触发；重试预算随 Run/Resume 执行体。
 	FinalGate func(sess SessionBrief) *GateConfig
+	// Goal goal 域装配（C4，nil = 不挂 goal 工具零变化）：每会话一个持久
+	// 完成目标——get_goal/create_goal/update_goal 三工具（主面专属，子代理
+	// 面结构性不可见）；状态变更需当轮 direct-human（直接输入/用户排队/
+	// 运行中补充），模型不能解除暂停（人类通道 = Session.ResumeGoal 等公开
+	// 方法，应用接 /goal 类命令）。goal_change 事件落流；目标态随会话记录
+	// 持久化、fork/Side/Reattach 继承。GoalDriver 自动续行后置（届时经新
+	// 装配缝扩，本面 API 不变）。
+	Goal *GoalConfig
 	// Channels 消息渠道装配（nil/空 = 不装配零变化）：每条目一个渠道实例
 	// （ID 进程内唯一、Sink 出站投递——渲染归适配器）。渠道编排面
 	// Manager.Channels() 懒建总可用：入站 Handle 分流（空闲起轮/运行中
@@ -404,6 +412,16 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 	s.SetPendingApproval("")
 	actor := s.TurnActorOf() // T6 当轮说话人（nil = 单用户零变化）
 	queued := s.TakePending()
+	// C4 当轮 direct-human 重置（本轮输入组成定权威——上一轮不泄漏；运行中
+	// 用户补充经 steering 注入点单设置位，跨挂起保留）：
+	// 直接输入/附件/非 notify 排队条目三源；notify 是系统通知非人类输入。
+	humanInput := userMsg != "" || len(atts) > 0
+	for _, q := range queued {
+		if q.Kind != "notify" {
+			humanInput = true
+		}
+	}
+	s.SetTurnHumanInput(humanInput)
 	for _, q := range queued { // 翻「已注入」回执：steer_queued/notify_queued 已建条目，翻态而非补建 user_message（回放不重复）；notify 条目独立事件名（审计区分系统通知与用户输入）
 		if q.Kind == "notify" {
 			s.Record(contract.EvNotifyInjected, contract.SteerEvent{ID: q.ID, Text: q.Text, Kind: q.Kind})
@@ -780,7 +798,11 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		}
 		ts = append(ts, rt)
 	}
-	if spec.NoToolCalls && (len(ts) > 0 || m.Opt.SubAgents != nil) { // A4 能力门控（组装期 fail fast）
+	var goalTs []contract.Tool
+	if m.Opt.Goal != nil { // C4 goal 工具面（独立于 ts——不进 spawn 白名单源，主面专属）
+		goalTs = newGoalTools(s, m.Opt.Goal)
+	}
+	if spec.NoToolCalls && (len(ts) > 0 || len(goalTs) > 0 || m.Opt.SubAgents != nil) { // A4 能力门控（组装期 fail fast）
 		return nil, nil, nil, &configError{"模型 " + ms.Model + " 不支持函数调用（NoToolCalls 置位），不能装配工具面（含会话域件/spawn）"}
 	}
 	behaviors := make(map[string]string, len(ts)) // UI-B2：行为标记快照（tool_call 事件携带——前端分组数据源；值由工具自declare，引擎不判别）
@@ -792,6 +814,9 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	var face []tool.BaseTool
 	if len(ts) > 0 {
 		face = m.wrapFace(ts, s, s.ModePublic()) // hitl 审批 → ToolWrap（应用缝）→ 适配
+	}
+	if len(goalTs) > 0 { // C4：goal 工具同链包装后入 face（不进白名单源 ts——子代理面不可见）
+		face = append(face, m.wrapFace(goalTs, s, s.ModePublic())...)
 	}
 	if m.Opt.SubAgents != nil { // spawn 子代理（H2；白名单源 = 全量面）
 		sp, err := m.newSpawnTool(ctx, s, m.Opt.SubAgents, ts)

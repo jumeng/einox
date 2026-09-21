@@ -184,6 +184,7 @@ func (m *steeringMiddleware) BeforeModelRewriteState(
 		}
 		m.sess.Record(contract.EvSteerInjected, contract.SteerEvent{ID: msg.ID, Text: msg.Text,
 			Attachments: msg.Attachments, SpeakerID: msg.SpeakerID, SpeakerName: msg.SpeakerName})
+		m.sess.MarkTurnHuman() // C4：运行中用户补充到达——本轮获得 direct-human（权威单设置位）
 		label := "（用户运行中补充）"
 		if msg.SpeakerName != "" { // T6 谁的运行中补充
 			label = "（" + msg.SpeakerName + " 运行中补充）"

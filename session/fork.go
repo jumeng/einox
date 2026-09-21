@@ -123,6 +123,7 @@ func (r *Registry) forkOf(rec *sessionRecord, anchor int) *Session {
 		lastUsedModel:   cp.LastUsedModel,
 		lastInstruction: cp.LastInstruction, anchorInstruction: cp.AnchorInstruction, // N1 提示生命周期继承（与 lastUsedModel 同位）
 		imgOffloads:  append([]contract.ImageOffloadItem(nil), cp.ImgOffloads...), // C3 粘性省略集继承（分叉得到相同省略结果）
+		goal:         goalCopyOf(cp.Goal),                                         // C4 目标继承（分叉时刻目标态，此后各自演化）
 		participants: append([]contract.Participant(nil), cp.Participants...),     // T6 名册继承（快照后各自演化）
 	}
 	if n := len(ns.Events); n > 0 {
@@ -231,6 +232,7 @@ func (r *Registry) Side(owner, sid string) *Session {
 		stoppedCh: make(chan struct{}), lastUsedModel: cp.LastUsedModel,
 		lastInstruction: cp.LastInstruction, anchorInstruction: cp.AnchorInstruction, // N1 提示生命周期继承
 		imgOffloads:  append([]contract.ImageOffloadItem(nil), cp.ImgOffloads...), // C3 粘性省略集继承
+		goal:         goalCopyOf(cp.Goal),                                         // C4 目标继承（side 问目标相关问题不失语境）
 		participants: append([]contract.Participant(nil), cp.Participants...),     // T6 名册继承
 	}
 	ns.Record(contract.EvHarnessNote, contract.HarnessNote{
