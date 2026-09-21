@@ -185,6 +185,16 @@ type Options struct {
 	// 清单错配（键不在 Providers 内）不阻断运行：降级失效 + harness_note 留痕。
 	// 子代理/拓扑子面不挂（链按主模型语境配置，维持 retry-only）。
 	FallbackModels []string
+	// ModelChangeNote 模型切换历史注记（dsh model-switch notice 对位；nil =
+	// 不注入零变化）：上轮实际调用模型与本轮将用模型不同时，会话历史追加一条
+	// user 角色注记——只进模型投影面（AppendHistory 不 Record 事件，人读
+	// transcript 无此条；model_change 事件管显示，注记管模型认知，三分工各归
+	// 其位）。返回空串 = 本次跳过。消费点 = 本轮 assemble 的 NoteModelCall：
+	// 装配期配置错误先于消费返回 → 下轮重注（dsh「header 落盘前失败重复
+	// notice」同款）。failover 轮中降级不注入——降级是同角色备选的瞬时态，
+	// 会话级模型身份未变。入参为复合键原样（要展示名可自写格式化），
+	// DefaultModelChangeNote 为即取即用件。
+	ModelChangeNote func(from, to string) string
 	// Recall 跨会话检索工具（记忆拉通道，opt-in）：模型可读本 owner 历史会话
 	// 的摘要与消息投影（三模式 sid 深读/query 检索/最近列表；恒排除当前会话、
 	// 有界、摘要级——授权五律见 recall.go）。是新能力面：装配即知情决策，
@@ -430,6 +440,35 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 
 	finish := m.finishOf(s)
 
+	// C1 模型切换历史注记（见 Options.ModelChangeNote 契约注释）：检测在读
+	// CloneHistory 之前完成，注记随历史进入本轮模型输入与持久化面。
+	if m.Opt.ModelChangeNote != nil {
+		if cur := s.ModelSnapshot().Model; cur != "" {
+			if from := s.LastUsedModel(); from != "" && from != cur {
+				if note := m.Opt.ModelChangeNote(from, cur); note != "" {
+					s.AppendHistory(schema.UserMessage(note))
+				}
+			}
+		}
+	}
+
+	// N1-b InHistorySystem 追加（能力模型）：有效 Instruction 变更 → 历史内
+	// 追加 system 消息（进模型投影面；position-0 锚由 assemble 冻结——前缀
+	// 缓存保真）。锚在此首设（能力生效首跑）；变更判定读 assemble 前的
+	// lastInstruction 旧值。挂起期变更经 Resume 不追加（checkpoint 续流无法
+	// 中途插消息——下一 Run 轮界生效，设计件 §2.2 边界；真源事件经 assemble
+	// 即时落，不受此边界影响）。Instruction 双求值（此处 + assemble）契约允许
+	//（快速无共享态）；brief 并发漂移最坏后果 = 下轮变更检测自愈补一条。
+	if _, spec, ok := llm.FindSpec(m.Opt.Providers(), s.ModelSnapshot().Model); ok && spec.InHistorySystem {
+		if eff := m.Opt.Instruction(m.briefOf(s)); eff != "" {
+			if anchor := s.AnchorInstruction(); anchor == "" {
+				s.SetAnchorInstruction(eff)
+			} else if last := s.LastInstruction(); last != "" && last != eff {
+				s.AppendHistory(schema.SystemMessage(eff))
+			}
+		}
+	}
+
 	// T8 方案甲：缓存信封 + 水位后历史（dsh surface replace 的轻量对位——压
 	// 一次、后续 Run 免重摘要）。水位切片先于 sanitize（净化剥除会使索引漂移
 	//）；失锚（水位越界 = 落盘异常）fail-open 全量重放。原文不动——session
@@ -655,12 +694,12 @@ func init() {
 	}
 }
 
-// newShapedModel 会话模型构造链（FindSpec → NewModel → Vision → HistoryShape）
-// ——H1 出站整形口径（vision 图片引用解析/驱逐 + reasoning 剥离）在主模型/
-// 子代理/摘要/拓扑子/降级链五面同一包装序：单一实现防漂移（曾五处各写）。
-// what = 错误文案主体（「模型」「子代理模型」「摘要模型」…）；effort 由调用方
-// 持快照传入（PUT settings 并发写——不裸读 s.Model）。spec 回传（assemble 的
-// NoToolCalls 能力门控消费；其余调用方忽略）。
+// newShapedModel 会话模型构造链（FindSpec → NewModel → Vision → HistoryShape
+// → SystemShape）——H1 出站整形口径（vision 图片引用解析/驱逐 + reasoning 剥离
+// + N1-b system 归一）在主模型/子代理/摘要/拓扑子/降级链五面同一包装序：单一
+// 实现防漂移（曾五处各写）。what = 错误文案主体（「模型」「子代理模型」「摘要
+// 模型」…）；effort 由调用方持快照传入（PUT settings 并发写——不裸读 s.Model）。
+// spec 回传（assemble 的 NoToolCalls 能力门控消费；其余调用方忽略）。
 func (m *Manager) newShapedModel(ctx context.Context, key, effort, what string) (model.BaseModel[*schema.Message], llm.ModelSpec, error) {
 	p, spec, ok := llm.FindSpec(m.Opt.Providers(), key)
 	if !ok {
@@ -672,6 +711,7 @@ func (m *Manager) newShapedModel(ctx context.Context, key, effort, what string) 
 	}
 	cm = llm.NewVisionModel(cm, spec, m.Opt.ImageResolve)
 	cm = llm.NewHistoryShapeModel(cm, p.Kind)
+	cm = llm.NewSystemShapeModel(cm, spec.InHistorySystem)
 	return cm, spec, nil
 }
 
@@ -690,8 +730,21 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// N1 系统提示生命周期：真源登记（变更即落 instruction_change 事件，含首调
+	// 基线——Run/Resume 共用本点）+ 能力模型 position-0 取舍（锚冻结；Run 侧
+	// 漏设在此补设）。
+	eff := m.Opt.Instruction(m.briefOf(s))
+	s.NoteInstruction(eff)
+	instr := eff
+	if spec.InHistorySystem {
+		if anchor := s.AnchorInstruction(); anchor != "" {
+			instr = anchor
+		} else {
+			s.SetAnchorInstruction(eff)
+		}
+	}
 	agConf := &adk.ChatModelAgentConfig{
-		Instruction:         m.Opt.Instruction(m.briefOf(s)),
+		Instruction:         instr,
 		Model:               cm,
 		MaxIterations:       maxIterations,
 		ModelRetryConfig:    m.modelRetryConfig(),          // 网络容错 ②：有界重试（机制默认挂接，应用零配置）
@@ -887,6 +940,12 @@ func (m *Manager) operatorOf(s *session.Session) string {
 		return a.ID
 	}
 	return s.Owner
+}
+
+// DefaultModelChangeNote ModelChangeNote 装配缝的缺省文案（即取即用件——
+// `ModelChangeNote: engine.DefaultModelChangeNote`；复合键原样入文）。
+func DefaultModelChangeNote(from, to string) string {
+	return "[模型切换：此点之前的回复由模型 " + from + " 生成，此后由模型 " + to + " 继续]"
 }
 
 // configError 配置类错误（error 事件 code=CONFIG）。

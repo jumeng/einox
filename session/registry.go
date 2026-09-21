@@ -104,30 +104,34 @@ func (r *Registry) Delete(owner, sid string) {
 
 // sessionRecord 落盘 DTO（显式字段——Session 含锁与运行态字段不整体序列化）。
 type sessionRecord struct {
-	SID           string                 `json:"sid"`
-	Owner         string                 `json:"owner"`
-	Task          string                 `json:"task"`
-	Title         string                 `json:"title"`
-	State         string                 `json:"state"`
-	Mode          string                 `json:"mode"`
-	Model         contract.UserPrefs     `json:"model"`
-	LastUsedModel string                 `json:"last_used_model,omitempty"`
-	ParentSID     string                 `json:"parent_sid,omitempty"` // 辅助对话父会话（空 = 普通会话）
-	StartedAt     time.Time              `json:"started_at"`
-	UpdatedAt     time.Time              `json:"updated_at"`
-	Events        []Event                `json:"events"`
-	Summary       string                 `json:"summary"`
-	FileChanges   map[string]fileChange  `json:"file_changes"`
-	Messages      []*schema.Message      `json:"messages"`                 // 续聊历史（进程重启后恢复）
-	Pending       []QueuedMsg            `json:"pending,omitempty"`        // 排队消息（重启续接——用户补充指令是交互内容，不随进程丢）
-	PendingAppID  string                 `json:"pending_app_id,omitempty"` // 挂起审批/提问/计划 ID（重启续接——checkpoint 在盘，决议可续流）
-	PendingKind   string                 `json:"pending_kind,omitempty"`   // 挂起类型（approval|ask|plan——续表/超时翻转动作分叉）
-	PendingDue    time.Time              `json:"pending_due,omitempty"`    // 挂起截止（超时兜底跨重启——内存计时器随进程丢）
-	PendingItems  []string               `json:"pending_items,omitempty"`  // 合并决议卡项标识清单（重启续接——超时批量拒/决议覆盖校验依据）
-	TaskGranted   bool                   `json:"task_granted,omitempty"`   // plan 档任务期写授权（重启续接——批准的计划不因进程重启失效）
-	PlanSeq       int                    `json:"plan_seq,omitempty"`       // 计划文档序号末号（新提交接续递增）
-	Participants  []contract.Participant `json:"participants,omitempty"`   // T6 参与者名册（Fork/Side/Reattach 继承）
-	PendingTarget string                 `json:"pending_target,omitempty"` // T6 挂起审批路由目标（重启续接——guard 校验依据）
+	SID           string             `json:"sid"`
+	Owner         string             `json:"owner"`
+	Task          string             `json:"task"`
+	Title         string             `json:"title"`
+	State         string             `json:"state"`
+	Mode          string             `json:"mode"`
+	Model         contract.UserPrefs `json:"model"`
+	LastUsedModel string             `json:"last_used_model,omitempty"`
+	// LastInstruction / AnchorInstruction 系统提示生命周期态（N1——与
+	// LastUsedModel 同位：随记录持久化，fork/Side/Reattach 继承）。
+	LastInstruction   string                 `json:"last_instruction,omitempty"`
+	AnchorInstruction string                 `json:"anchor_instruction,omitempty"`
+	ParentSID         string                 `json:"parent_sid,omitempty"` // 辅助对话父会话（空 = 普通会话）
+	StartedAt         time.Time              `json:"started_at"`
+	UpdatedAt         time.Time              `json:"updated_at"`
+	Events            []Event                `json:"events"`
+	Summary           string                 `json:"summary"`
+	FileChanges       map[string]fileChange  `json:"file_changes"`
+	Messages          []*schema.Message      `json:"messages"`                 // 续聊历史（进程重启后恢复）
+	Pending           []QueuedMsg            `json:"pending,omitempty"`        // 排队消息（重启续接——用户补充指令是交互内容，不随进程丢）
+	PendingAppID      string                 `json:"pending_app_id,omitempty"` // 挂起审批/提问/计划 ID（重启续接——checkpoint 在盘，决议可续流）
+	PendingKind       string                 `json:"pending_kind,omitempty"`   // 挂起类型（approval|ask|plan——续表/超时翻转动作分叉）
+	PendingDue        time.Time              `json:"pending_due,omitempty"`    // 挂起截止（超时兜底跨重启——内存计时器随进程丢）
+	PendingItems      []string               `json:"pending_items,omitempty"`  // 合并决议卡项标识清单（重启续接——超时批量拒/决议覆盖校验依据）
+	TaskGranted       bool                   `json:"task_granted,omitempty"`   // plan 档任务期写授权（重启续接——批准的计划不因进程重启失效）
+	PlanSeq           int                    `json:"plan_seq,omitempty"`       // 计划文档序号末号（新提交接续递增）
+	Participants      []contract.Participant `json:"participants,omitempty"`   // T6 参与者名册（Fork/Side/Reattach 继承）
+	PendingTarget     string                 `json:"pending_target,omitempty"` // T6 挂起审批路由目标（重启续接——guard 校验依据）
 }
 
 // fileChangesCopy 变更表拷贝（持锁块内调用）。
@@ -173,6 +177,7 @@ func recordOf(s *Session) sessionRecord {
 	return sessionRecord{
 		SID: s.SID, Owner: s.Owner, Task: s.Task, Title: s.Title,
 		State: s.State, Mode: s.Mode, Model: s.Model, LastUsedModel: s.lastUsedModel,
+		LastInstruction: s.lastInstruction, AnchorInstruction: s.anchorInstruction,
 		ParentSID: s.parentSID,
 		StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
 		Events:       append([]Event(nil), s.Events...),
@@ -477,6 +482,7 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 		Events:  append([]Event(nil), rec.Events...),
 		summary: rec.Summary, fileChanges: rec.FileChanges, stoppedCh: make(chan struct{}),
 		lastUsedModel: rec.LastUsedModel, parentSID: rec.ParentSID,
+		lastInstruction: rec.LastInstruction, anchorInstruction: rec.AnchorInstruction,
 		participants: append([]contract.Participant(nil), rec.Participants...), // T6 名册续接
 	}
 	if st == StatePendingApproval {

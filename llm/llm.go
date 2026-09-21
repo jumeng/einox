@@ -59,6 +59,13 @@ type ModelSpec struct {
 	// 是模型属性故放 ModelSpec 而非 ProviderSpec（同 provider 各模型可不同，
 	// Input 能力面同先例）。
 	NoToolCalls bool `json:"no_tool_calls,omitempty"`
+	// InHistorySystem 声明模型接受历史内 system 消息且最新生效（dsh
+	// SystemPromptUpdate='in-history' 对位）。置位时主面提示变更走历史内追加
+	//（position-0 锚冻结，保供应商前缀缓存）；未置位模型由 systemShape 边界
+	// 包装把最新 system 归位 position-0（mid-system 剔除）。预置目录暂不声明
+	//——chat-completions 通道未验证（能力元数据纪律：适配不无中生有），装配层
+	// 按需自声明。
+	InHistorySystem bool `json:"in_history_system,omitempty"`
 	// Temperature / TopP 采样参数（nil = 不发字段走端点默认——多数推理端点
 	// 拒绝显式 temperature，只在用户显式设置时下发；随会话模型快照粘住，
 	// 会话内不变即前缀缓存友好）。建议二选一，不同时设。

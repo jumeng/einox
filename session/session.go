@@ -70,10 +70,16 @@ type Session struct {
 	Title         string             `json:"title"` // LLM 总结标题（首轮收尾异步生成；空 = 回退 Task 截断）
 	Model         contract.UserPrefs `json:"model"` // {model 复合键, effort} 快照（会话粘住）
 	lastUsedModel string             // 上次实际参与模型调用的模型复合键（NoteModelCall 维护，不导出）
-	parentSID     string             // 辅助对话父会话（空 = 普通会话；构造后不变——工作区/spill 共享父域的寻址键）
-	StartedAt     time.Time          `json:"started_at"`
-	UpdatedAt     time.Time          `json:"updated_at"`
-	Events        []Event            `json:"events"`
+	// lastInstruction 上次有效 Instruction（NoteInstruction 维护，不导出）；
+	// anchorInstruction InHistorySystem 锚——能力生效首跑定的 position-0 冻结
+	// 文本（提示变更走历史内追加，保供应商前缀缓存）。两者随记录持久化、
+	// fork/Side/Reattach 继承（与 lastUsedModel 同位）。
+	lastInstruction   string
+	anchorInstruction string
+	parentSID         string    // 辅助对话父会话（空 = 普通会话；构造后不变——工作区/spill 共享父域的寻址键）
+	StartedAt         time.Time `json:"started_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	Events            []Event   `json:"events"`
 
 	// History 跨轮消息历史（续聊回传模型——adk checkpoint 仅覆盖中断/取消恢复，
 	// 正常续聊由调用方自持历史，M3-3 实测定案；不进 Events/回放载荷）
@@ -683,6 +689,52 @@ func (s *Session) NoteModelCall(model string) {
 	s.mu.Unlock()
 	if last != "" && last != model {
 		s.Record(contract.EvModelChange, contract.ModelChange{From: last, To: model})
+	}
+}
+
+// LastUsedModel 上次实际参与模型调用的模型复合键（空 = 尚无调用）——
+// engine.Run 侧模型切换注记的检测读面（与 NoteModelCall 同锁域）。
+func (s *Session) LastUsedModel() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastUsedModel
+}
+
+// NoteInstruction 有效 Instruction 登记（engine.assemble 每次组装前调）：与
+// 上次不同（含首调——回放重建的基线）即落 instruction_change 事件（真源），
+// 并更新登记。Run/Resume 两路都过 assemble，挂起期变更也有真源。
+func (s *Session) NoteInstruction(text string) {
+	s.mu.Lock()
+	last := s.lastInstruction
+	changed := last != text
+	s.lastInstruction = text
+	s.mu.Unlock()
+	if changed {
+		s.Record(contract.EvInstructionChange, contract.InstructionChange{Text: text})
+	}
+}
+
+// LastInstruction 上次有效 Instruction（空 = 尚未组装过）。
+func (s *Session) LastInstruction() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastInstruction
+}
+
+// AnchorInstruction InHistorySystem position-0 锚文本（空 = 能力尚未生效）。
+func (s *Session) AnchorInstruction() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.anchorInstruction
+}
+
+// SetAnchorInstruction 锚首设（engine.Run/assemble 能力生效首跑；非空不覆写
+// ——冻结语义，调用方不用先判空重复设无害但以 Run 侧首设为准）。
+func (s *Session) SetAnchorInstruction(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.anchorInstruction == "" && text != "" {
+		s.anchorInstruction = text
 	}
 }
 

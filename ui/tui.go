@@ -164,7 +164,7 @@ func tuiDomainOf(kind string) tuiDomain {
 		kind == contract.EvUserMessage || kind == contract.EvParticipantUpdate:
 		return domSteer
 	case kind == contract.EvTodoUpdate || kind == contract.EvHarnessNote || kind == "subagent" ||
-		kind == "model_change" || kind == "transport_retry":
+		kind == "model_change" || kind == contract.EvInstructionChange || kind == contract.EvTransportRetry:
 		return domProc
 	case kind == contract.EvSessionEnd || kind == contract.EvError || kind == "interrupted":
 		return domEnd

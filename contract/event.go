@@ -43,6 +43,7 @@ const (
 	EvHarnessNote       = "harness_note"
 	EvSubAgent          = "subagent"
 	EvModelChange       = "model_change"
+	EvInstructionChange = "instruction_change"
 	EvTransportRetry    = "transport_retry"
 )
 
@@ -61,6 +62,14 @@ type Event struct {
 type ModelChange struct {
 	From string `json:"from"`
 	To   string `json:"to"`
+}
+
+// InstructionChange 有效系统提示词变更（N1：回放重建「模型实际看到什么」的
+// 真源——Text = 变更后完整 Instruction；首调也记录〔基线〕，此后仅变更落）。
+// position-0 重建口径：普通模型 = 最后一条本事件 Text；InHistorySystem 能力
+// 模型 = 首条 Text 为锚、历史内追加的最新 system 消息生效。
+type InstructionChange struct {
+	Text string `json:"text"`
 }
 
 // SteerReorder 排队消息重排回执（UI-B3：拖拽排序——IDs = 重排后的完整顺序，
