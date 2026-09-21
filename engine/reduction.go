@@ -38,9 +38,16 @@ const (
 	clearAtLeastPct = 5
 )
 
-// toolSearchExclude 动态工具装载的检索结果禁外置（H7：跨轮恢复动态工具
-// 选择靠扫描历史 tool_search 结果，被外置即解析失败）——先占位入名单。
-var toolSearchExclude = []string{"tool_search"}
+// truncExclude 截断排除名单（clear 不排 read——旧轮 read 结果可照常外置，
+// 再读是新调用无环）：tool_search（H7：跨轮恢复动态工具选择靠扫描历史
+// tool_search 结果，被外置即解析失败）；read_file（C2 read→spill→read 防环
+// ——dsh spill-policy「模型面跳过 read 结果」同裁决：外置指针被再外置即自
+// 引用卡，模型按指针取回的又是指针；读结果的有界面归 fsutil 窗口参数
+// offset/limit/line_width，截断层不叠加）。
+var truncExclude = []string{"tool_search", "read_file"}
+
+// clearExclude 清除排除名单（只排 tool_search——理由同上；read_file 不排）。
+var clearExclude = []string{"tool_search"}
 
 // newReductionMiddleware reduction 中间件构造（window = 模型上下文窗口，
 // 0/未知 = 跳过 clear 只截断——阈值无从推导；notify = 外置通知卡开关，
@@ -65,8 +72,8 @@ func (m *Manager) newReductionMiddleware(s *session.Session, window int, notify 
 		Backend:                   spillBackend{st: m.reg.Store(), owner: s.Owner, sid: m.wsSID(s), note: note},
 		MaxLengthForTrunc:         truncMaxLength,
 		ReadFileToolName:          "read_file", // 耦合 fs 族（sessionTools）：裁 fs 族后外置指针不可取回（Options.SessionToolsOff 注释与 docs/04 裁剪表已警示）；不联动禁外置——上游截断与外置在同一 handler 内一体，禁外置须复制其逻辑
-		TruncExcludeTools:         toolSearchExclude,
-		ClearExcludeTools:         toolSearchExclude,
+		TruncExcludeTools:         truncExclude,
+		ClearExcludeTools:         clearExclude,
 		ClearRetentionSuffixLimit: 2, // 保最近 2 个工具轮（eino 默认 1）
 		TokenCounter:              shapedTokenCounter,
 		GenTruncOffloadFilePath:   spillPathGen("trunc"),
