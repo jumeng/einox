@@ -35,6 +35,10 @@ func newSteeringMiddleware(sess *session.Session) adk.TypedChatModelAgentMiddlew
 const (
 	speakerExtraID   = "einox.speaker.id"
 	speakerExtraName = "einox.speaker.name"
+	// sysExtraSource 系统注入标记（C5 评审权威分类用）：值非空 = 该 user 消息
+	// 是系统注入（notify 后台通知等）非人类输入——auto review 的历史权威投影
+	// 据此归 fact 而非 human-instruction。平铺 string 值（gob 安全——同上）。
+	sysExtraSource = "einox.sys"
 )
 
 // inputSegment 输入分段（T6 多参与者）：同人相邻合并、异人各自成条。
@@ -178,6 +182,10 @@ func (m *steeringMiddleware) BeforeModelRewriteState(
 		if msg.Kind == "notify" {
 			m.sess.Record(contract.EvNotifyInjected, contract.SteerEvent{ID: msg.ID, Text: msg.Text, Kind: msg.Kind})
 			injected := userMessageWithImages("（系统通知）"+msg.Text, msg.Attachments)
+			if injected.Extra == nil {
+				injected.Extra = map[string]any{}
+			}
+			injected.Extra[sysExtraSource] = "notify" // C5：系统注入标记（评审权威分类——fact 非 human-instruction）
 			state.Messages = append(state.Messages, injected)
 			m.sess.AppendHistory(injected)
 			continue

@@ -221,6 +221,15 @@ type Options struct {
 	// 持久化、fork/Side/Reattach 继承。GoalDriver 自动续行后置（届时经新
 	// 装配缝扩，本面 API 不变）。
 	Goal *GoalConfig
+	// AutoReview auto 档模型评审门（C5，nil = 不挂零变化——实验态能力，
+	// 装配即知情决策）：auto 档工具调用执行前由 reviewer 模型分级——
+	// low/medium+allow 放行、medium+deny 挂起审批卡问人、high 无条件硬拒
+	//（人类明确要求也拒）、评审任何失败 fail-closed 挂起问人。reviewer 路由
+	// = NewModel/Model 覆写 ?? 当前会话路由 + 温度 0（dsh 实证形态）。
+	// 只能收紧不能放宽：manual/plan 既有的人审与 ArgsForce 红线不受影响
+	//（评审只作用于 auto 让渡面）；不缓存不豁免（逐调用评审）。挂载 =
+	// 主面 hitl 之外（子代理/拓扑子面不挂）。机制见 autoreview.go。
+	AutoReview *AutoReviewConfig
 	// Channels 消息渠道装配（nil/空 = 不装配零变化）：每条目一个渠道实例
 	// （ID 进程内唯一、Sink 出站投递——渲染归适配器）。渠道编排面
 	// Manager.Channels() 懒建总可用：入站 Handle 分流（空闲起轮/运行中
@@ -813,10 +822,18 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	}
 	var face []tool.BaseTool
 	if len(ts) > 0 {
-		face = m.wrapFace(ts, s, s.ModePublic()) // hitl 审批 → ToolWrap（应用缝）→ 适配
+		f, err := m.wrapFace(ctx, ts, s, s.ModePublic(), true) // hitl 审批 → auto review → ToolWrap → Hooks → 适配
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		face = f
 	}
 	if len(goalTs) > 0 { // C4：goal 工具同链包装后入 face（不进白名单源 ts——子代理面不可见）
-		face = append(face, m.wrapFace(goalTs, s, s.ModePublic())...)
+		g, err := m.wrapFace(ctx, goalTs, s, s.ModePublic(), true)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		face = append(face, g...)
 	}
 	if m.Opt.SubAgents != nil { // spawn 子代理（H2；白名单源 = 全量面）
 		sp, err := m.newSpawnTool(ctx, s, m.Opt.SubAgents, ts)
@@ -927,11 +944,14 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 	return ag, runner, behaviors, nil
 }
 
-// wrapFace 契约面统一包装序：hitl 审批 → ToolWrap（应用缝）→ Hooks（订阅
+// wrapFace 契约面统一包装序：hitl 审批 → 【auto review（review=true 且
+// Options.AutoReview 在场——主面专用）】→ ToolWrap（应用缝）→ Hooks（订阅
 // 钩子，最外）→ einoext 适配。主面与子代理面（spawn/拓扑）同序——审计/准入
 // 对子代理同样生效；应用包装在审批外层即单调收紧（透传保留审批，额外拒绝
-// 生效，豁免不可达）。nil ToolWrap / nil Hooks = 跳过该层，零变化。
-func (m *Manager) wrapFace(ts []contract.Tool, s *session.Session, mode string) []tool.BaseTool {
+// 生效，豁免不可达）。nil ToolWrap / nil Hooks = 跳过该层，零变化。评审包装
+// 在 hitl 之外（DiffProvider/OutputContract 探测都在内层原始面上完成——包装
+// 链类型不可穿透）；错误面 = 评审模型构造失败（configError 上抛，其余层无错）。
+func (m *Manager) wrapFace(ctx context.Context, ts []contract.Tool, s *session.Session, mode string, review bool) ([]tool.BaseTool, error) {
 	// T8 输出契约：装配期探测（mid 包装前——包装链类型不可穿透）、契约包装
 	// 成最内层（未实现契约的工具零变化）。§1.3-① 修订形态。
 	for i, t := range ts {
@@ -940,12 +960,19 @@ func (m *Manager) wrapFace(ts []contract.Tool, s *session.Session, mode string) 
 		}
 	}
 	wrapped := hitl.WrapTools(ts, s, mode, m.Opt.Approval)
+	if review && m.Opt.AutoReview != nil { // C5：auto 档评审门（主面专用）
+		rev, err := m.newReviewerModel(ctx, s)
+		if err != nil {
+			return nil, err
+		}
+		wrapped = reviewWrap(wrapped, m, s, mode, rev)
+	}
 	if m.Opt.ToolWrap != nil {
 		for i, t := range wrapped {
 			wrapped[i] = m.Opt.ToolWrap(t)
 		}
 	}
-	return einoext.Adapt(m.hookFace(wrapped, m.briefOf(s)))
+	return einoext.Adapt(m.hookFace(wrapped, m.briefOf(s))), nil
 }
 
 // imageCapableOf 会话模型是否声明图片输入（read_image 工具门禁——当前路由

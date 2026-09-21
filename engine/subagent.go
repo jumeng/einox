@@ -282,9 +282,14 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 			//（hitl 判定先于 mode 分支，红线「任何拓扑不豁免」）：同步路径中断走
 			// 父审批链（CompositeInterrupt 防御）；后台路径 bg 档直接拒绝回喂
 			//（fail-closed——挂起无人决议宁可失败）。装配纪律：数据域写与 repo
-			// 写工具不进子面白名单。ToolWrap 与主面同序同挂（wrapFace）。
+			// 写工具不进子面白名单。ToolWrap 与主面同序同挂（wrapFace）；auto
+			// review 不挂子面（C5——评审历史语境是会话自身，主面专用）。
+			subFace, err := m.wrapFace(bctx, face, s, mode, false)
+			if err != nil {
+				return nil, err
+			}
 			conf.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools:               m.wrapFace(face, s, mode),
+				Tools:               subFace,
 				UnknownToolsHandler: newUnknownToolHandler(contractToolNames(face), nil), // 幻觉兜底与主面同策略
 			}}
 		}

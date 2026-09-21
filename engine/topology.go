@@ -88,8 +88,13 @@ func (m *Manager) newTopologySub(ctx context.Context, s *session.Session, spec S
 		// 零审批直执（§3.2 红线表：supervisor/deep 派的子 agent 同样适用——
 		// 中途等审批 = 子任务卡死等人）；ArgsForce 参数级强制仍先于 mode 分支。
 		// ToolWrap 与主面同序同挂（wrapFace）。幻觉工具兜底与主面同策略。
+		// auto review 不挂子面（C5——主面专用）。
+		subFace, err := m.wrapFace(ctx, subTs, s, "auto", false)
+		if err != nil {
+			return nil, err
+		}
 		conf.ToolsConfig = adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
-			Tools: m.wrapFace(subTs, s, "auto"), UnknownToolsHandler: newUnknownToolHandler(contractToolNames(subTs), nil),
+			Tools: subFace, UnknownToolsHandler: newUnknownToolHandler(contractToolNames(subTs), nil),
 		}}
 	}
 	if mw, err := m.newReductionMiddleware(s, windowOf(tspec), false); err != nil {
