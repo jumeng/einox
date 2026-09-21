@@ -128,20 +128,37 @@ func (s *Session) RestoreNotifyBudget() {
 	s.mu.Unlock()
 }
 
-// EditQueued 编辑排队消息（false = 不存在或系统通知只读）；落 steer_updated 回执。
-func (s *Session) EditQueued(id, text string) bool {
+// queuedOwnerFenced 条目围栏判定（C6 队列变异所有权，设计件 §2.1）：署名
+// 条目（SpeakerID 非空）遇带身份 editor（非空）时，仅本人或会话 Owner 可变。
+// editor 空 = 匿名控制面（单用户/系统路径零变化）；匿名条目不设栏。调用方
+// 持锁。
+func queuedOwnerFenced(entry QueuedMsg, editor, owner string) bool {
+	if entry.SpeakerID == "" || editor == "" {
+		return false
+	}
+	return editor != entry.SpeakerID && editor != owner
+}
+
+// EditQueued 编辑排队消息（false = 不存在、系统通知只读或所有权围栏拒）；
+// 落 steer_updated 回执。editor = 控制面身份（空 = 匿名/单用户零变化）。
+func (s *Session) EditQueued(editor, id, text string) bool {
 	s.mu.Lock()
 	ok := false
 	for i := range s.pendingMsgs {
-		if s.pendingMsgs[i].ID == id {
-			if s.pendingMsgs[i].Kind == "notify" {
-				s.mu.Unlock()
-				return false // 系统通知只读（后台子代理结论不可编辑）
-			}
-			s.pendingMsgs[i].Text = text
-			ok = true
-			break
+		if s.pendingMsgs[i].ID != id {
+			continue
 		}
+		if s.pendingMsgs[i].Kind == "notify" {
+			s.mu.Unlock()
+			return false // 系统通知只读（后台子代理结论不可编辑）
+		}
+		if queuedOwnerFenced(s.pendingMsgs[i], editor, s.Owner) {
+			s.mu.Unlock()
+			return false // C6：署名条目他人不可改（本人/Owner 例外）
+		}
+		s.pendingMsgs[i].Text = text
+		ok = true
+		break
 	}
 	s.mu.Unlock()
 	if ok {
@@ -150,20 +167,26 @@ func (s *Session) EditQueued(id, text string) bool {
 	return ok
 }
 
-// RemoveQueued 移除排队消息（false = 不存在或系统通知不可删）；落 steer_removed 回执。
-func (s *Session) RemoveQueued(id string) bool {
+// RemoveQueued 移除排队消息（false = 不存在、系统通知不可删或所有权围栏拒）；
+// 落 steer_removed 回执。editor 语义同 EditQueued。
+func (s *Session) RemoveQueued(editor, id string) bool {
 	s.mu.Lock()
 	ok := false
 	for i := range s.pendingMsgs {
-		if s.pendingMsgs[i].ID == id {
-			if s.pendingMsgs[i].Kind == "notify" {
-				s.mu.Unlock()
-				return false // 系统通知不可删（结论注入是模型面承诺）
-			}
-			s.pendingMsgs = append(s.pendingMsgs[:i], s.pendingMsgs[i+1:]...)
-			ok = true
-			break
+		if s.pendingMsgs[i].ID != id {
+			continue
 		}
+		if s.pendingMsgs[i].Kind == "notify" {
+			s.mu.Unlock()
+			return false // 系统通知不可删（结论注入是模型面承诺）
+		}
+		if queuedOwnerFenced(s.pendingMsgs[i], editor, s.Owner) {
+			s.mu.Unlock()
+			return false // C6：署名条目他人不可删（本人/Owner 例外）
+		}
+		s.pendingMsgs = append(s.pendingMsgs[:i], s.pendingMsgs[i+1:]...)
+		ok = true
+		break
 	}
 	s.mu.Unlock()
 	if ok {

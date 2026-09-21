@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 
@@ -129,6 +130,48 @@ func (m *Manager) CancelSpawns(sid string) {
 	if ok {
 		r.cancelAll()
 	}
+}
+
+// CancelSpawn 取消单个后台任务（C6 后台任务个体控制面，设计件 §2.3）：会话
+// 域寻址即父权威（dsh interruptByParent 校验 parentSession 的同构——注册表
+// 按会话域隔离，越会话不可达）。取消后任务走既有失败收尾（fail 信封通知），
+// 其余任务不受扰；模型面 kill/wait 工具照旧 v1.1 后置。false = 任务不在册
+// （未知 ID/已完成）。
+func (m *Manager) CancelSpawn(sid, spawnID string) bool {
+	m.bgMu.Lock()
+	r, ok := m.bg[sid]
+	m.bgMu.Unlock()
+	if !ok {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, live := r.entries[spawnID]
+	if !live {
+		return false
+	}
+	e.cancel()
+	return true
+}
+
+// LiveSpawns 在途后台任务 ID 清单（C6：dsh parent-owned catalog 的活态发现
+// 面——einox 子代理无持久身份，编目的 durable 形态无对象，只出活态面）。
+// 排序稳定（spN 数字序不保证——map 无序，按字符串排序回放/测试稳定）。
+func (m *Manager) LiveSpawns(sid string) []string {
+	m.bgMu.Lock()
+	r, ok := m.bg[sid]
+	m.bgMu.Unlock()
+	if !ok {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.entries))
+	for id := range r.entries {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // DropSpawnReg 会话删除时回收注册表（自审 A2：常驻生命周期唯一下降沿——

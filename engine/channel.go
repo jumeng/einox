@@ -451,6 +451,27 @@ func (g *ChannelGateway) Answer(sid string, decider *contract.Participant, d con
 	return true
 }
 
+// EditQueue 渠道排队控制面（C6 inbox 控制四件套的 Edit 件——Queue/Steer 已在
+// Handle/Dispatch）：sid 寻址（Approve 同型），编辑排队消息。editor = 控制
+// 面身份（空 = 匿名/单用户零变化）；所有权围栏在 Session 层（署名条目仅本
+// 人或 Owner；系统通知只读）。false = 不存在/围栏拒/无会话。
+func (g *ChannelGateway) EditQueue(sid, itemID, editor, text string) bool {
+	s, ok := g.m.reg.Get(sid)
+	if !ok {
+		return false
+	}
+	return s.EditQueued(editor, itemID, text)
+}
+
+// RemoveQueue 渠道排队控制面（四件套的 Remove 件）：语义同 EditQueue。
+func (g *ChannelGateway) RemoveQueue(sid, itemID, editor string) bool {
+	s, ok := g.m.reg.Get(sid)
+	if !ok {
+		return false
+	}
+	return s.RemoveQueued(editor, itemID)
+}
+
 // Cancel 停当前轮（语音打断/挂断、即时通信停止按钮）：取消执行体，收束
 // 走既有中断收尾（interrupted 事件 + 检查点 + 中断注记全落）。挂起态无
 // 执行体不打断（等决议或超时兜底）；无绑定/非运行态 false。

@@ -57,7 +57,7 @@ func TestEditQueuedRewritesText(t *testing.T) {
 		t.Fatal("running 态应可排队")
 	}
 	ids := steerIDsOf(t, s, 2)
-	if !s.EditQueued(ids[1], "第二条（改）") {
+	if !s.EditQueued("", ids[1], "第二条（改）") {
 		t.Fatal("在队消息应可编辑")
 	}
 	if n := s.QueueLen(); n != 2 {
@@ -68,7 +68,7 @@ func TestEditQueuedRewritesText(t *testing.T) {
 	}) {
 		t.Fatal("编辑应落 steer_updated 回执（携带新文本）")
 	}
-	if s.EditQueued("q_unknown", "x") {
+	if s.EditQueued("", "q_unknown", "x") {
 		t.Fatal("未知 id 不应可编辑")
 	}
 	msgs := s.TakePending()
@@ -83,7 +83,7 @@ func TestEditQueuedNotifyReadonly(t *testing.T) {
 	if n := s.QueueLen(); n != 1 {
 		t.Fatalf("running 态通知应入队，实得 %d", n)
 	}
-	if s.EditQueued(q.ID, "改") {
+	if s.EditQueued("", q.ID, "改") {
 		t.Fatal("系统通知应只读（后台子代理结论不可编辑）")
 	}
 	if eventHas(s, contract.EvSteerUpdated, func(contract.SteerEvent) bool { return true }) {
@@ -97,13 +97,13 @@ func TestRemoveQueuedDropsMiddle(t *testing.T) {
 	s.Steer("乙", nil, "")
 	s.Steer("丙", nil, "")
 	ids := steerIDsOf(t, s, 3)
-	if !s.RemoveQueued(ids[1]) {
+	if !s.RemoveQueued("", ids[1]) {
 		t.Fatal("在队消息应可移除")
 	}
 	if !eventHas(s, contract.EvSteerRemoved, func(d contract.SteerEvent) bool { return d.ID == ids[1] }) {
 		t.Fatal("移除应落 steer_removed 回执")
 	}
-	if s.RemoveQueued(ids[1]) {
+	if s.RemoveQueued("", ids[1]) {
 		t.Fatal("重复移除应拒（条目已不存在）")
 	}
 	msgs := s.TakePending()
@@ -115,7 +115,7 @@ func TestRemoveQueuedDropsMiddle(t *testing.T) {
 func TestRemoveQueuedNotifyKept(t *testing.T) {
 	s := newQueuedSession(t)
 	_, q := s.ContinueOrNotify("后台结论", false)
-	if s.RemoveQueued(q.ID) {
+	if s.RemoveQueued("", q.ID) {
 		t.Fatal("系统通知不可删（结论注入是模型面承诺）")
 	}
 	if n := s.QueueLen(); n != 1 {
