@@ -122,7 +122,8 @@ func (r *Registry) forkOf(rec *sessionRecord, anchor int) *Session {
 		summary: cp.Summary, fileChanges: cp.FileChanges, stoppedCh: make(chan struct{}),
 		lastUsedModel:   cp.LastUsedModel,
 		lastInstruction: cp.LastInstruction, anchorInstruction: cp.AnchorInstruction, // N1 提示生命周期继承（与 lastUsedModel 同位）
-		participants: append([]contract.Participant(nil), cp.Participants...), // T6 名册继承（快照后各自演化）
+		imgOffloads:  append([]contract.ImageOffloadItem(nil), cp.ImgOffloads...), // C3 粘性省略集继承（分叉得到相同省略结果）
+		participants: append([]contract.Participant(nil), cp.Participants...),     // T6 名册继承（快照后各自演化）
 	}
 	if n := len(ns.Events); n > 0 {
 		ns.seq = ns.Events[n-1].ID // 接续末位事件 ID——不接续则新事件撞号（截断后末位 = 锚）
@@ -229,7 +230,8 @@ func (r *Registry) Side(owner, sid string) *Session {
 		history: cp.Messages, parentSID: cp.SID,
 		stoppedCh: make(chan struct{}), lastUsedModel: cp.LastUsedModel,
 		lastInstruction: cp.LastInstruction, anchorInstruction: cp.AnchorInstruction, // N1 提示生命周期继承
-		participants: append([]contract.Participant(nil), cp.Participants...), // T6 名册继承
+		imgOffloads:  append([]contract.ImageOffloadItem(nil), cp.ImgOffloads...), // C3 粘性省略集继承
+		participants: append([]contract.Participant(nil), cp.Participants...),     // T6 名册继承
 	}
 	ns.Record(contract.EvHarnessNote, contract.HarnessNote{
 		Kind: "side", Title: "辅助对话",

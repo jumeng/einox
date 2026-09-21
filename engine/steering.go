@@ -154,7 +154,7 @@ func userMessageWithImages(text string, atts []session.Attachment) *schema.Messa
 		if !a.IsImage {
 			continue
 		}
-		u := llm.AttRefPrefix + a.Path
+		u := llm.MintAttRef(a.Path) // C3 occurrence 铸造（粘性省略按 occurrence；重读产生新 occurrence 不受旧决策牵连）
 		parts = append(parts, schema.MessageInputPart{
 			Type:  schema.ChatMessagePartTypeImageURL,
 			Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{URL: &u}},

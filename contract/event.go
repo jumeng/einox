@@ -44,6 +44,7 @@ const (
 	EvSubAgent          = "subagent"
 	EvModelChange       = "model_change"
 	EvInstructionChange = "instruction_change"
+	EvImageOffload      = "image_offload"
 	EvTransportRetry    = "transport_retry"
 )
 
@@ -70,6 +71,22 @@ type ModelChange struct {
 // 模型 = 首条 Text 为锚、历史内追加的最新 system 消息生效。
 type InstructionChange struct {
 	Text string `json:"text"`
+}
+
+// ImageOffloadItem 一次图片省略决策的单个图片 occurrence（ID = 引用铸造的
+// occurrence 标识〔llm.MintAttRef 的 #o= 片段〕；Path = 仓库路径——恢复通道：
+// 模型可再读产生全新 occurrence，预算内即保留）。
+type ImageOffloadItem struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+
+// ImageOffload 图片预算省略决策（C3：durable「选择集」——vision 驱逐发生时
+// 落流。已提交的省略跨请求粘滞：同 occurrence 后续请求恒占位（前缀稳定），
+// 不因换模型/预算变大自动回看；恢复走重读新 occurrence。回放重建口径：
+// Items 命中的 occurrence 在其后请求中均为占位文本）。
+type ImageOffload struct {
+	Items []ImageOffloadItem `json:"items"`
 }
 
 // SteerReorder 排队消息重排回执（UI-B3：拖拽排序——IDs = 重排后的完整顺序，

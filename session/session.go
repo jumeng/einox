@@ -76,10 +76,15 @@ type Session struct {
 	// fork/Side/Reattach 继承（与 lastUsedModel 同位）。
 	lastInstruction   string
 	anchorInstruction string
-	parentSID         string    // 辅助对话父会话（空 = 普通会话；构造后不变——工作区/spill 共享父域的寻址键）
-	StartedAt         time.Time `json:"started_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
-	Events            []Event   `json:"events"`
+	// imgOffloads 图片预算省略决策的粘性选择集（C3——vision 驱逐上报入集；
+	// 决策序追加去重，随记录持久化、fork/Side/Reattach 继承＝分叉得到相同
+	// 省略结果）。imgOffloadedIDs 为同数据的 ID 索引（查询面 O(1)）。
+	imgOffloads     []contract.ImageOffloadItem
+	imgOffloadedIDs map[string]bool
+	parentSID       string    // 辅助对话父会话（空 = 普通会话；构造后不变——工作区/spill 共享父域的寻址键）
+	StartedAt       time.Time `json:"started_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	Events          []Event   `json:"events"`
 
 	// History 跨轮消息历史（续聊回传模型——adk checkpoint 仅覆盖中断/取消恢复，
 	// 正常续聊由调用方自持历史，M3-3 实测定案；不进 Events/回放载荷）
@@ -736,6 +741,54 @@ func (s *Session) SetAnchorInstruction(text string) {
 	if s.anchorInstruction == "" && text != "" {
 		s.anchorInstruction = text
 	}
+}
+
+// ensureOffloadIndexLocked 粘性集 ID 索引惰性重建（无条件初始化——空集也
+// 要建 map，nil map 写入即 panic；Reattach/fork/Side 只携切片，索引在首个
+// 查询/上报点重建——调用方持 s.mu）。
+func (s *Session) ensureOffloadIndexLocked() {
+	if s.imgOffloadedIDs == nil {
+		s.imgOffloadedIDs = make(map[string]bool, len(s.imgOffloads))
+		for _, it := range s.imgOffloads {
+			s.imgOffloadedIDs[it.ID] = true
+		}
+	}
+}
+
+// NoteImageOffload 图片预算省略决策入集（C3：vision 驱逐上报——新 occurrence
+// 才到这，粘性命中不重复上报）：合并去重后落 image_offload 事件（durable
+// 选择集——回放重建「模型实际看到什么」）。已提交的省略不自动回看（换模型/
+// 预算变大均粘滞）；恢复 = 模型重读路径产生全新 occurrence。
+func (s *Session) NoteImageOffload(items []contract.ImageOffloadItem) {
+	var fresh []contract.ImageOffloadItem
+	func() { // 内层闭包持锁 + defer 解锁：临界区内 panic 不弃锁（nil map 写入曾在此炸出永锁——教训记 progress）
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.ensureOffloadIndexLocked()
+		for _, it := range items {
+			if it.ID == "" || s.imgOffloadedIDs[it.ID] {
+				continue
+			}
+			s.imgOffloadedIDs[it.ID] = true
+			s.imgOffloads = append(s.imgOffloads, it)
+			fresh = append(fresh, it)
+		}
+	}()
+	if len(fresh) > 0 {
+		s.Record(contract.EvImageOffload, contract.ImageOffload{Items: fresh})
+	}
+}
+
+// OffloadedImageIDs 粘性选择集的 ID 快照。
+func (s *Session) OffloadedImageIDs() map[string]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureOffloadIndexLocked()
+	out := make(map[string]bool, len(s.imgOffloadedIDs))
+	for k := range s.imgOffloadedIDs {
+		out[k] = true
+	}
+	return out
 }
 
 // RunDone 执行体结束信号快照（nil = 无执行体）。

@@ -375,12 +375,23 @@ func (m *Manager) beginTurn(ctx context.Context, s *session.Session, fn emitFn) 
 	runCtx = contract.WithChangeRecorder(runCtx, s.RecordFileChange)
 	runCtx = contract.WithImageInput(runCtx, m.imageCapableOf(s))
 	runCtx = withEmitFn(runCtx, fn)
+	runCtx = llm.WithImageOffloadSink(runCtx, imgOffloadSink{s: s}) // C3 驱逐决策粘滞+落流（子面/摘要面不注入＝零变化）
 	s.SetCancel(cancel)
 	return runCtx, func() {
 		cancel()
 		s.SetCancel(nil)
 		s.RunFinished()
 	}
+}
+
+// imgOffloadSink vision 驱逐决策的会话承载（beginTurn 注入——Run/Resume 共用；
+// 子代理/摘要/拓扑面不经此装配，保持既有零变化行为）。
+type imgOffloadSink struct{ s *session.Session }
+
+func (k imgOffloadSink) OffloadedIDs() map[string]bool { return k.s.OffloadedImageIDs() }
+
+func (k imgOffloadSink) NoteImageOffload(items []contract.ImageOffloadItem) {
+	k.s.NoteImageOffload(items) // 错误面不存在（实现吞错语义在 session 侧注释）
 }
 
 // steering 排队兜底：上轮运行中排队的消息前置并入本轮输入。
