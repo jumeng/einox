@@ -164,18 +164,25 @@ type MCPSpec struct {
 
 // mcpCache 进程级缓存：每轮 Run 组装会重建工具面，MCP 握手不能跟着重拨
 // （5s 超时 × 每轮 = 不可接受）。键 = url|cmd；配置变更自然换键重拨。
+// face 携握手捕获的完整面（工具 + 资源工具 + server instructions——N2）。
+type mcpFace struct {
+	tools        []tool.BaseTool
+	resTools     []contract.Tool
+	instructions string // 提示段成品（serverName+指令文本；空 = 无）
+}
+
 var (
 	mcpCacheMu  sync.Mutex
 	mcpCacheKey string
-	mcpCacheTs  = map[string][]tool.BaseTool{}
+	mcpFaces    = map[string]*mcpFace{}
 )
 
 // MCPCacheStatus 当前缓存态（应用侧展示：连接面 + 拉到的工具名）。
 func MCPCacheStatus() (key string, names []string) {
 	mcpCacheMu.Lock()
 	defer mcpCacheMu.Unlock()
-	for _, ts := range mcpCacheTs {
-		for _, t := range ts {
+	for _, f := range mcpFaces {
+		for _, t := range f.tools {
 			if it, ok := t.(tool.InvokableTool); ok {
 				if info, err := it.Info(context.Background()); err == nil && info != nil {
 					names = append(names, info.Name)
@@ -186,30 +193,41 @@ func MCPCacheStatus() (key string, names []string) {
 	return mcpCacheKey, names
 }
 
-// mcpTools 取 MCP 工具面（缓存命中直用；新键拨号失败缓存空防反复重试）。
-func mcpTools(ctx context.Context, spec MCPSpec) []tool.BaseTool {
+// MCPSection 当前连接的 server instructions 提示段（空 = 无——未配置/
+// 未连接/服务端未给；放置权归应用 Instruction 拼装，机制与内容分离）。
+func MCPSection() string {
+	mcpCacheMu.Lock()
+	defer mcpCacheMu.Unlock()
+	if mcpCacheKey == "" {
+		return ""
+	}
+	return mcpFaces[mcpCacheKey].instructions
+}
+
+// mcpFaceOf 取 MCP 面（缓存命中直用；新键拨号失败缓存空防反复重试）。
+func mcpFaceOf(ctx context.Context, spec MCPSpec) *mcpFace {
 	if spec.URL == "" && spec.Cmd == "" {
 		return nil
 	}
 	key := spec.URL + "|" + spec.Cmd
 	mcpCacheMu.Lock()
-	if ts, ok := mcpCacheTs[key]; ok {
+	if f, ok := mcpFaces[key]; ok {
 		mcpCacheMu.Unlock()
-		return ts
+		return f
 	}
 	mcpCacheMu.Unlock()
 
-	var ts []tool.BaseTool
+	var f *mcpFace
 	if spec.URL != "" {
-		ts = newMCPTools(ctx, spec.URL)
+		f = newMCPFace(ctx, spec.URL)
 	} else {
-		ts = newMCPStdioTools(ctx, strings.Fields(spec.Cmd))
+		f = newMCPStdioFace(ctx, strings.Fields(spec.Cmd))
 	}
 	mcpCacheMu.Lock()
 	mcpCacheKey = key
-	mcpCacheTs[key] = ts
+	mcpFaces[key] = f
 	mcpCacheMu.Unlock()
-	return ts
+	return f
 }
 
 // NewExtTools 组装 eino-ext 全部工具（一个不少；失败容忍降级），经 Bridge
@@ -274,16 +292,18 @@ func NewExtTools(root string, mcp MCPSpec) []contract.Tool {
 		}
 	}
 
-	// mcp：spec（应用配置）优先，env 后备；进程级缓存防每轮重拨。
+	// mcp：spec（应用配置）优先，env 后备；进程级缓存防每轮重拨。资源工具
+	// 与工具面同缓存态（握手捕获）；instructions 经 MCPSection() 由应用
+	// Instruction 拼装（NewExtTools 不碰提示面——放置权归应用）。
 	if mcp.URL == "" && mcp.Cmd == "" {
 		mcp = MCPSpec{URL: os.Getenv("EINO_MCP_URL"), Cmd: os.Getenv("EINO_MCP_CMD")}
 	}
-	out = append(out, mcpTools(ctx, mcp)...)
-	return Bridge(out)
+	out = append(out, mcpFaceOf(ctx, mcp).tools...)
+	return append(Bridge(out), mcpFaceOf(ctx, mcp).resTools...)
 }
 
-// newMCPStdioTools 启动 stdio MCP 子进程并拉取工具清单（失败静默跳过）。
-func newMCPStdioTools(ctx context.Context, argv []string) []tool.BaseTool {
+// newMCPStdioFace 启动 stdio MCP 子进程并握手（失败静默跳过）。
+func newMCPStdioFace(ctx context.Context, argv []string) *mcpFace {
 	if len(argv) == 0 {
 		return nil
 	}
@@ -299,9 +319,8 @@ func newMCPStdioTools(ctx context.Context, argv []string) []tool.BaseTool {
 	return mcpHandshake(dialCtx, cli)
 }
 
-// newMCPTools 连接 MCP 服务并拉取其工具清单（失败静默跳过——服务不可达
-// 不阻断启动）。
-func newMCPTools(ctx context.Context, url string) []tool.BaseTool {
+// newMCPFace 连接 MCP 服务并握手（失败静默跳过——服务不可达不阻断启动）。
+func newMCPFace(ctx context.Context, url string) *mcpFace {
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cli, err := client.NewSSEMCPClient(url)
@@ -314,15 +333,29 @@ func newMCPTools(ctx context.Context, url string) []tool.BaseTool {
 	return mcpHandshake(dialCtx, cli)
 }
 
-// mcpHandshake 初始化握手 + 拉取工具 + mcp_ 前缀改名（SSE/stdio 共用）。
-// 失败路径关连接——stdio 形态下客户端挂着子进程，泄漏即进程永久滞留。
-func mcpHandshake(ctx context.Context, cli *client.Client) []tool.BaseTool {
+// mcpHandshake 初始化握手 + 拉取工具（mcp_ 前缀改名）+ 捕获资源面与
+// server instructions（N2）。失败路径关连接——stdio 形态下客户端挂着子
+// 进程，泄漏即进程永久滞留；instructions 超限同视为配置错误整个来源跳过
+// （fail-closed 于提示注入面——dsh「超限连接失败」同款）。
+func mcpHandshake(ctx context.Context, cli *client.Client) *mcpFace {
 	req := mcp.InitializeRequest{}
 	req.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	req.Params.ClientInfo = mcp.Implementation{Name: "einox", Version: "0.1"}
-	if _, err := cli.Initialize(ctx, req); err != nil {
+	res, err := cli.Initialize(ctx, req)
+	if err != nil {
 		_ = cli.Close()
 		return nil
+	}
+	if len(res.Instructions) > maxMCPInstructionBytes {
+		_ = cli.Close()
+		return nil
+	}
+	f := &mcpFace{}
+	if res.Capabilities.Resources != nil {
+		f.resTools = newResourceTools(cli, res.ServerInfo.Name)
+	}
+	if res.Instructions != "" {
+		f.instructions = instructionSection(res.ServerInfo.Name, res.Instructions)
 	}
 	ts, err := mcpclient.GetTools(ctx, &mcpclient.Config{Cli: cli})
 	if err != nil {
@@ -337,5 +370,6 @@ func mcpHandshake(ctx context.Context, cli *client.Client) []tool.BaseTool {
 		}
 		out = append(out, t)
 	}
-	return out
+	f.tools = out
+	return f
 }
