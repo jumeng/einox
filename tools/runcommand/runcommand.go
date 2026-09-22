@@ -56,9 +56,11 @@ type taskIn struct {
 type bgTask struct {
 	id        string
 	cmd       string
+	root      string // 起任务时的工作区根（应用侧归属反解——taskquery 缝）
 	mu        sync.Mutex
 	buf       bytes.Buffer
 	start     time.Time
+	end       time.Time // 完成时刻（done 后时长冻结——查询缝设计件伴生修）
 	state     *os.ProcessState
 	done      bool
 	proc      *os.Process
@@ -85,7 +87,7 @@ func startBackground(root, cwd string, sb *sandbox.Policy, sp sandbox.Provider, 
 	if err != nil {
 		return "", err // require 姿态 fail-closed（BuildCommand 文案已带指引）
 	}
-	bt := &bgTask{cmd: cmdLine, start: time.Now(), sandboxed: sandboxed} // id/proc 占位后回填
+	bt := &bgTask{cmd: cmdLine, root: root, start: time.Now(), sandboxed: sandboxed} // id/proc 占位后回填
 	cmd.Stdout = bt
 	cmd.Stderr = bt
 	if err := cmd.Start(); err != nil {
@@ -96,6 +98,7 @@ func startBackground(root, cwd string, sb *sandbox.Policy, sp sandbox.Provider, 
 		err := cmd.Wait()
 		bt.mu.Lock()
 		bt.done = true
+		bt.end = time.Now()
 		bt.state = cmd.ProcessState
 		if err != nil && cmd.ProcessState == nil {
 			bt.stopped = true
@@ -152,10 +155,14 @@ func (b *bgTask) snapshot() map[string]any {
 	if b.state != nil {
 		exit = b.state.ExitCode()
 	}
+	dur := time.Since(b.start).Milliseconds()
+	if b.done && !b.end.IsZero() { // 完成态冻结（此前随墙钟续涨——缺陷修，非语义变化）
+		dur = b.end.Sub(b.start).Milliseconds()
+	}
 	snap := map[string]any{
 		"ok": true, "task_id": b.id, "command": b.cmd,
 		"running": !b.done, "exit_code": exit,
-		"duration_ms": time.Since(b.start).Milliseconds(),
+		"duration_ms": dur,
 		"output":      headTail(b.buf.Bytes()),
 	}
 	if b.sandboxed { // 与前台 run() 同款门控（裸跑任务的普通 permission denied 不误标「沙箱拒绝」）

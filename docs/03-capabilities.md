@@ -58,7 +58,7 @@
 |---|---|---|
 | `tools/applypatch` | `apply_patch` | `*** Begin Patch` 格式补丁改文件：多文件增/改/删/改名、四档模糊匹配、多块锚点、事务性（任一失败全部不落盘）、`dry_run` 预检参数（解析/定位/冲突计算不落盘）、未命中时最近似内容相似度提示（行位+相似度+首行内容——模型自纠回路）；`ProtectDirs` 写保护区——任一目标（含 Move to 改名目标）命中即整单拒绝 |
 | `tools/fsutil` | `read_file` / `list_dir` / `search_files` / `delete_file` / `edit_file` | 工作区文件面：行号区间读（超宽行截断可放宽；二进制嗅探拒读；同参重读 unchanged 短路）、目录清单、glob+正则内容搜（rg 语义：output_mode=content/files/count、context_lines 上下文行、max_results 可调、并行扫描、内置忽略集 + .gitignore 简版 + 隐藏目录跳过）、精确替换（8 档匹配降级链：精确→空白→引号/标点归一→行号前缀剥离→转义归一→首尾锚定；多命中报全部行号消歧；read→edit 防盲改门——读过/视野完整/mtime+size 指纹未变三关，跨轮经 `ReadState` 锚保持）；路径圈进工作区根，穿越显式拒绝；`ProtectDirs` 写保护区——delete_file/edit_file 命中即拒（读面不受影响） |
-| `tools/runcommand` | `run_command` / `task_output` / `task_stop` | 工作区内 shell：超时自动转后台（默认 120s 到点收编任务表不杀进程，返回 task_id——zcode auto_on_timeout 对位；上限 10min）、cwd 相对路径圈禁、env K=V 注入（键黑名单 fail-closed）、输出头尾截断或 tail_lines 尾行取样、后台任务制；`IsSafeReadCommand` 白名单供审批豁免（管道分段判定——两段均白名单即豁免；env 赋值前缀剥离 `VAR=x cmd`） |
+| `tools/runcommand` | `run_command` / `task_output` / `task_stop` | 工作区内 shell：超时自动转后台（默认 120s 到点收编任务表不杀进程，返回 task_id——zcode auto_on_timeout 对位；上限 10min）、cwd 相对路径圈禁、env K=V 注入（键黑名单 fail-closed）、输出头尾截断或 tail_lines 尾行取样、后台任务制；`IsSafeReadCommand` 白名单供审批豁免（管道分段判定——两段均白名单即豁免；env 赋值前缀剥离 `VAR=x cmd`）；应用侧任务查询缝 `Tasks`/`TaskOutput`/`StopTask`（快照带 root 归属与冻结时长——设计件 findings/2026-09-22-runcommand-taskquery-seam-design.md） |
 | `tools/todo` | `todo_write` | 任务清单全量覆盖写（模型不易漂移），事件化实时扇出 + 回放可见 |
 | `tools/askuser` | `ask_user` | 结构化提问（单选/多选/自由输入），挂起-续流通道，超时 fail-closed |
 | `tools/plan` | `submit_plan` | 计划卡：plan 档批准 = 授权任务期全部写；manual 档仅确认方向；auto 档落档即走 |
