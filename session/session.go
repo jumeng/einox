@@ -89,10 +89,15 @@ type Session struct {
 	// 补置）；notify 注入不置（系统通知非人类输入）。跨审批挂起保留；不落盘
 	// （轮次事实——跨进程重启的挂起轮零值回退，turnFirst/turnUserMsg 同款）。
 	turnHumanInput bool
-	parentSID      string    // 辅助对话父会话（空 = 普通会话；构造后不变——工作区/spill 共享父域的寻址键）
-	StartedAt      time.Time `json:"started_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	Events         []Event   `json:"events"`
+	// turnGoalRound 当轮 goal 轮标记（GoalDriver 批）：本轮 Run 输入含
+	// Kind="goal" 排队条目即置——complete/blocked 的第二权威源（引擎注入的
+	// 非 human 轮，dsh goal-round authority 对位）。不落盘（同 turnHumanInput
+	// 降级：跨进程重启挂起轮零值 false，该轮内 complete 回退需 direct-human）。
+	turnGoalRound bool
+	parentSID     string    // 辅助对话父会话（空 = 普通会话；构造后不变——工作区/spill 共享父域的寻址键）
+	StartedAt     time.Time `json:"started_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	Events        []Event   `json:"events"`
 
 	// History 跨轮消息历史（续聊回传模型——adk checkpoint 仅覆盖中断/取消恢复，
 	// 正常续聊由调用方自持历史，M3-3 实测定案；不进 Events/回放载荷）
@@ -303,6 +308,21 @@ func (s *Session) TurnHumanInputOf() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.turnHumanInput
+}
+
+// SetTurnGoalRound 当轮 goal 轮置位（GoalDriver 批）：Run 入口按本轮输入
+// 组成重置（排队含 Kind="goal" 即 true）。
+func (s *Session) SetTurnGoalRound(v bool) {
+	s.mu.Lock()
+	s.turnGoalRound = v
+	s.mu.Unlock()
+}
+
+// TurnGoalRoundOf 当轮 goal 轮读取（complete/blocked 第二权威源）。
+func (s *Session) TurnGoalRoundOf() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnGoalRound
 }
 
 // RecordDecision 决议回执落流（approve 端点在 SetDecision 后调用）。事件流是

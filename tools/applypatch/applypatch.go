@@ -328,7 +328,8 @@ func computeReplacements(original []string, path string, chunks []Chunk) ([]repl
 		if ch.ChangeContext != "" {
 			idx := seekSequence(original, []string{ch.ChangeContext}, lineIndex, false)
 			if idx < 0 {
-				return nil, fmt.Errorf("找不到定位锚 %q（%s）", strutil.Truncate(ch.ChangeContext, 60), path)
+				return nil, fmt.Errorf("找不到定位锚 %q（%s）%s", strutil.Truncate(ch.ChangeContext, 60), path,
+					nearestLineHint(original, ch.ChangeContext))
 			}
 			lineIndex = idx + 1
 		}
@@ -349,13 +350,53 @@ func computeReplacements(original []string, path string, chunks []Chunk) ([]repl
 			found = seekSequence(original, pattern, lineIndex, ch.IsEOF)
 		}
 		if found < 0 {
-			return nil, fmt.Errorf("在 %s 中找不到待改内容：\n%s", path, strutil.Truncate(strings.Join(ch.OldLines, "\n"), 200))
+			return nil, fmt.Errorf("在 %s 中找不到待改内容：\n%s%s", path,
+				strutil.Truncate(strings.Join(ch.OldLines, "\n"), 200), nearestHint(original, ch.OldLines))
 		}
 		reps = append(reps, replacement{found, len(pattern), newSlice})
 		lineIndex = found + len(pattern)
 	}
 	sort.SliceStable(reps, func(a, b int) bool { return reps[a].start < reps[b].start })
 	return reps, nil
+}
+
+// nearestHint 未命中时的最近似窗口提示（C6：相似度提示——滑窗平均相似度
+// 最高者报行位与首行内容，模型据此自纠 old 内容；低于 0.3 视为无有意义近似
+// 不提示）。行级模糊（edit-matchers 思路对位），量级 = 行数×块行数。
+func nearestHint(original, pattern []string) string {
+	if len(original) == 0 || len(pattern) == 0 {
+		return ""
+	}
+	bestLine, bestSim := 0, 0.0
+	for i := 0; i+len(pattern) <= len(original); i++ {
+		sum := 0.0
+		for j, l := range pattern {
+			sum += strutil.Similarity(original[i+j], l)
+		}
+		if avg := sum / float64(len(pattern)); avg > bestSim {
+			bestSim, bestLine = avg, i
+		}
+	}
+	if bestSim < 0.3 {
+		return ""
+	}
+	return fmt.Sprintf("\n最相似内容在第 %d 行附近（相似度 %d%%）：%s", bestLine+1, int(bestSim*100),
+		strutil.Truncate(original[bestLine], 80))
+}
+
+// nearestLineHint 单行目标（@@ 锚）的最近似行提示。
+func nearestLineHint(original []string, target string) string {
+	bestLine, bestSim := 0, 0.0
+	for i, l := range original {
+		if s := strutil.Similarity(l, target); s > bestSim {
+			bestSim, bestLine = s, i
+		}
+	}
+	if bestSim < 0.3 {
+		return ""
+	}
+	return fmt.Sprintf("——最相似行在第 %d 行（相似度 %d%%）：%s", bestLine+1, int(bestSim*100),
+		strutil.Truncate(original[bestLine], 80))
 }
 
 // applyReplacements 逆序套用（后段先行，避免行号位移），返回成品内容。
@@ -417,6 +458,16 @@ type FileResult struct {
 // Apply 应用补丁到 root 工作区（事务性：解析与计算全部成功才落盘）。
 // 返回逐文件摘要。
 func Apply(root string, ops []FileOp) ([]FileResult, error) {
+	return applyOps(root, ops, false)
+}
+
+// ApplyDry 预检形态（C6）：解析/定位/冲突计算全跑、落盘段跳过——dry-run
+// 参数的消费面（补丁可应用性预验，模型自纠回路省一轮写审批）。
+func ApplyDry(root string, ops []FileOp) ([]FileResult, error) {
+	return applyOps(root, ops, true)
+}
+
+func applyOps(root string, ops []FileOp, dry bool) ([]FileResult, error) {
 	type staged struct {
 		op      FileOp
 		content string
@@ -483,6 +534,11 @@ func Apply(root string, ops []FileOp) ([]FileResult, error) {
 			added, removed := diffCount(original, splitLines(content))
 			results = append(results, FileResult{Path: path, Action: action, Added: added, Removed: removed})
 		}
+	}
+	// dry-run 短路（C6）：解析/定位/冲突计算已完成，预建目录起即落盘副作用
+	//——预检形态到此为止
+	if dry {
+		return results, nil
 	}
 	// 预检建目录（全部写入的父目录先行创建——中途 ENOTDIR 类失败发生在任何
 	// 文件落盘之前；新建目录留档，失败时回滚回收）
@@ -664,7 +720,8 @@ func safeJoin(root, p string) (string, error) {
 // ---- 工具面 ----
 
 type patchIn struct {
-	Patch string `json:"patch"`
+	Patch  string `json:"patch"`
+	DryRun bool   `json:"dry_run"` // true = 预检（解析/定位/冲突全跑，不落盘）
 }
 
 // NewTools 构造 apply_patch（写面：进审批名单，整补丁一批）。
@@ -680,7 +737,7 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 		return nil, err
 	}
 	t, err := tools.InferTool("apply_patch",
-		"以 codex apply_patch 格式批量修改工作区文件（一次调用多文件 增/改/删/改名，事务性——任一失败全部不生效）。格式：*** Begin Patch 开头、*** End Patch 结尾；*** Add File: <相对路径> + 全部 + 行；*** Delete File: <路径>；*** Update File: <路径>（可跟 *** Move to: <新路径>）+ @@ 可选定位锚 + 上下文行(前缀空格)/删除行(-)/新增行(+)。改动处上下各带 3 行上下文；不够唯一定位时用 @@ 锚（可堆叠）。文件不存在/已存在/找不到上下文会整体失败并说明原因。",
+		"以 codex apply_patch 格式批量修改工作区文件（一次调用多文件 增/改/删/改名，事务性——任一失败全部不生效）。dry_run=true 仅预检（解析/定位/冲突计算，不落盘）。格式：*** Begin Patch 开头、*** End Patch 结尾；*** Add File: <相对路径> + 全部 + 行；*** Delete File: <路径>；*** Update File: <路径>（可跟 *** Move to: <新路径>）+ @@ 可选定位锚 + 上下文行(前缀空格)/删除行(-)/新增行(+)。改动处上下各带 3 行上下文；不够唯一定位时用 @@ 锚（可堆叠）。文件不存在/已存在/找不到上下文会整体失败并说明原因。",
 		func(_ context.Context, in patchIn) (map[string]any, error) {
 			ops, err := Parse(in.Patch)
 			if err != nil {
@@ -689,9 +746,17 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 			if p, dir := protectedTarget(ops, cfg.ProtectDirs); dir != "" {
 				return map[string]any{"ok": false, "error": "补丁未应用（整体回退）：" + p + " 位于写保护区 " + dir + " 内，禁止增改删——请在保护区外工作"}, nil
 			}
-			results, err := Apply(root, ops)
+			applier := Apply
+			if in.DryRun {
+				applier = ApplyDry
+			}
+			results, err := applier(root, ops)
 			if err != nil {
-				return map[string]any{"ok": false, "error": "补丁未应用（整体回退）：" + err.Error()}, nil
+				verb := "补丁未应用（整体回退）"
+				if in.DryRun {
+					verb = "补丁预检未通过（dry-run，未落盘）"
+				}
+				return map[string]any{"ok": false, "error": verb + "：" + err.Error()}, nil
 			}
 			add, del := 0, 0
 			allAdded := len(results) > 0 // 全部为 Add File 才算「新建」——混入改/删/改名即「修改」（UI 审查 B-5 写动词）
@@ -706,8 +771,13 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 			if allAdded {
 				verb = "create"
 			}
-			return map[string]any{"ok": true, "files": results, "count": len(results),
-				"counts": fmt.Sprintf("+%d -%d", add, del), "verb": verb}, nil
+			out := map[string]any{"ok": true, "files": results, "count": len(results),
+				"counts": fmt.Sprintf("+%d -%d", add, del), "verb": verb}
+			if in.DryRun {
+				out["dry_run"] = true
+				out["note"] = "预检通过（未落盘）——去掉 dry_run 参数执行同一补丁"
+			}
+			return out, nil
 		})
 	if err != nil {
 		return nil, err

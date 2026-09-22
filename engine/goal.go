@@ -11,11 +11,14 @@ package engine
 // 单目标、主面专属，子代理面结构性不可见（白名单筛不到即物理不可达）。不在
 // hitl 审批名单（非业务数据写面，todo/ask 同款先例）。
 //
-// GoalDriver 自动续行批后置（设计件 §6）：complete/blocked 的 goal-round 权威
-// 分支、wrapup 注入、blockedAfter 阈值届时落——本面 API 不变。
+// GoalDriver 最小驱动器已落（设计件 findings/2026-09-22-goal-driver-design.md，
+// GoalConfig.AutoContinue 装配）：自然收束 → goal 轮自续（complete/blocked
+// 第二权威源）；dsh 全量形态中的暂停栅栏/armed/finish-reason 续行/wrapup/
+// blockedAfter 按 einox 重定界不采（收束后自然停 + 无状态判定，见设计件 §1）。
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/jumeng/einox/contract"
@@ -31,6 +34,46 @@ type GoalConfig struct {
 	// DefaultMaxGoalRounds create_goal 未带 max_goal_rounds 的缺省轮上限
 	// （<=0 = 256）。
 	DefaultMaxGoalRounds int
+	// AutoContinue 自动续行（GoalDriver 最小驱动器，设计件 findings/
+	// 2026-09-22-goal-driver-design.md）：自然收束时目标仍 active 即注入
+	// goal 轮自续（Kind="goal" 非 human 轮——complete/blocked 的第二权威源，
+	// 应用面续行会置 direct-human 稀释权威，引擎通道是唯一不稀释形态）；
+	// 轮预算耗尽原子转 blocked（round-limit）。false/nil = 零变化。
+	AutoContinue bool
+}
+
+// goalRoundMsg goal 轮注入文案（机制常量——驱动器心跳，非业务内容）。
+func goalRoundMsg(g *contract.Goal) string {
+	return fmt.Sprintf("[goal 轮 %d/%d] 继续推进当前目标：%s。目标达成即用 update_goal 标记 complete；受阻即 blocked（附具体受阻条件）；确认无需继续时向用户说明并停止。",
+		g.RoundsStarted, g.MaxGoalRounds, g.Objective)
+}
+
+// goalDrive goal 自动续行驱动点（settleTurn 尾部、StateEnded 分支——自然
+// 收束唯一续行面；挂起/error 终态 settleTurn 早退不达此处）。四步全查：
+// 配置关/无目标/非 active → 返回（暂停·完成·受阻即停——收束后自然停，
+// 无栅栏）；AdmitGoalRound 预约（CAS+预算，超限已原子转 blocked 事件已落）
+// → err 放弃（并发变异下轮再判）；注入（ContinueOrNotifyKind 复用单锁
+// 原子原语——与用户并发 Run 同锁序列化：goal 先抢到则用户消息走 steering
+// 排队成混合轮，用户先抢到则 goal 条目排下轮）→ began 即起自续轮
+// （NotifyOwner 同款 goroutine 形态）。
+func (m *Manager) goalDrive(s *session.Session) {
+	if m.Opt.Goal == nil || !m.Opt.Goal.AutoContinue || s.Stopped() {
+		return
+	}
+	g := s.GoalOf()
+	if g == nil || g.Phase != contract.GoalActive {
+		return
+	}
+	admitted, g2, err := s.AdmitGoalRound(g.ID, g.Revision)
+	if err != nil || !admitted {
+		return // 预算耗尽（已转 blocked）或并发变异——续行终止/下轮再判
+	}
+	began, q := s.ContinueOrNotifyKind(goalRoundMsg(g2), true, "goal")
+	s.Record(contract.EvNotifyQueued, contract.SteerEvent{ID: q.ID, Text: q.Text, Kind: "goal"})
+	if began {
+		s.SetTurnActor(nil)                                  // 系统自续轮：清陈旧说话人（NotifyOwner 同律）
+		go m.Run(context.Background(), s, "", nil, noopEmit) // goal 轮：预约经队列注入（输入路径唯一）
+	}
 }
 
 // newGoalTools 构造三工具（无错误面——纯结构构造，域校验在执行层）。
@@ -132,8 +175,13 @@ func updateGoal(s *session.Session, in updateGoalIn) (map[string]any, error) {
 			return tools.Fail("目标已暂停——模型不能解除暂停，须由用户经应用通道恢复（请向用户说明恢复方式后停止重试）"), nil
 		}
 	}
+	// complete/blocked 第二权威源：goal 轮（引擎注入的非 human 轮——dsh
+	// goal-round authority 对位；应用面续行必置 direct-human 会稀释权威，
+	// goal 轮是唯一不稀释的自评通道）；edit/pause/resume 仍仅 direct-human。
 	if fail, err := needHuman(); fail != nil || err != nil {
-		return fail, err
+		if !s.TurnGoalRoundOf() || (in.Action != "complete" && in.Action != "blocked") {
+			return fail, err
+		}
 	}
 	var (
 		g   *contract.Goal

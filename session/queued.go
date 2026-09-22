@@ -74,20 +74,28 @@ func (s *Session) SteerBy(actor *contract.Participant, msg string, atts []Attach
 	return true
 }
 
-// ContinueOrNotify 后台完成通知的单锁原子注入原语（W-3）：
+// ContinueOrNotify 后台完成通知的单锁原子注入原语（W-3，形态与竞态依据见
+// ContinueOrNotifyKind——kind 固定 "notify" 的委托版）。
+func (s *Session) ContinueOrNotify(msg string, wake bool) (began bool, q QueuedMsg) {
+	return s.ContinueOrNotifyKind(msg, wake, "notify")
+}
+
+// ContinueOrNotifyKind 单锁原子注入原语的 kind 参数化版（GoalDriver 批：
+// goal 轮预约注入 Kind="goal"——与 notify 同律「系统注入非人类输入」，注入
+// 回执走 EvNotifyQueued/EvNotifyInjected 通道由 payload Kind 区分审计）：
 // 锁内一步裁定——running/pending/error → 通知入队（began=false，当前/
 // 下一轮 TakePending 消费）；ended（自然收口）+ wake → 翻 running + 挂
-// runDone + 通知入队（began=true，调用方锁外 Record notify_queued 后以
-// Run("") 起自续轮——通知经队列注入，输入路径与 steering 唯一）；ended +
-// !wake → 只入队（自激护栏预算耗尽：不自动开轮，下轮用户交互消费）。
+// runDone + 通知入队（began=true，调用方锁外 Record 后以
+// Run("") 起自续轮——通知经队列注入，输入路径与 steering 唯一）；
+// ended + !wake → 只入队（不自动开轮，下轮用户交互消费）。
 // **error 终态绝不自续**（对照审查 A-3：用户停止把中断洗成模型请求是被
 // 明确拒绝的形态；运行错误同理保守——通知只入队，下轮用户交互消费）。
 // 竞态封闭依据：与 BeginRun/Steer 同锁互斥，TOCTOU 丢通知/丢启动窗口不
 // 存在（单锁原语义，对照审查定案）。返回的 q 供锁外 Record（Record 自持
 // 锁，锁内不可调）。
-func (s *Session) ContinueOrNotify(msg string, wake bool) (began bool, q QueuedMsg) {
+func (s *Session) ContinueOrNotifyKind(msg string, wake bool, kind string) (began bool, q QueuedMsg) {
 	s.mu.Lock()
-	q = QueuedMsg{ID: newQueueID(), Text: msg, Kind: "notify"}
+	q = QueuedMsg{ID: newQueueID(), Text: msg, Kind: kind}
 	if s.State != StateEnded {
 		s.pendingMsgs = append(s.pendingMsgs, q)
 		s.mu.Unlock()
@@ -176,9 +184,9 @@ func (s *Session) RemoveQueued(editor, id string) bool {
 		if s.pendingMsgs[i].ID != id {
 			continue
 		}
-		if s.pendingMsgs[i].Kind == "notify" {
+		if s.pendingMsgs[i].Kind != "" {
 			s.mu.Unlock()
-			return false // 系统通知不可删（结论注入是模型面承诺）
+			return false // 系统注入不可删（结论注入是模型面承诺）
 		}
 		if queuedOwnerFenced(s.pendingMsgs[i], editor, s.Owner) {
 			s.mu.Unlock()

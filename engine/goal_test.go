@@ -7,9 +7,11 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -26,6 +28,14 @@ type goalCallModel struct {
 	calls  []schema.ToolCall
 	inputs [][]*schema.Message
 	gate   chan struct{} // 非空时首次调用阻塞至 close（运行中 steering 用例的同步面）
+}
+
+// PushCall 追加剧本（轮 1 服务端产物回填真实 goal_id 后再补 update 剧本——
+// 预录 JSON 无法预知随机 hex id）。
+func (f *goalCallModel) PushCall(c schema.ToolCall) {
+	f.mu.Lock()
+	f.calls = append(f.calls, c)
+	f.mu.Unlock()
 }
 
 func (f *goalCallModel) inputsOf() [][]*schema.Message {
@@ -345,5 +355,219 @@ func TestGoalToolsExcludedFromSubagentFace(t *testing.T) {
 	runGoal(t, m, s, "派子任务读目标")
 	if res := lastToolResult(child); !strings.Contains(res, "不存在") {
 		t.Fatalf("子代理声明 get_goal 应得幻觉兜底信封（结构性不可见）：%s", res)
+	}
+}
+
+// ---- GoalDriver 自动续行（设计件 findings/2026-09-22-goal-driver-design.md）----
+
+// newGoalDriverManager AutoContinue 开启的测试引擎。
+func newGoalDriverManager(t *testing.T, fm llm.ModelFactory) *Manager {
+	t.Helper()
+	return newTestManager(t, func(o *Options) {
+		o.NewModel = fm
+		o.Goal = &GoalConfig{AutoContinue: true}
+	})
+}
+
+// ---- GoalDriver 自动续行（设计件 findings/2026-09-22-goal-driver-design.md）----
+
+// goalRoundInputsOf goal 轮注入计数（假模型 inputs 记录每次 Generate——一轮
+// ReAct 含工具循环多次调用，轮数锚不可用；goal 轮输入含「[goal 轮」前缀
+// user 消息可辨；标题生成输入不含该形态天然排除）。
+func goalRoundInputsOf(f *goalCallModel) int {
+	n := 0
+	for _, in := range f.inputsOf() {
+		for _, msg := range in {
+			if msg.Role == schema.User && strings.Contains(msg.Content, "[goal 轮 ") {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// waitGoalStable 等 goal 链静默：goal 轮注入达 want 且 200ms 无增量（链停在
+// complete/blocked/pause 后不再注入）。
+func waitGoalStable(t *testing.T, f *goalCallModel, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if goalRoundInputsOf(f) >= want {
+			time.Sleep(200 * time.Millisecond)
+			if goalRoundInputsOf(f) == want {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("goal 链未静默于 %d 个 goal 轮（当前 %d）", want, goalRoundInputsOf(f))
+}
+
+// waitGoalBlocked 等 phase=blocked（round-limit 终态锚）。
+func waitGoalBlocked(t *testing.T, s *session.Session) *contract.Goal {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if g := s.GoalOf(); g != nil && g.Phase == contract.GoalBlocked {
+			return g
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("goal 未转 blocked：%+v", s.GoalOf())
+	return nil
+}
+
+// TestGoalAutoContinueChain 全链：用户轮建目标 → 自然收束 → goal 轮自动起
+// （引擎注入非 human 轮）→ goal 轮内 complete 放行（第二权威源）→ 链停。
+func TestGoalAutoContinueChain(t *testing.T) {
+	f := &goalCallModel{calls: []schema.ToolCall{
+		gcOf("create_goal", `{"objective":"完成重构","max_goal_rounds":5}`),
+	}}
+	var cur model.BaseModel[*schema.Message] = f
+	m := newGoalDriverManager(t, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		return cur, nil
+	})
+	s := m.Registry().Create("张三", "任务", "manual", contract.UserPrefs{Model: "p/m"})
+	runGoal(t, m, s, "建个目标") // 轮 1：用户直接输入（direct-human）
+	g := s.GoalOf()
+	if g == nil {
+		t.Fatal("目标应建立")
+	}
+	// 真实 goal_id 回填：goal 轮内 complete 剧本（revision=1——轮预约不动 Revision）
+	f.PushCall(gcOf("update_goal", fmt.Sprintf(`{"goal_id":%q,"revision":1,"action":"complete"}`, g.ID)))
+	// 终态锚（PushCall 与异步 goal 轮起跑存在调度竞态——注入轮次不定，
+	// complete 落地后 goalDrive 恒不续，链必停于此相位）
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if g := s.GoalOf(); g != nil && g.Phase == contract.GoalComplete {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	end := s.GoalOf()
+	if end == nil || end.Phase != contract.GoalComplete {
+		t.Fatalf("goal 轮内应 complete（第二权威源）：%+v", end)
+	}
+	if end.RoundsStarted < 1 {
+		t.Fatalf("goal 轮应推进计数：%+v", end)
+	}
+	// 注入文案含轮位与目标文本
+	found := false
+	for _, in := range f.inputsOf() {
+		for _, msg := range in {
+			if msg.Role == schema.User && strings.Contains(msg.Content, "[goal 轮 ") && strings.Contains(msg.Content, "完成重构") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("goal 轮文案应注入自续轮输入")
+	}
+	// complete 终态静默窗：不再有新 goal 轮
+	n := goalRoundInputsOf(f)
+	time.Sleep(300 * time.Millisecond)
+	if goalRoundInputsOf(f) != n {
+		t.Fatalf("complete 后链应停（%d → %d）", n, goalRoundInputsOf(f))
+	}
+}
+
+// TestGoalRoundLimit 预算耗尽：单轮预算目标 goal 轮纯文本收束 → 第二次驱动
+// 原子转 blocked（round-limit）链停。
+func TestGoalRoundLimit(t *testing.T) {
+	f := &goalCallModel{calls: []schema.ToolCall{
+		gcOf("create_goal", `{"objective":"一轮预算","max_goal_rounds":1}`),
+	}}
+	var cur model.BaseModel[*schema.Message] = f
+	m := newGoalDriverManager(t, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		return cur, nil
+	})
+	s := m.Registry().Create("张三", "任务", "manual", contract.UserPrefs{Model: "p/m"})
+	runGoal(t, m, s, "建目标")
+	waitGoalStable(t, f, 1) // goal 轮 1（预算内）
+	g := waitGoalBlocked(t, s)
+	if g.BlockedCode != "round-limit" {
+		t.Fatalf("应为 round-limit：%+v", g)
+	}
+	if goalRoundInputsOf(f) != 1 {
+		t.Fatalf("预算 1 只应一个 goal 轮（%d）", goalRoundInputsOf(f))
+	}
+}
+
+// TestGoalPausedNoContinue 暂停即停：用户轮建目标 → 收束注入 goal 轮（链起）
+// → 应用通道域直调 pause（与 goal 轮执行并发——轮预约不动 Revision，CAS 恒
+// 可过）→ pause 落地后驱动器不再注入（收束后自然停，无栅栏）。
+func TestGoalPausedNoContinue(t *testing.T) {
+	f := &goalCallModel{calls: []schema.ToolCall{
+		gcOf("create_goal", `{"objective":"暂停目标","max_goal_rounds":5}`),
+	}}
+	var cur model.BaseModel[*schema.Message] = f
+	m := newGoalDriverManager(t, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		return cur, nil
+	})
+	s := m.Registry().Create("张三", "任务", "manual", contract.UserPrefs{Model: "p/m"})
+	runGoal(t, m, s, "建目标")
+	g := s.GoalOf()
+	if g == nil {
+		t.Fatal("目标应建立")
+	}
+	// 应用通道 pause（真实用户语义：/goal 命令接 Session 公开方法）
+	if _, err := s.PauseGoal(g.ID, g.Revision); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	// pause 落地后静默：无新 goal 轮注入（链停在当前轮收束）
+	time.Sleep(300 * time.Millisecond)
+	if cur := s.GoalOf(); cur == nil || cur.Phase != contract.GoalPaused {
+		t.Fatalf("应 paused：%+v", cur)
+	}
+	n := goalRoundInputsOf(f)
+	time.Sleep(300 * time.Millisecond)
+	if goalRoundInputsOf(f) != n {
+		t.Fatalf("paused 后不应再注入（%d → %d）", n, goalRoundInputsOf(f))
+	}
+}
+
+// TestGoalRoundAuthorityScope goal 轮权威只放宽 complete/blocked：goal 轮内
+// pause 仍需 direct-human（拒）——链经预算耗尽终止。
+func TestGoalRoundAuthorityScope(t *testing.T) {
+	f := &goalCallModel{calls: []schema.ToolCall{
+		gcOf("create_goal", `{"objective":"两轮预算","max_goal_rounds":2}`),
+	}}
+	var cur model.BaseModel[*schema.Message] = f
+	m := newGoalDriverManager(t, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		return cur, nil
+	})
+	s := m.Registry().Create("张三", "任务", "manual", contract.UserPrefs{Model: "p/m"})
+	runGoal(t, m, s, "建目标")
+	g := s.GoalOf()
+	if g == nil {
+		t.Fatal("目标应建立")
+	}
+	f.PushCall(gcOf("update_goal", fmt.Sprintf(`{"goal_id":%q,"revision":1,"action":"pause"}`, g.ID))) // goal 轮内应拒
+	bg := waitGoalBlocked(t, s)                                                                        // 预算耗尽终态（goal 轮内 pause 拒后纯文本收束——链续至耗尽）
+	if bg.BlockedCode != "round-limit" {
+		t.Fatalf("预算耗尽应 blocked：%+v", bg)
+	}
+	// goal 轮内 pause 拒（需 direct-human——第二权威源不覆盖 pause）
+	if res := lastToolResult(f); !strings.Contains(res, "需用户直接指令") {
+		t.Fatalf("goal 轮内 pause 应拒：%s", res)
+	}
+}
+
+// TestGoalNoContinueWhenDisabled AutoContinue=false：建目标自然收束不自续
+// （零变化——既有默认面）。
+func TestGoalNoContinueWhenDisabled(t *testing.T) {
+	f := &goalCallModel{calls: []schema.ToolCall{
+		gcOf("create_goal", `{"objective":"不自动","max_goal_rounds":5}`),
+	}}
+	var cur model.BaseModel[*schema.Message] = f
+	m := newGoalManager(t, func(context.Context, llm.ProviderSpec, llm.ModelSpec, string) (model.BaseModel[*schema.Message], error) {
+		return cur, nil
+	})
+	s := m.Registry().Create("张三", "任务", "manual", contract.UserPrefs{Model: "p/m"})
+	runGoal(t, m, s, "建目标")
+	time.Sleep(300 * time.Millisecond)
+	if n := goalRoundInputsOf(f); n != 0 {
+		t.Fatalf("AutoContinue=false 不应自续（%d 个 goal 轮）", n)
 	}
 }

@@ -38,8 +38,9 @@ func TestClassifyTable(t *testing.T) {
 		{"DS503 繁忙", &einoopenai.APIError{HTTPStatusCode: 503}, true, "SERVER", "503"},
 		// 智谱业务码细化（错误体 error.code；致命码均挂 429——状态码面会误报频率上限）
 		{"ZP429欠费1113", &einoopenai.APIError{HTTPStatusCode: 429, Code: "1113"}, false, "SERVER", "欠费"},
-		{"ZP429订阅过期1309", &einoopenai.APIError{Code: "1309"}, false, "SERVER", "续订"},
-		{"ZP429套餐不含模型1311", &einoopenai.APIError{Code: "1311"}, false, "SERVER", "套餐"},
+		{"ZP429订阅过期1309", &einoopenai.APIError{HTTPStatusCode: 429, Code: "1309"}, false, "SERVER", "续订"},
+		{"ZP429套餐不含模型1311", &einoopenai.APIError{HTTPStatusCode: 429, Code: "1311"}, false, "SERVER", "套餐"},
+		{"非429数字码不细化（联合校验防误伤）", &einoopenai.APIError{HTTPStatusCode: 400, Code: "1309"}, false, "SERVER", "请求被拒绝"},
 		{"ZP429限频1302不细化", &einoopenai.APIError{HTTPStatusCode: 429, Code: "1302"}, true, "RATE_LIMIT", "频率"},
 		{"ZP400模型不存在走状态码面", &einoopenai.APIError{HTTPStatusCode: 400, Code: "1211", Message: "model not exist"}, false, "SERVER", "model not exist"},
 		{"ZP数值码不细化", &einoopenai.APIError{HTTPStatusCode: 429, Code: 1113.0}, true, "RATE_LIMIT", "频率"},

@@ -167,6 +167,45 @@ func (s *Session) ClearGoal(id string, rev int) error {
 	return nil
 }
 
+// AdmitGoalRound goal 轮预约（GoalDriver 驱动器批，设计件 findings/
+// 2026-09-22-goal-driver-design.md §2.1）：锁内原子「CAS + active 校验 +
+// 预算裁定」——预算内 RoundsStarted++（引擎簿记：不动 Revision——模型侧
+// revision 不因轮推进漂移；不落 goal_change——record 全量快照携带计数即回放
+// 可见）；超限同锁原子转 blocked（code=round-limit，rev+1 落 goal_change
+// 事件——不追并发变异：CAS 失败即放弃，goal 仍 active 下轮再判）。
+// 返回：admitted=true 附新快照；false 附 blocked 快照（预算耗尽）；err 非 nil
+// = 本轮不注入（CAS 失败/无目标/非 active）。
+func (s *Session) AdmitGoalRound(id string, rev int) (bool, *contract.Goal, error) {
+	s.mu.Lock()
+	if err := expectGoalRef(s.goal, id, rev); err != nil {
+		s.mu.Unlock()
+		return false, nil, err
+	}
+	if s.goal.Phase != contract.GoalActive {
+		err := fmt.Errorf("goal %s 不可从 phase=%s 预约 goal 轮（允许 active）", s.goal.ID, s.goal.Phase)
+		s.mu.Unlock()
+		return false, nil, err
+	}
+	if s.goal.RoundsStarted >= s.goal.MaxGoalRounds {
+		next := *s.goal
+		next.Revision = s.goal.Revision + 1
+		next.Phase = contract.GoalBlocked
+		next.BlockedCode = "round-limit"
+		next.BlockedMsg = fmt.Sprintf("goal 轮预算已耗尽（%d/%d）——续行终止，请用户经应用通道恢复或调整目标", s.goal.RoundsStarted, s.goal.MaxGoalRounds)
+		s.goal = &next
+		s.UpdatedAt = time.Now()
+		s.mu.Unlock()
+		cp := goalCopyOf(&next)
+		s.Record(contract.EvGoalChange, contract.GoalChange{Operation: "block", Goal: cp})
+		return false, cp, nil
+	}
+	s.goal.RoundsStarted++
+	cp := goalCopyOf(s.goal)
+	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	return true, cp, nil
+}
+
 // transitionGoal 共用相位转移（锁内 CAS + 来源相校验；blocked 相清理）。
 func (s *Session) transitionGoal(op, id string, rev int, allowed []string, to string) (*contract.Goal, error) {
 	return s.mutateGoal(op, func(cur *contract.Goal) (*contract.Goal, error) {

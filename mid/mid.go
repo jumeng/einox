@@ -42,7 +42,9 @@ func (w *errFeedTool) Invoke(ctx context.Context, args json.RawMessage) (json.Ra
 }
 
 // ToolDeadline 单工具执行硬上限（guard 截止；超时以结果信封回喂。测试可缩）。
-var ToolDeadline = 10 * time.Minute
+// 12min = run_command 前台上限 10min + 2min 清理余量——两者相等时满时前台
+// 命令与 guard 截止赛跑，输出归谁不确定（2026-09-22 A2 修：guard 让出窗口）。
+var ToolDeadline = 12 * time.Minute
 
 // Guard 防死循环包装：同参连续第 3 次起在结果前注入提醒；执行超时强制截止。
 // 计数器随组装实例存续（轮内有效——死循环场景即轮内）；有状态故持锁——

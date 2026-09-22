@@ -43,7 +43,7 @@ func TestFSUtil(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(root, "sub", "b.md"), []byte("# beta head\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(root, "sub", "c.bin"), []byte{'x', 0, 'y'}, 0o644)
 	ts, err := NewTools(Config{Root: root})
-	if err != nil || len(ts) != 4 {
+	if err != nil || len(ts) != 5 {
 		t.Fatalf("构造失败：%v（工具数 %d）", err, len(ts))
 	}
 
@@ -246,5 +246,73 @@ func TestDeleteFileProtectDirs(t *testing.T) {
 		if _, err := NewTools(Config{Root: root, ProtectDirs: []string{bad}}); err == nil {
 			t.Fatalf("非法条目 %q 应构造期报错", bad)
 		}
+	}
+}
+
+// TestSearchUpgrade search_files rg 化：output_mode/context_lines/内置与
+// .gitignore 忽略/隐藏跳过/count 聚合。
+func TestSearchUpgrade(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "node_modules", "pkg"), 0o755)
+	os.MkdirAll(filepath.Join(root, "gendist"), 0o755)
+	os.MkdirAll(filepath.Join(root, ".hidden"), 0o755)
+	os.WriteFile(filepath.Join(root, "a.go"), []byte("alpha target\nplain\nlast target\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "b.go"), []byte("no match here\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "node_modules", "pkg", "x.go"), []byte("target in deps\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "gendist", "y.go"), []byte("target ignored\n"), 0o644)
+	os.WriteFile(filepath.Join(root, ".hidden", "h.go"), []byte("target hidden\n"), 0o644)
+	os.WriteFile(filepath.Join(root, ".env"), []byte("target env\n"), 0o644)
+	os.WriteFile(filepath.Join(root, ".gitignore"), []byte("# comment\n/dist/\n*.gen.go\n"), 0o644)
+	// .gitignore 的 /dist/ 是锚定目录——gendist 不该被它忽略（段名 dist/ 无 / 才段匹配）
+	os.WriteFile(filepath.Join(root, "keep.gen.go"), []byte("target gen\n"), 0o644)
+	ts, err := NewTools(Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// content 默认 + 上下文行：a.go 命中 2 行，context_lines=1 展开 1/3 行
+	m := invoke(t, ts, "search_files", `{"query":"target","context_lines":1,"pattern":"**/*.go"}`)
+	if m["ok"] != true {
+		t.Fatalf("搜索失败：%v", m)
+	}
+	hitsJSON, _ := json.Marshal(m["matches"])
+	h := string(hitsJSON)
+	if !strings.Contains(h, `"path":"a.go"`) || !strings.Contains(h, `"line":3`) || !strings.Contains(h, `"line":1`) {
+		t.Fatalf("应命中 a.go 1/3 行：%s", h)
+	}
+	if !strings.Contains(h, `"ctx":true`) || !strings.Contains(h, `"text":"plain"`) {
+		t.Fatalf("上下文行应带 ctx 标记：%s", h)
+	}
+	if strings.Contains(h, "node_modules") || strings.Contains(h, `"path":"b.go"`) {
+		t.Fatalf("依赖目录与零命中文件不应出现：%s", h)
+	}
+	if !strings.Contains(h, "gendist") {
+		t.Fatalf("非 gitignore 锚定的 gendist 应在（内置集无 dist 段名匹配——目录名是 gendist）：%s", h)
+	}
+	if strings.Contains(h, "keep.gen.go") {
+		t.Fatalf("gitignore *.gen.go 应忽略：%s", h)
+	}
+
+	// count 模式：per-file 聚合
+	m = invoke(t, ts, "search_files", `{"query":"target","output_mode":"count"}`)
+	cj, _ := json.Marshal(m["counts"])
+	if !strings.Contains(string(cj), `"count":2,"path":"a.go"`) {
+		t.Fatalf("count 应按文件聚合：%s", cj)
+	}
+
+	// files 模式（按名找）：ignore 面同样生效
+	m = invoke(t, ts, "search_files", `{"pattern":"*.go"}`)
+	fj, _ := json.Marshal(m["files"])
+	fs := string(fj)
+	if strings.Contains(fs, "keep.gen.go") || strings.Contains(fs, "hidden") {
+		t.Fatalf("files 模式应尊重忽略与隐藏：%s", fj)
+	}
+	if !strings.Contains(fs, "a.go") {
+		t.Fatalf("a.go 应在：%s", fj)
+	}
+
+	// 非法 output_mode 拒
+	if m = invoke(t, ts, "search_files", `{"query":"x","output_mode":"bogus"}`); m["ok"] != false {
+		t.Fatalf("非法 output_mode 应拒：%v", m)
 	}
 }

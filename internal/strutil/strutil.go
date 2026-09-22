@@ -22,3 +22,41 @@ func TruncateTotal(s string, n int) string {
 	}
 	return string(r[:max(0, n-1)]) + "…"
 }
+
+// Levenshtein 标准编辑距离（rune 级；行级短串量级 O(n·m) 可接受——匹配
+// 降级链的容差判定用，fsutil edit_file 与 applypatch 相似度提示同源单点）。
+func Levenshtein(a, b []rune) int {
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := 0; j <= len(b); j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, min(cur[j-1]+1, prev[j-1]+cost))
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
+}
+
+// Similarity 归一相似度（1 - dist/max(len)，双空 = 1）。
+func Similarity(x, y string) float64 {
+	a, b := []rune(x), []rune(y)
+	if len(a) == 0 && len(b) == 0 {
+		return 1
+	}
+	maxL := max(len(a), len(b))
+	return 1 - float64(Levenshtein(a, b))/float64(maxL)
+}

@@ -81,23 +81,23 @@ func TestNewManagerRejectsUnknownSessionToolFamily(t *testing.T) {
 	}
 }
 
-// TestSessionToolsOffTrimsFamilies 族级裁剪：nil = 六族全挂（11 件基线）；
-// 裁 cmd/patch 两族后恰减对应 7→4 件，其余族不受波及。
+// TestSessionToolsOffTrimsFamilies 族级裁剪：nil = 六族全挂（12 件基线）；
+// 裁 cmd/patch 两族后恰减对应 8→5 件，其余族不受波及。
 func TestSessionToolsOffTrimsFamilies(t *testing.T) {
 	m := newTestManager(t, nil)
 	s := m.Registry().Create("张三", "任务", "manual", contract.UserPrefs{})
 	full := toolNamesOf(t, m, s)
 	for _, want := range []string{
 		"todo_write", "ask_user", "submit_plan",
-		"read_file", "list_dir", "search_files", "delete_file",
+		"read_file", "list_dir", "search_files", "delete_file", "edit_file",
 		"run_command", "task_output", "task_stop", "apply_patch",
 	} {
 		if !contains(full, want) {
 			t.Fatalf("默认全挂缺 %s：%v", want, full)
 		}
 	}
-	if len(full) != 11 {
-		t.Fatalf("基线应为 11 件：%v", full)
+	if len(full) != 12 {
+		t.Fatalf("基线应为 12 件：%v", full)
 	}
 
 	m2 := newTestManager(t, func(o *Options) { o.SessionToolsOff = []string{FamilyCmd, FamilyPatch} })
@@ -108,7 +108,7 @@ func TestSessionToolsOffTrimsFamilies(t *testing.T) {
 			t.Fatalf("裁族后不应在场 %s：%v", gone, trimmed)
 		}
 	}
-	for _, keep := range []string{"todo_write", "ask_user", "submit_plan", "read_file", "list_dir", "search_files", "delete_file"} {
+	for _, keep := range []string{"todo_write", "ask_user", "submit_plan", "read_file", "list_dir", "search_files", "delete_file", "edit_file"} {
 		if !contains(trimmed, keep) {
 			t.Fatalf("未裁族不应受波及 %s：%v", keep, trimmed)
 		}

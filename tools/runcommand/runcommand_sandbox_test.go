@@ -25,7 +25,10 @@ func TestMain(m *testing.M) {
 // 零行为差异；Windows 无进程组语义为 no-op）。
 func TestBuildCmdDefaultOff(t *testing.T) {
 	t.Setenv("EINO_RUN_DOCKER", "")
-	cmd, sandboxed := buildCmd(context.Background(), "/ws", nil, nil, "echo hi")
+	cmd, sandboxed, err := sandbox.BuildCommand(context.Background(), "/ws", "/ws", nil, nil, []string{"sh", "-c", "echo hi"}, nil)
+	if err != nil {
+		t.Fatalf("nil 策略不应出错：%v", err)
+	}
 	if sandboxed {
 		t.Fatal("nil 策略不应走沙箱")
 	}
@@ -64,8 +67,8 @@ func (f *fakeProvider) Probe() sandbox.Status {
 // 「显式启用 > 沙箱」优先级告警随开关一并退役——注入位是唯一容器入口。
 func TestBuildCmdProviderInjection(t *testing.T) {
 	ok := &fakeProvider{usable: true, argv: []string{"echo", "PROVIDER_OK"}}
-	cmd, sandboxed := buildCmd(context.Background(), "/ws",
-		&sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}, ok, "echo hi")
+	cmd, sandboxed, err := sandbox.BuildCommand(context.Background(), "/ws", "/ws",
+		&sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}, ok, []string{"sh", "-c", "echo hi"}, nil)
 	if !sandboxed || len(cmd.Args) != 2 || cmd.Args[0] != "echo" || cmd.Args[1] != "PROVIDER_OK" {
 		t.Fatalf("注入后端应成为执行面：%v sandboxed=%v", cmd.Args, sandboxed)
 	}
@@ -73,8 +76,11 @@ func TestBuildCmdProviderInjection(t *testing.T) {
 		t.Fatalf("Wrap 应被调用一次：%d", ok.calls)
 	}
 	down := &fakeProvider{}
-	cmd, sandboxed = buildCmd(context.Background(), "/ws",
-		&sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}, down, "echo hi")
+	cmd, sandboxed, err = sandbox.BuildCommand(context.Background(), "/ws", "/ws",
+		&sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite}, down, []string{"sh", "-c", "echo hi"}, nil)
+	if err != nil {
+		t.Fatalf("auto 姿态不可用后端应裸跑不拒：%v", err)
+	}
 	if sandboxed || cmd.Args[0] != "sh" {
 		t.Fatalf("不可用后端应裸跑降级：%v", cmd.Args)
 	}

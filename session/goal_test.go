@@ -232,3 +232,41 @@ func TestGoalPersistenceAndInheritance(t *testing.T) {
 		t.Fatal("派生演化不应影响父/兄弟")
 	}
 }
+
+// TestAdmitGoalRound goal 轮预约（GoalDriver 批）：预算内计数推进不动
+// Revision；超限同锁原子转 blocked（round-limit + 事件）；CAS 失败/非 active 拒。
+func TestAdmitGoalRound(t *testing.T) {
+	_, s := newGoalSession(t)
+	g, _ := s.CreateGoal("两轮预算", 2)
+
+	// 预算内两次推进：RoundsStarted 递增、Revision 不动（引擎簿记非权威变异）
+	for i := 1; i <= 2; i++ {
+		ok, g2, err := s.AdmitGoalRound(g.ID, 1)
+		if err != nil || !ok || g2.RoundsStarted != i || g2.Revision != 1 {
+			t.Fatalf("第 %d 次预约不符：ok=%v goal=%+v err=%v", i, ok, g2, err)
+		}
+	}
+	// 第三次：超限原子转 blocked（rev+1 + 事件 + round-limit 码）
+	ok, g3, err := s.AdmitGoalRound(g.ID, 1)
+	if err != nil || ok || g3.Phase != contract.GoalBlocked || g3.BlockedCode != "round-limit" {
+		t.Fatalf("超限应原子转 blocked：%v %+v %v", ok, g3, err)
+	}
+	if g3.Revision != 2 {
+		t.Fatalf("blocked 转移应 rev+1：%+v", g3)
+	}
+	// blocked 后再预约：非 active 拒
+	if _, _, err := s.AdmitGoalRound(g3.ID, g3.Revision); err == nil {
+		t.Fatal("blocked 相预约应拒")
+	}
+	// CAS 失败拒（blocked 不可直接重建——clear 墓碑后再建）
+	if err := s.ClearGoal(g3.ID, g3.Revision); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	g4, err := s.CreateGoal("新目标", 3)
+	if err != nil {
+		t.Fatalf("clear 后重建: %v", err)
+	}
+	if _, _, err := s.AdmitGoalRound(g4.ID, 999); err == nil {
+		t.Fatal("CAS 失败应拒")
+	}
+}

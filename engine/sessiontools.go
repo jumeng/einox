@@ -102,7 +102,10 @@ func (m *Manager) sessionTools(s *session.Session) ([]contract.Tool, error) {
 		out = append(out, ts...)
 	}
 	if !familyOff(off, FamilyFS) {
-		ts, err := fsutil.NewTools(fsutil.Config{Root: ws, Spill: m.spillDirOf(s), ProtectDirs: m.Opt.WorkspaceProtect})
+		// ReadState 按 SID 持锚（跨轮/跨工具面重建保持 read→edit 防盲改门；
+		// sync.Map 懒建，LoadOrStore 幂等）
+		rsAny, _ := m.readStates.LoadOrStore(s.SID, fsutil.NewReadState())
+		ts, err := fsutil.NewTools(fsutil.Config{Root: ws, Spill: m.spillDirOf(s), ProtectDirs: m.Opt.WorkspaceProtect, ReadState: rsAny.(*fsutil.ReadStateStore)})
 		if err != nil {
 			return nil, &configError{"文件面工具族构造失败：" + err.Error()}
 		}

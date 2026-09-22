@@ -353,3 +353,53 @@ func TestProtectDirs(t *testing.T) {
 		}
 	}
 }
+
+// TestDryRunAndNearestHint C6:dry_run 预检不落盘、预检失败文案区分;未命中
+// 相似度提示报最近似窗口行位。
+func TestDryRunAndNearestHint(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "a.txt"), []byte("alpha\nbeta line\ngamma\n"), 0o644)
+	ts, err := NewTools(Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// dry_run 预检通过:文件未变 + dry_run 标记
+	out, err := ts[0].Invoke(context.Background(), json.RawMessage(
+		`{"dry_run":true,"patch":"*** Begin Patch\n*** Update File: a.txt\n@@\n alpha\n-beta line\n+BETA\n gamma\n*** End Patch"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal([]byte(out), &m)
+	if m["ok"] != true || m["dry_run"] != true {
+		t.Fatalf("dry_run 应预检通过：%v", m)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "a.txt")); strings.Contains(string(b), "BETA") {
+		t.Fatal("dry_run 不应落盘")
+	}
+
+	// dry_run 预检失败:未命中 + 相似度提示(betq line 与 beta line 相似度 9/10)
+	out2, _ := ts[0].Invoke(context.Background(), json.RawMessage(
+		`{"dry_run":true,"patch":"*** Begin Patch\n*** Update File: a.txt\n@@\n alpha\n-betq line\n+BETA\n gamma\n*** End Patch"}`))
+	var m2 map[string]any
+	json.Unmarshal([]byte(out2), &m2)
+	if m2["ok"] != false || !strings.Contains(m2["error"].(string), "dry-run") {
+		t.Fatalf("预检失败文案应区分 dry-run：%v", m2)
+	}
+	if !strings.Contains(m2["error"].(string), "最相似内容在第 1 行") {
+		t.Fatalf("未命中应带相似度提示：%s", m2["error"])
+	}
+
+	// 同一补丁正式执行(去掉 dry_run)落盘成功
+	out3, _ := ts[0].Invoke(context.Background(), json.RawMessage(
+		`{"patch":"*** Begin Patch\n*** Update File: a.txt\n@@\n alpha\n-beta line\n+BETA\n gamma\n*** End Patch"}`))
+	var m3 map[string]any
+	json.Unmarshal([]byte(out3), &m3)
+	if m3["ok"] != true {
+		t.Fatalf("正式执行应成功：%v", m3)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, "a.txt")); !strings.Contains(string(b), "BETA") {
+		t.Fatal("正式执行应落盘")
+	}
+}

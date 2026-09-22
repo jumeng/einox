@@ -12,7 +12,7 @@
 | HITL 审批 | `hitl.WrapTools` 按模式包装工具面：manual 逐写审批 / plan 计划卡（批准 = 任务期写授权）/ auto 直过；`ApprovalConfig` 定名单与 ArgsForce（参数级强制审批——**任何模式/任务期授权不豁免**）；无决议 fail-closed 一律拒绝 |
 | 跨会话记忆交接（写/拉） | `TurnEpilogue` 轮收尾钩子（自然收束触发，载荷与 session_end 同源——摘要+文件变更；应用落 owner 域记忆文件经 AgentsMD 注入即成读写环）+ `recall` 检索工具（见工具族表）；推通道 = AgentsMD 注入缝。三通道设计见 findings/2026-08-29-memory-three-channel-design.md（仓外设计笔记，不随仓分发） |
 | 收束质量门（FinalGate） | 三层约束（事前审批/事中 ErrFeed）的收束空位：自然收束后按 `Options.FinalGate`（SessionBrief 闭包——按模式/形态开门）强制验证，失败经 harness_note 门卡 + 反馈消息入史回灌重跑（有界——MaxRetries 负数=缺省 2、0=零回灌首验即报错，codex Guardian 普通/cyber 两档对位），耗尽 error 收束不静默放行；checker panic fail-closed；挂起/中断/错误轮不触发。**判据归应用**（`GateChecker`——build/test 命令或自包对抗审查），基座只持门循环机制 |
-| 持久完成目标（goal 域） | `Options.Goal`（nil = 不挂零变化）：每会话一个跨轮次持久目标——get_goal/create_goal/update_goal 三工具（主面专属，不进 spawn 白名单源）；目标态随会话记录持久化（fork/Side/Reattach 继承）+ `goal_change` 事件落流（全快照载荷，回放真源）。权威门控：状态变更（create/edit/pause/resume/complete/blocked）需**当轮 direct-human**（直接输入/用户排队/运行中补充三源置位，notify 系统通知不计）；**模型不能解除暂停**（resume 命中当前暂停目标硬拒——人类通道 = `Session.ResumeGoal` 等公开变异方法，应用接 /goal 类命令）；CAS revision 比对。GoalDriver 自动续行与 goal 轮预算后置（装配缝预留） |
+| 持久完成目标（goal 域） | `Options.Goal`（nil = 不挂零变化）：每会话一个跨轮次持久目标——get_goal/create_goal/update_goal 三工具（主面专属，不进 spawn 白名单源）；目标态随会话记录持久化（fork/Side/Reattach 继承）+ `goal_change` 事件落流（全快照载荷，回放真源）。权威门控：create/edit/pause/resume 需**当轮 direct-human**（直接输入/用户排队/运行中补充三源置位；系统注入〔notify/goal〕不计——Kind 白名单）；complete/blocked 另接受 **goal 轮**（`GoalConfig.AutoContinue` 开启后引擎注入的非 human 自续轮——第二权威源）；**模型不能解除暂停**（resume 命中当前暂停目标硬拒——人类通道 = `Session.ResumeGoal` 等公开变异方法，应用接 /goal 类命令）；CAS revision 比对。**GoalDriver 自动续行已落**（`AutoContinue`，设计件 findings/2026-09-22-goal-driver-design.md）：自然收束时目标仍 active 即注入 goal 轮自续（`[goal 轮 N/M]` 心跳文案，Kind=goal 排队注入，与用户并发 Run 同锁序列化）；`rounds_started` 轮预算（预约计数不动 Revision）耗尽原子转 blocked（round-limit）；暂停/完成/受阻收束后自然停（无栅栏——dsh 竞态坑面在 einox 单驱动点结构下不成立）；`rounds_started` 随快照持久化、fork 继承共享起点 |
 | auto 档模型评审门（auto review） | `Options.AutoReview`（nil = 不挂零变化——**实验态**，装配即知情决策）：auto 档工具调用执行前由 reviewer 模型分级——low/medium+allow 放行、medium+deny **挂起审批卡问人**（人补授权；走既有合并决议/路由/超时通道）、high **无条件硬拒**（人类明确要求也拒，不发卡）、评审任何失败 fail-closed 挂起问人。reviewer 路由 = NewModel/Model 覆写 ?? 当前会话路由 + 温度 0（dsh 实证形态）；评审输入五段（固定策略 + 环境/项目约束/角色标注历史/待决动作）；输出封闭 JSON 协议（六合法组合，重复成员/尾随文本拒收）；权威五角色（human-instruction > direct-parent-instruction > constraint > checkpoint > fact）判授权。**只能收紧不能放宽**：manual/plan 人审与 ArgsForce 红线不受影响；**不缓存不豁免**（逐调用评审）；机制面（todo/ask/plan/goal）与 ArgsSkip/ArgsForce 既有豁免照旧；主面专用（子代理/拓扑子面不挂）。成本画像：每次被评审工具调用一次评审模型调用 |
 | 挂起-续流通道 | `contract.Suspend` 哨兵 + 引擎 Interrupt×Resume：审批卡、结构化提问、计划卡共用同一机制。`Resume` 入口整备：单锁原子查清挂起域 + 翻 running + 挂 runDone——重复/并发第二个 Resume 即拒（明确 error 事件而非脏重放：checkpoint 不随 Resume 消费，迟到放行 = 加载旧检查点重执行）；续流执行期状态可见为 running（FlushQueue/Drain 可寻址） |
 | 检查点 | `engine.CheckPointStore`（Get/Set 两方法），中断/取消恢复与审批挂起续流的事实载体；三卡 State 经 `schema.Register` gob 注册（hitl/askuser/plan 属主包 init），属主包各持 round-trip 兼容回归测试（字段重命名红——gob 按字段名编码，静默破坏存量检查点） |
@@ -45,7 +45,7 @@
 | 工具 | `tool_call`（参数摘要 + 行为标记）/ `tool_result`（Digest+Preview、文件变更信封 `+A -D`） |
 | 挂起交互 | `approval_request/decision/timeout`（**合并决议卡**：一轮并行写聚合一卡 N 项、逐项决议；T6：request 载荷 `requester_id/name`〔谁的动作——当轮说话人，回退 Owner〕 + `target_id/name`〔路由「问谁」——Options.ApprovalRouter 裁决，空 = 不路由〕、decision 载荷 `decider_id/name`〔谁决议的——DecisionGuard 启用时校验目标一致性，mismatch fail-closed 拒绝〕）/ `ask_user_request/decision/timeout/ignored` / `plan_request/decision/timeout` |
 | steering 与通知 | `steer_queued/updated/removed/reordered/injected` / `notify_queued/notify_injected`（后台子代理完成回传）/ `user_message`（T6 多参与者：载荷 `speaker_id/speaker_name`——谁说的，空 = 单用户） |
-| 过程 | `todo_update` / `harness_note`（系统通知卡，**Kind 取值封闭集**：`offload` 外置 / `compaction` 摘要压缩 / `gate` 质量门回灌 / `failover` 降级链装配失败留痕 / `budget` 常驻面超预算告警 / `fork` 会话分叉血缘 / `side` 辅助对话血缘 / `channel_push` 渠道主动推送——新 Kind 属前端可观察的软契约增长，增改须同步本表）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态〔载荷 `stop_reason`：completed/aborted/error/max_tokens 细分 + failed 附 `partial` 半成品——dsh stopReason 形态对齐〕）/ `participant_update`（T6 参与者名册变更，Kind 封闭集 joined|updated|left——回放重建 roster 的真源）/ `model_change` / `instruction_change`（N1 有效系统提示词变更——回放重建「模型实际看到什么」的真源；首调即落基线、此后仅变更落，载荷 `text` 为变更后完整 Instruction）/ `image_offload`（C3 图片预算省略决策——durable 选择集：载荷 `items` 各含 `id`〔occurrence 标识〕+ `path`；已提交的省略跨请求粘滞〔换模型/预算变大不回看〕，恢复 = 模型重读路径产生新 occurrence）/ `transport_retry`（重连在途——前端回卷当前段半截显示）/ `goal_change`（C4 持久完成目标变更——载荷 `operation` 取值封闭集 create|edit|pause|resume|complete|block|clear + `goal` 全快照〔`id`/`revision`〔CAS 依据〕/`objective`/`phase`〔active|paused|blocked|complete〕/`blocked_code`/`blocked_msg`/`max_goal_rounds`〕；clear 为墓碑形态 `cleared_id`/`cleared_rev`） |
+| 过程 | `todo_update` / `harness_note`（系统通知卡，**Kind 取值封闭集**：`offload` 外置 / `compaction` 摘要压缩 / `gate` 质量门回灌 / `failover` 降级链装配失败留痕 / `budget` 常驻面超预算告警 / `fork` 会话分叉血缘 / `side` 辅助对话血缘 / `channel_push` 渠道主动推送 / `snapshot` 工作区快照（C4——应用撤销通道，Title 带 tag 与文件数）/ `restore` 工作区恢复（快照 tag 回滚——idle 态守卫）——新 Kind 属前端可观察的软契约增长，增改须同步本表）/ `subagent`（子代理过程流，SpawnID 归组，done/failed 终态〔载荷 `stop_reason`：completed/aborted/error/max_tokens 细分 + failed 附 `partial` 半成品——dsh stopReason 形态对齐〕）/ `participant_update`（T6 参与者名册变更，Kind 封闭集 joined|updated|left——回放重建 roster 的真源）/ `model_change` / `instruction_change`（N1 有效系统提示词变更——回放重建「模型实际看到什么」的真源；首调即落基线、此后仅变更落，载荷 `text` 为变更后完整 Instruction）/ `image_offload`（C3 图片预算省略决策——durable 选择集：载荷 `items` 各含 `id`〔occurrence 标识〕+ `path`；已提交的省略跨请求粘滞〔换模型/预算变大不回看〕，恢复 = 模型重读路径产生新 occurrence）/ `transport_retry`（重连在途——前端回卷当前段半截显示）/ `goal_change`（C4 持久完成目标变更——载荷 `operation` 取值封闭集 create|edit|pause|resume|complete|block|clear + `goal` 全快照〔`id`/`revision`〔CAS 依据〕/`objective`/`phase`〔active|paused|blocked|complete〕/`blocked_code`/`blocked_msg`/`max_goal_rounds`/`rounds_started`〔goal 轮预算消耗——引擎簿记不动 revision〕〕；clear 为墓碑形态 `cleared_id`/`cleared_rev`） |
 | 收束 | `session_end`（摘要 + 文件变更清单 + HistLen 轮末历史长度——ForkAt 锚定数据）/ `error`（Code：CONFIG / SERVER / TRANSPORT / ABORTED / AUTH / RATE_LIMIT / OVERFLOW——超窗：manager 裁剪重装配有界重试一次后才如实报错）/ `interrupted`（打断收尾，非故障形态） |
 
 **事件词表冻结（2026-09-06，T6 多参与者批次一裁决）**：上表事件名（Kind）与既有载荷字段名此后**只增不改名不删除**（软契约增长纪律收紧为冻结——dsh 开放词表「多人会话语义改不动」的反面教训，见选型评估报告）；新增事件/字段须同步本表并附回放兼容说明（omitempty、旧数据零值回退）。多参与者身份字段集（speaker/requester/decider/participant）属冻结首批成员。
@@ -56,9 +56,9 @@
 
 | 包 | 工具 | 说明 |
 |---|---|---|
-| `tools/applypatch` | `apply_patch` | `*** Begin Patch` 格式补丁改文件：多文件增/改/删/改名、四档模糊匹配、多块锚点、事务性（任一失败全部不落盘）；`ProtectDirs` 写保护区——任一目标（含 Move to 改名目标）命中即整单拒绝 |
-| `tools/fsutil` | `read_file` / `list_dir` / `search_files` / `delete_file` | 工作区文件面：行号区间读（超宽行截断可放宽）、目录清单、glob+正则内容搜；路径圈进工作区根，穿越显式拒绝；`ProtectDirs` 写保护区——delete_file 命中即拒（读面不受影响） |
-| `tools/runcommand` | `run_command` / `task_output` / `task_stop` | 工作区内 shell：超时、输出头尾截断（中间省略）、后台任务制；`IsSafeReadCommand` 白名单供审批豁免 |
+| `tools/applypatch` | `apply_patch` | `*** Begin Patch` 格式补丁改文件：多文件增/改/删/改名、四档模糊匹配、多块锚点、事务性（任一失败全部不落盘）、`dry_run` 预检参数（解析/定位/冲突计算不落盘）、未命中时最近似内容相似度提示（行位+相似度+首行内容——模型自纠回路）；`ProtectDirs` 写保护区——任一目标（含 Move to 改名目标）命中即整单拒绝 |
+| `tools/fsutil` | `read_file` / `list_dir` / `search_files` / `delete_file` / `edit_file` | 工作区文件面：行号区间读（超宽行截断可放宽；二进制嗅探拒读；同参重读 unchanged 短路）、目录清单、glob+正则内容搜（rg 语义：output_mode=content/files/count、context_lines 上下文行、max_results 可调、并行扫描、内置忽略集 + .gitignore 简版 + 隐藏目录跳过）、精确替换（8 档匹配降级链：精确→空白→引号/标点归一→行号前缀剥离→转义归一→首尾锚定；多命中报全部行号消歧；read→edit 防盲改门——读过/视野完整/mtime+size 指纹未变三关，跨轮经 `ReadState` 锚保持）；路径圈进工作区根，穿越显式拒绝；`ProtectDirs` 写保护区——delete_file/edit_file 命中即拒（读面不受影响） |
+| `tools/runcommand` | `run_command` / `task_output` / `task_stop` | 工作区内 shell：超时自动转后台（默认 120s 到点收编任务表不杀进程，返回 task_id——zcode auto_on_timeout 对位；上限 10min）、cwd 相对路径圈禁、env K=V 注入（键黑名单 fail-closed）、输出头尾截断或 tail_lines 尾行取样、后台任务制；`IsSafeReadCommand` 白名单供审批豁免（管道分段判定——两段均白名单即豁免；env 赋值前缀剥离 `VAR=x cmd`） |
 | `tools/todo` | `todo_write` | 任务清单全量覆盖写（模型不易漂移），事件化实时扇出 + 回放可见 |
 | `tools/askuser` | `ask_user` | 结构化提问（单选/多选/自由输入），挂起-续流通道，超时 fail-closed |
 | `tools/plan` | `submit_plan` | 计划卡：plan 档批准 = 授权任务期全部写；manual 档仅确认方向；auto 档落档即走 |
@@ -77,7 +77,7 @@
 | 能力 | 说明 |
 |---|---|
 | 出站上下文经济（reduction） | 工具结果超 8192 字符截断 + 外置换指针（会话域 `spill/`，`read_file` 虚拟路径取回、跨轮不失效）；历史超 30% 窗口清除旧轮（保尾 2 个工具轮；清出不足 5% 窗口不动——缓存代价闸）；窗口未知时只截断不清除；TokenCounter 按整形后口径计数 |
-| 长会话摘要（summarize） | adk summarization 中间件：上下文达 70% 窗口触发摘要、保 skill 指令；摘要模型 Failover 降级链（`SummarizerFallbackModels`），链尽走清窗兜底不外抛 |
+| 长会话摘要（summarize） | adk summarization 中间件：上下文达 70% 窗口触发摘要、保 skill 指令；摘要指令为结构化段落版（任务目标/关键结论/文件与代码/issue 全景/todo 状态/未决/进度与下一步——zcode compact 模板骨架 + einox 水位哲学）；摘要模型 Failover 降级链（`SummarizerFallbackModels`），链尽走清窗兜底不外抛 |
 | 子代理编排（subagent / spawnbg） | `spawn` 原语：同步调用（回合级 fork-join）与后台派生（即回 agentId、完成通知注入父输入）；子面工具白名单 + DenyTools 硬校验、并发信号量 |
 | 确定性拓扑（topology） | supervisor / deep 官方 prebuilt 接线（确定性场景选配，默认单 agent react） |
 | 动态工具装载（toolsearch） | `ToolSearchPolicy`：名单外常驻、名单内经 `tool_search` 检索后可见——大工具面的上下文瘦身 |
@@ -93,12 +93,15 @@
 
 | 出口 | 内容 | 注入时机 |
 |---|---|---|
-| `prompts.Coding()` | 编码工作模式：编辑纪律（apply_patch 优先/不动不明来源/破坏性命令先问）、验证纪律（改完必须验证、失败读输出定位再改）、apply_patch 格式规范 | 工作区工具面在场时由应用拼进 Instruction（`SessionToolsOff` 裁掉 fs/cmd/patch 族时勿拼） |
+| `prompts.Coding()` | 编码工作模式：编辑纪律（apply_patch 优先/不动不明来源/破坏性命令先问）、验证纪律（改完必须验证、失败读输出定位再改）、apply_patch 格式规范、侦察纪律（先侦察后改/顺依赖定位/测试先行/file:line 引用）、完成判据（验证背书/影响面清点/如实报告）、最小重跑范围（目标包优先/后台收割） | 工作区工具面在场时由应用拼进 Instruction（`SessionToolsOff` 裁掉 fs/cmd/patch 族时勿拼） |
 | `prompts.Orchestration()` | 子代理编排：何时派发（可并行独立子任务）/如何派发（简报自足）/后台派生纪律（禁止轮询·sleep·查进度·重复在途工作）/结论聚合 | spawn 装配时注入；不装配子代理可忽略 |
+| `prompts.Hitl()` | 审批协作档位语义（manual/plan/auto 措辞 + 拒绝后再试纪律 + fail-closed 是设计行为） | ask/plan 族在场时注入（`{Mode}` 由应用替换） |
+| `prompts.Subagents()` | 子代理参考模板 ×3（侦察〔只读强约束〕/实现〔先侦察再动手〕/审查〔逐条核对+严重级别〕） | spawn `Instruction` / Topology `SubAgentSpec` 引用；{task} 由派发方填充 |
+| `prompts.Environment(Facts)` | 环境段模板（工作区根/挂载区/写保护区/日期/仓状态/档位；空素材行省略） | 应用采集素材拼装，放 Instruction 末尾（环境事实每轮变化最大，利于前缀缓存——排序纪律只在 assemble 知识层约定） |
 
 ## 沙箱（sandbox/）
 
-`run_command` 的执行面沙箱，后端经 `sandbox.Provider` 注入。策略模型、部署前提与平台限制见 [05-sandbox.md](05-sandbox.md)：
+`run_command` 与 `python_execute` 内层执行面的沙箱（`sandbox.BuildCommand` 单点——argv 直执行形态经 POSIX 单引号 quote 过 Provider cmdLine 通道），后端经 `sandbox.Provider` 注入；`Policy.Backend` 姿态（缺省 auto：不可用裸跑+告警；`require`：不可用 fail-closed 拒跑，2026-09-22 D1 接线）。策略模型、部署前提与平台限制见 [05-sandbox.md](05-sandbox.md)：
 
 | 平台 | 机制 | 构建标签 |
 |---|---|---|

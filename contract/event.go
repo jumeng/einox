@@ -331,13 +331,14 @@ const (
 // （每次持久变异 +1）；MaxGoalRounds 是目标轮预算上限（自动续行装配面消费，
 // 持久承载先行）。BlockedCode/BlockedMsg 仅 Phase=blocked 时在场。
 type Goal struct {
-	ID            string `json:"id"`                     // 会话域唯一（随机 hex——无进程态计数依赖，跨重启天然不撞）
-	Revision      int    `json:"revision"`               // 正整数；CAS 比对依据
-	Objective     string `json:"objective"`              // 非空完成目标
-	Phase         string `json:"phase"`                  // active | paused | blocked | complete
-	BlockedCode   string `json:"blocked_code,omitempty"` // blocked 时在场（lower-kebab 分类）
-	BlockedMsg    string `json:"blocked_msg,omitempty"`  // blocked 时在场（非空人读解释）
-	MaxGoalRounds int    `json:"max_goal_rounds"`        // 正整数轮上限（缺省 256）
+	ID            string `json:"id"`                       // 会话域唯一（随机 hex——无进程态计数依赖，跨重启天然不撞）
+	Revision      int    `json:"revision"`                 // 正整数；CAS 比对依据
+	Objective     string `json:"objective"`                // 非空完成目标
+	Phase         string `json:"phase"`                    // active | paused | blocked | complete
+	BlockedCode   string `json:"blocked_code,omitempty"`   // blocked 时在场（lower-kebab 分类）
+	BlockedMsg    string `json:"blocked_msg,omitempty"`    // blocked 时在场（非空人读解释）
+	MaxGoalRounds int    `json:"max_goal_rounds"`          // 正整数轮上限（缺省 256）
+	RoundsStarted int    `json:"rounds_started,omitempty"` // goal 轮 admitted 计数（驱动器簿记——推进不动 Revision、不落 goal_change；fork 继承共享起点）
 }
 
 // GoalChange goal_change 事件载荷（C4——全快照形态：变更后完整 Goal 直接随

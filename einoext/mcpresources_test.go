@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jumeng/einox/sandbox"
+
 	mcp "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -151,5 +153,50 @@ func TestMCPSectionFromCache(t *testing.T) {
 	})
 	if s := MCPSection(); s != "## 段" {
 		t.Fatalf("应取当前 face 指令段：%q", s)
+	}
+}
+
+// ---- D2 localOperator 沙箱接线（缝隙①收口）----
+
+// fakeOpBackend localOperator 沙箱注入桩。
+type fakeOpBackend struct{ usable bool }
+
+func (f *fakeOpBackend) Wrap(pol *sandbox.Policy, workspace, cmdLine string) ([]string, []string) {
+	if !f.usable {
+		return nil, nil
+	}
+	return []string{"echo", "WRAPPED:" + cmdLine}, nil
+}
+
+func (f *fakeOpBackend) Probe() sandbox.Status {
+	return sandbox.Status{Enforcement: sandbox.EnforcementUnusable, Detail: "fake 不可用"}
+}
+
+// TestLocalOperatorSandboxWired python_execute 内层执行面沙箱接线：注入后
+// RunCommand 经 Provider（argv 变包装形态 + cmdLine 逐元素 quote）；nil
+// 配置直执行现状；require 不可用拒跑经 errFeed 回喂。
+func TestLocalOperatorSandboxWired(t *testing.T) {
+	root := t.TempDir()
+	op := &localOperator{root: root, sb: &sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite},
+		sp: &fakeOpBackend{usable: true}}
+	out, err := op.RunCommand(context.Background(), []string{"printf", "hi there"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Stdout, "WRAPPED:") || !strings.Contains(out.Stdout, "'printf' 'hi there'") {
+		t.Fatalf("应经 Provider 包装（argv quote 形态）：%s", out.Stdout)
+	}
+	// require 不可用：拒跑 errFeed 回喂（不构造命令）
+	op2 := &localOperator{root: root, sb: &sandbox.Policy{Mode: sandbox.ModeWorkspaceWrite, Backend: sandbox.BackendRequire},
+		sp: &fakeOpBackend{usable: false}}
+	out2, err := op2.RunCommand(context.Background(), []string{"echo", "x"})
+	if err != nil || !strings.Contains(out2.Stdout, "[沙箱拒绝]") {
+		t.Fatalf("require 不可用应拒跑回喂：%v %s", err, out2.Stdout)
+	}
+	// nil 配置直执行现状（真命令真跑）
+	op3 := &localOperator{root: root}
+	out3, err := op3.RunCommand(context.Background(), []string{"sh", "-c", "echo BARE_OK"})
+	if err != nil || !strings.Contains(out3.Stdout, "BARE_OK") {
+		t.Fatalf("nil 沙箱应直执行：%v %s", err, out3.Stdout)
 	}
 }

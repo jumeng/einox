@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +58,11 @@ type SessionBrief struct {
 	// Instruction/工具面/审批判定（机制与内容分离：身份只透传，策略归应用）。
 	TurnSpeakerID   string
 	TurnSpeakerName string
+	// WorkspaceRel 会话工作区相对 WorkspaceRoot 的路径（B2.1 环境段素材；
+	// side = 父工作区路径）。
+	WorkspaceRel string
+	// Title 会话标题（异步生成、时序不稳——已存在才带，应用拼环境段用）。
+	Title string
 }
 
 // Options 引擎组装配置（应用装配层构造）。
@@ -264,6 +270,12 @@ type Manager struct {
 	// map 懒建/回收；条目竞态归 bgRegistry 自锁。
 	bgMu sync.Mutex
 	bg   map[string]*bgRegistry
+
+	// 读取状态锚域（edit_file 防盲改门跨轮保持）：每轮工具面重组装，工具
+	// 实例留不住状态——按 SID 持锚（side/子代理各会话独立门；文件指纹校验
+	// 兜住共享工作区的跨会话并发）。条目随 Manager 生命周期（定长小结构，
+	// 量级 = 会话读过的文件数）。
+	readStates sync.Map // sid → *fsutil.ReadStateStore
 }
 
 // NewManager 构造（reg = 会话注册表；opt 必填项：Providers/Instruction/
@@ -423,16 +435,24 @@ func (m *Manager) Run(ctx context.Context, s *session.Session, userMsg string, a
 	queued := s.TakePending()
 	// C4 当轮 direct-human 重置（本轮输入组成定权威——上一轮不泄漏；运行中
 	// 用户补充经 steering 注入点单设置位，跨挂起保留）：
-	// 直接输入/附件/非 notify 排队条目三源；notify 是系统通知非人类输入。
+	// 直接输入/附件/无 Kind 排队条目三源；Kind 非空（notify 后台通知 /
+	// goal 轮预约）是系统注入非人类输入（GoalDriver 批收敛为 Kind 白名单——
+	// 任何显式 Kind 均系统注入）。goal 轮标记同源置位（complete/blocked 的
+	// 第二权威源）。
 	humanInput := userMsg != "" || len(atts) > 0
+	goalRound := false
 	for _, q := range queued {
-		if q.Kind != "notify" {
+		if q.Kind == "" {
 			humanInput = true
+		}
+		if q.Kind == "goal" {
+			goalRound = true
 		}
 	}
 	s.SetTurnHumanInput(humanInput)
-	for _, q := range queued { // 翻「已注入」回执：steer_queued/notify_queued 已建条目，翻态而非补建 user_message（回放不重复）；notify 条目独立事件名（审计区分系统通知与用户输入）
-		if q.Kind == "notify" {
+	s.SetTurnGoalRound(goalRound)
+	for _, q := range queued { // 翻「已注入」回执：steer_queued/notify_queued 已建条目，翻态而非补建 user_message（回放不重复）；Kind 非空条目独立事件名（审计区分系统注入与用户输入——notify/goal 同通道，payload Kind 区分）
+		if q.Kind != "" {
 			s.Record(contract.EvNotifyInjected, contract.SteerEvent{ID: q.ID, Text: q.Text, Kind: q.Kind})
 			continue
 		}
@@ -674,6 +694,9 @@ func (m *Manager) settleTurn(s *session.Session, acc *runAccum, endState string,
 	s.ClearTurnGrant()
 	s.SetPendingApproval("")
 	fn(endEv)
+	if endState == session.StateEnded {
+		m.goalDrive(s) // goal 自动续行（自然收束唯一续行面——挂起/error 终态不续）
+	}
 	if m.Opt.TurnEpilogue != nil && endState == session.StateEnded {
 		m.turnEpilogue(s) // 记忆写通道：自然收束触发（挂起/中断/删除路径不触发）
 	}
@@ -993,6 +1016,14 @@ func (m *Manager) briefOf(s *session.Session) SessionBrief {
 	if a := s.TurnActorOf(); a != nil { // T6 当轮说话人（空 = 零变化）
 		b.TurnSpeakerID, b.TurnSpeakerName = a.ID, a.Name
 	}
+	// 环境段素材（B2.1）：工作区相对路径（side 共享父工作区）+ 标题（异步
+	// 生成时序不稳——已存在才带，不等待）；todo 水位需 session 域快照面，
+	// 后续增强
+	wsRoot := m.Opt.WorkspaceRoot(s.Owner, m.wsSID(s))
+	if rel, err := filepath.Rel(wsRoot, m.workspaceOf(s)); err == nil {
+		b.WorkspaceRel = filepath.ToSlash(rel)
+	}
+	b.Title = s.TitleOf()
 	return b
 }
 

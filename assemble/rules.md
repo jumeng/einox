@@ -9,9 +9,22 @@
 | 规则 | 锚 |
 |---|---|
 | 四必填:`Providers` / `Instruction` / `CheckPoints` / `WorkspaceRoot`——缺一 `NewManager` 即拒(不拖到首会话) | engine/manager.go `NewManager` |
-| fs/cmd/patch 三族**任一在场**(未全裁)→ `Instruction` 必拼 `prompts.Coding()`(编码工作模式:编辑纪律/验证纪律/补丁格式——已裁族相关段落属可接受噪音);三族全裁 → 勿拼 | prompts 包 |
-| subagents 启用 → `Instruction` 必拼 `prompts.Orchestration()`(派发纪律/后台派生纪律) | prompts 包 |
-| Instruction 拼装序:业务职责段(应用写)+ `prompts.Coding()`(工具面在场时)+ `prompts.Orchestration()`(spawn 装配时)+ 会话配置段(mode 语义) | docs/04 最小装配 |
+| fs/cmd/patch 三族**任一在场**(未全裁)→ `Instruction` 必拼 `prompts.Coding()`(编码工作模式:编辑/验证/补丁格式/侦察纪律/完成判据/最小重跑范围——已裁族相关段落属可接受噪音);三族全裁 → 勿拼 | prompts 包 |
+| subagents 启用 → `Instruction` 必拼 `prompts.Orchestration()`(派发纪律/后台派生纪律);spawn 指令词可引 `prompts.Subagents()` 的侦察/实现/审查模板 | prompts 包 |
+| ask/plan 族在场 → 建议拼 `prompts.Hitl()`(审批协作档位语义+拒绝后再试纪律——模式词 `{Mode}` 由应用替换) | prompts 包 |
+| Instruction 拼装序(P5 约定,排序纪律只在知识层不进基座):业务职责段(应用写)→ `prompts.Coding()`(工具面在场时)→ `prompts.Orchestration()`(spawn 装配时)→ `prompts.Hitl()`(ask/plan 在场时)→ `einoext.MCPSection()`(MCP 连接且 server 给了 instructions 时)→ 环境段(`prompts.Environment`,最后——环境事实每轮变化最大,放尾利于前缀缓存) | docs/04 最小装配 |
+
+## AGENTS.md 双层发现样板(应用侧抄用)
+
+基座零发现逻辑红线不动(`engine.Options.AgentsMD` 只收文件清单);双层发现(用户级先、项目每层后)是应用/装配层的参考实现:
+
+```go
+// userAGENTS: ~/.<app>/AGENTS.md(先注入);projectAGENTS: cwd 向上至 git root
+// 每层的 AGENTS.md(各 100KB 上限,截断丢弃尾段),按层序注入——用户级约定
+// 在前,项目内层覆盖外层。素材喂 engine.Options.AgentsMD(文件内容清单)。
+```
+
+对位 zcode adapters/context 的用户级 `~/.zcode/AGENTS.md` + cwd 向上至 git root 每层合并注入;发现时机在应用装配 Instruction 时(基座每轮只消费清单)。
 
 ## 依赖律
 

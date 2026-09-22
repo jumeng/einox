@@ -1,7 +1,9 @@
-// Package runcommand 提供 run_command 工具：工作区内 shell 命令执行（P1b
-// 简版——超时/输出头尾截断/cwd 圈进工作区；后台任务形态 P2 随编码子代理）。
-// 输出截断策略参照 openai/codex unified_exec/head_tail_buffer.rs（Apache-2.0，
-// 头尾保留中间省略——构建日志的头尾才是定位关键）；命令安全分类
+// Package runcommand 提供 run_command 工具族：run_command / task_output /
+// task_stop（工作区内 shell 执行——超时/输出头尾截断或尾行取样/cwd 圈进
+// 工作区/env 白名单注入/后台任务生命周期）。输出截断策略参照 openai/codex
+// unified_exec/head_tail_buffer.rs（Apache-2.0，头尾保留中间省略——构建日志
+// 的头尾才是定位关键）；默认超时 120s 与 tail 取样对齐 zcode Bash 实测默认
+// （go build/test 常超 30s，2026-09-22 对比裁决）；命令安全分类
 // （IsSafeReadCommand）供装配层做参数级审批豁免（白名单只读命令直过，
 // 思路参照 codex exec_policy 的规则版）。
 package runcommand
@@ -11,15 +13,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/internal/strutil"
 	"github.com/jumeng/einox/sandbox"
 	"github.com/jumeng/einox/tools"
 	"github.com/jumeng/einox/tools/egress"
@@ -39,9 +40,12 @@ type Config struct {
 }
 
 type runIn struct {
-	Command    string `json:"command"`
-	TimeoutMS  int    `json:"timeout_ms"` // 0 = 默认 30s；上限 10min
-	Background bool   `json:"background"` // true = 后台执行立即返回 task_id
+	Command    string   `json:"command"`
+	TimeoutMS  int      `json:"timeout_ms"` // 0 = 默认 120s；上限 10min
+	Background bool     `json:"background"` // true = 后台执行立即返回 task_id
+	Cwd        string   `json:"cwd"`        // 工作区内相对路径（空 = 根；圈禁解析，越界拒）
+	Env        []string `json:"env"`        // "K=V" 注入（键黑名单拒；上限 32 项）
+	TailLines  int      `json:"tail_lines"` // >0 = 输出取尾 N 行（钳 2000；替代头尾截断）
 }
 
 type taskIn struct {
@@ -72,14 +76,40 @@ var (
 const maxBgTasks = 50
 
 // startBackground 起后台进程，登记任务表。
-func startBackground(root string, sb *sandbox.Policy, sp sandbox.Provider, cmdLine string) (string, error) {
-	cmd, sandboxed := buildCmd(context.Background(), root, sb, sp, cmdLine)
+func startBackground(root, cwd string, sb *sandbox.Policy, sp sandbox.Provider, cmdLine string, extraEnv []string) (string, error) {
+	bgDir := cwd
+	if bgDir == "" {
+		bgDir = root
+	}
+	cmd, sandboxed, err := sandbox.BuildCommand(context.Background(), root, bgDir, sb, sp, []string{"sh", "-c", cmdLine}, extraEnv)
+	if err != nil {
+		return "", err // require 姿态 fail-closed（BuildCommand 文案已带指引）
+	}
 	bt := &bgTask{cmd: cmdLine, start: time.Now(), sandboxed: sandboxed} // id/proc 占位后回填
 	cmd.Stdout = bt
 	cmd.Stderr = bt
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("启动失败：%w", err)
+	}
+	bt.proc = cmd.Process
+	go func() {
+		err := cmd.Wait()
+		bt.mu.Lock()
+		bt.done = true
+		bt.state = cmd.ProcessState
+		if err != nil && cmd.ProcessState == nil {
+			bt.stopped = true
+		}
+		bt.mu.Unlock()
+	}()
+	return adoptTask(bt)
+}
+
+// adoptTask 收编进任务表（容量/淘汰律单点：满时先淘汰已自然结束的表项，
+// 仍满即拒——此前完成项永不出表，50 上限会被耗尽且 task_output 的「已结束
+// 出表」文案与实现矛盾——安全审查 2026-09-06）。
+func adoptTask(bt *bgTask) (string, error) {
 	taskMu.Lock()
-	// 满时先淘汰已自然结束的表项（此前完成项永不出表，50 上限会被耗尽且
-	// task_output 的「已结束出表」文案与实现矛盾——安全审查 2026-09-06）
 	if len(taskTable) >= maxBgTasks {
 		for id, t := range taskTable {
 			if len(taskTable) < maxBgTasks {
@@ -99,26 +129,8 @@ func startBackground(root string, sb *sandbox.Policy, sp sandbox.Provider, cmdLi
 	}
 	taskSeq++
 	bt.id = fmt.Sprintf("t%d", taskSeq)
-	taskTable[bt.id] = bt // 容量检查与登记同锁：并发起任务不超上限（占位，Start 失败即回滚）
+	taskTable[bt.id] = bt // 容量检查与登记同锁：并发起任务不超上限
 	taskMu.Unlock()
-
-	if err := cmd.Start(); err != nil {
-		taskMu.Lock()
-		delete(taskTable, bt.id)
-		taskMu.Unlock()
-		return "", fmt.Errorf("启动失败：%w", err)
-	}
-	bt.proc = cmd.Process
-	go func() {
-		err := cmd.Wait()
-		bt.mu.Lock()
-		bt.done = true
-		bt.state = cmd.ProcessState
-		if err != nil && cmd.ProcessState == nil {
-			bt.stopped = true
-		}
-		bt.mu.Unlock()
-	}()
 	return bt.id, nil
 }
 
@@ -175,11 +187,14 @@ func stopTask(id string) (map[string]any, error) {
 }
 
 const (
-	defaultTimeoutMS = 30_000
+	defaultTimeoutMS = 120_000 // zcode Bash 同款实测默认（2026-09-22 对比裁决：30s 常不够 build/test）
 	maxTimeoutMS     = 600_000
 	headKeep         = 8 << 10  // 头 8KB
 	tailKeep         = 8 << 10  // 尾 8KB
 	maxCmdLineBytes  = 64 << 10 // 命令行长度上限（输入加固——失控载荷面）
+	maxEnvPairs      = 32       // env 注入项数上限
+	maxEnvValBytes   = 8 << 10  // env 单值上限
+	maxTailLines     = 2000     // tail_lines 钳制上限
 )
 
 // NewTools 构造 run_command / task_output / task_stop（run 写面进审批名单，
@@ -199,7 +214,7 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 		}
 	}
 	run, err := tools.InferTool("run_command",
-		"在会话工作区内执行 shell 命令（cwd = 工作区根）。command 为单条命令行；timeout_ms 可选（默认 30 秒，上限 10 分钟）；输出超长时头尾各保留 8KB 中间省略；退出码非 0 不算失败——输出里有全部信息。长任务（构建/测试/服务）传 background=true：立即返回 task_id，之后用 task_output 查输出、task_stop 终止。",
+		"在会话工作区内执行 shell 命令（默认 cwd = 工作区根）。command 为单条命令行；timeout_ms 可选（默认 120 秒，上限 10 分钟）——超时不终止而是自动转后台（返回 task_id，用 task_output 收割、task_stop 终止）；cwd 可选（工作区内相对路径，越界拒绝）；env 可选（\"K=V\" 注入环境变量，PATH/HOME 等关键变量拒绝，至多 32 项）；输出超长时头尾各保留 8KB 中间省略——只要尾部时传 tail_lines（取尾 N 行，长测试日志定位失败摘要用）；退出码非 0 不算失败——输出里有全部信息。长任务（构建/测试/服务）传 background=true：立即返回 task_id，之后用 task_output 查输出、task_stop 终止。",
 		func(ctx context.Context, in runIn) (map[string]any, error) {
 			return run(ctx, root, cfg.Sandbox, cfg.SandboxProvider, cfg.Egress, in)
 		})
@@ -236,70 +251,25 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 // 经 Config.SandboxProvider / engine.Options.SandboxProvider 注入，策略
 // 翻译进容器参数（见 sandbox/docker.go）。
 
-// tokenAttachWarn windows token 构造失败告警（进程一次——auto 档裸跑降级，
-// 与 Probe unusable 告警同款节流；真源 §4）。
-var tokenAttachWarn sync.Once
-
-// providerOf 配置归一（nil = OSProvider 平台内建）。
-func providerOf(sp sandbox.Provider) sandbox.Provider {
-	if sp != nil {
-		return sp
-	}
-	return sandbox.OSProvider
-}
-
-// buildCmd 组装执行命令。沙箱分支 = provider.Wrap（OS 后端：re-exec 哨兵
-// argv〔linux/darwin〕或直执行+token 侧挂〔windows〕；容器后端：一次性
-// 容器 argv）+ 进程组长（组杀锚点）+ cmd.Env（去重合并；EnvMode 分档在
-// provider 内）；后端不可用（auto 档）裸跑（Probe 已告警）。windows token
-// 侧挂仅对 OSProvider（容器后端的 CLI 进程不套 restricted token——它要
-// 正常访问 daemon 通道，围栏在容器层）。第二返回值 = 是否走沙箱（拒绝
-// 提示标注仅沙箱生效路径）。
-func buildCmd(ctx context.Context, root string, sb *sandbox.Policy, sp sandbox.Provider, cmdLine string) (*exec.Cmd, bool) {
-	if sb != nil {
-		p := providerOf(sp)
-		if argv, env := p.Wrap(sb, root, cmdLine); argv != nil {
-			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-			cmd.Dir = root
-			cmd.Env = env
-			sandbox.SetGroupLeader(cmd)
-			if p == sandbox.OSProvider {
-				if err := sandbox.AttachToken(cmd, sb, root); err != nil {
-					// windows restricted token 构造失败：裸跑降级会失去围栏——
-					// 静默 fail-open 不可接受，告警一次（auto 语义；require 档
-					// 接线后此处应拒跑）
-					tokenAttachWarn.Do(func() {
-						log.Printf("run_command: 沙箱 token 构造失败（%v）——该命令裸跑（auto 档降级）", err)
-					})
-					fallback := exec.CommandContext(ctx, "sh", "-c", cmdLine)
-					fallback.Dir = root
-					fallback.Env = env // 已 cleanseEnv + Policy.Env 重定向——降级不回退到继承全量环境
-					sandbox.SetGroupLeader(fallback)
-					fallback.Cancel = func() error { sandbox.KillGroup(fallback.Process); return nil }
-					return fallback, false
-				}
-			}
-			cmd.Cancel = func() error { // 超时/取消通道同款进程组杀
-				sandbox.KillGroup(cmd.Process)
-				return nil
-			}
-			return cmd, true
-		}
-	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", cmdLine)
-	cmd.Dir = root
-	// 默认路径同沙箱纪律组化（安全审查 2026-09-06）：超时/停止只杀 sh 会留
-	// 整棵进程树继续写盘——组长 + 组杀让 CommandContext 与 stopTask 均整组
-	// 终结（Windows 无进程组语义，KillGroup 退化为单杀——平台既定限制）。
-	sandbox.SetGroupLeader(cmd)
-	cmd.Cancel = func() error { sandbox.KillGroup(cmd.Process); return nil }
-	return cmd, false
-}
-
 func run(ctx context.Context, root string, sb *sandbox.Policy, sp sandbox.Provider, eg *egress.Validator, in runIn) (map[string]any, error) {
 	cmdLine := strings.TrimSpace(in.Command)
 	if cmdLine == "" {
 		return fail("command 不能为空")
+	}
+	// cwd 圈禁解析（zcode Bash cwd 策略的 einox 形态：工作区内相对路径，
+	// 越界 fail-closed——不做「越界 reset 回根」的宽放形态，围栏语义优先）
+	cwd := ""
+	if c := strings.TrimSpace(in.Cwd); c != "" {
+		under, err := tools.ResolveUnder(root, c)
+		if err != nil {
+			return fail("cwd 越界（须为工作区内相对路径）：" + c)
+		}
+		cwd = under
+	}
+	// env 注入校验（fail-closed：黑名单键/坏形态/超限整批拒）
+	extraEnv, err := parseEnvPairs(in.Env)
+	if err != nil {
+		return fail(err.Error())
 	}
 	// 输入加固（安全审查 2026-09-06）：NUL 使 argv 传递截断失真、超长命令行
 	// 是失控载荷面——入口即拒（执行语义不变：合法命令行照常经审批/沙箱执行）
@@ -318,7 +288,7 @@ func run(ctx context.Context, root string, sb *sandbox.Policy, sp sandbox.Provid
 		}
 	}
 	if in.Background {
-		id, err := startBackground(root, sb, sp, cmdLine)
+		id, err := startBackground(root, cwd, sb, sp, cmdLine, extraEnv)
 		if err != nil {
 			return fail(err.Error())
 		}
@@ -334,35 +304,90 @@ func run(ctx context.Context, root string, sb *sandbox.Policy, sp sandbox.Provid
 	if timeout > maxTimeoutMS {
 		return fail(fmt.Sprintf("timeout_ms 上限 %d", maxTimeoutMS))
 	}
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
-	defer cancel()
-	cmd, sandboxed := buildCmd(runCtx, root, sb, sp, cmdLine)
+	dir := cwd
+	if dir == "" {
+		dir = root // 原空 = 工作区根语义（BuildCommand 的 dir 空 = 继承 cwd，归一在此）
+	}
+	// 超时自动转后台（2026-09-22 对比裁决，zcode auto_on_timeout 对位）：到点
+	// 进程未结束 → 收编任务表（进程不杀，输出续灌同一 bt 缓冲），返回 task_id；
+	// 取消链保留——parent ctx 取消 / guard 截止仍经 cmd.Cancel=KillGroup 整组
+	// 终结（故不以 WithTimeout 驱动杀，改 select 计时）。
+	cmd, sandboxed, err := sandbox.BuildCommand(ctx, root, dir, sb, sp, []string{"sh", "-c", cmdLine}, extraEnv)
+	if err != nil {
+		return fail(err.Error()) // require 姿态 fail-closed——不降级不裸跑
+	}
 	start := time.Now()
-	out, _ := cmd.CombinedOutput() // 退出码/超时经 ProcessState 判定，err 不另用
-	timedOut := runCtx.Err() == context.DeadlineExceeded
-	exitCode := -1
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
+	bt := &bgTask{cmd: cmdLine, start: start, sandboxed: sandboxed}
+	cmd.Stdout = bt
+	cmd.Stderr = bt
+	if err := cmd.Start(); err != nil {
+		return fail("启动失败：" + err.Error())
 	}
-	res := map[string]any{
-		"ok": true, "command": cmdLine,
-		"exit_code": exitCode, "timed_out": timedOut,
-		"duration_ms": time.Since(start).Milliseconds(),
-		"output":      headTail(out),
-	}
-	if timedOut {
-		res["note"] = fmt.Sprintf("执行超时（%dms）已终止——加大 timeout_ms 或拆分任务", timeout)
-	}
-	if sandboxed {
-		if hint := sandbox.DenialHint(string(out)); hint != "" {
-			if n, ok := res["note"].(string); ok && n != "" {
-				res["note"] = n + "\n" + hint
-			} else {
+	bt.proc = cmd.Process
+	done := make(chan struct{})
+	go func() { // 状态机单点：前台完成与收编后台共用（done/state 只此处置）
+		_ = cmd.Wait()
+		bt.mu.Lock()
+		bt.done = true
+		bt.state = cmd.ProcessState
+		if cmd.ProcessState == nil {
+			bt.stopped = true // Cancel 链终结（非自然退出）
+		}
+		bt.mu.Unlock()
+		close(done)
+	}()
+	timer := time.NewTimer(time.Duration(timeout) * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-done:
+		bt.mu.Lock()
+		out := append([]byte(nil), bt.buf.Bytes()...)
+		state := bt.state
+		bt.mu.Unlock()
+		exitCode := -1
+		if state != nil {
+			exitCode = state.ExitCode()
+		}
+		res := map[string]any{
+			"ok": true, "command": cmdLine,
+			"exit_code":   exitCode,
+			"duration_ms": time.Since(start).Milliseconds(),
+			"output":      outputOf(out, in.TailLines),
+		}
+		if cwd != "" {
+			if rel, rerr := filepath.Rel(root, cwd); rerr == nil {
+				res["cwd"] = filepath.ToSlash(rel)
+			}
+		}
+		if sandboxed {
+			if hint := sandbox.DenialHint(string(out)); hint != "" {
 				res["note"] = hint
 			}
 		}
+		return res, nil
+	case <-timer.C:
+		// 自动转后台：收编任务表（容量/淘汰同 startBackground 既有律）
+		id, aerr := adoptTask(bt)
+		if aerr != nil {
+			// 任务表满：收编失败——退回硬超时语义（杀进程，已产出输出照常返回）
+			sandbox.KillGroup(cmd.Process)
+			<-done
+			bt.mu.Lock()
+			out := append([]byte(nil), bt.buf.Bytes()...)
+			bt.mu.Unlock()
+			return map[string]any{
+				"ok": true, "command": cmdLine, "exit_code": -1, "timed_out": true,
+				"duration_ms": time.Since(start).Milliseconds(),
+				"output":      outputOf(out, in.TailLines),
+				"note":        fmt.Sprintf("执行超时（%dms）已终止（后台任务表满无法转后台）——task_stop 清理后重试", timeout),
+			}, nil
+		}
+		return map[string]any{
+			"ok": true, "command": cmdLine, "task_id": id,
+			"duration_ms": time.Since(start).Milliseconds(),
+			"note":        fmt.Sprintf("执行超时（%dms）——已自动转后台继续执行，task_output 查输出、task_stop 终止", timeout),
+		}, nil
 	}
-	return res, nil
 }
 
 // headTail 头尾保留截断（中间省略标记）。
@@ -373,6 +398,75 @@ func headTail(b []byte) string {
 	return string(b[:headKeep]) +
 		fmt.Sprintf("\n…（中间省略 %d 字节）…\n", len(b)-headKeep-tailKeep) +
 		string(b[len(b)-tailKeep:])
+}
+
+// outputOf 输出面策略：tail_lines > 0 = 尾 N 行取样（钳 maxTailLines，超长
+// 日志定位失败摘要用——头尾 8KB 对长测试日志不够，zcode Bash preview tail
+// 同款取向）；否则头尾截断。
+func outputOf(b []byte, tailLines int) string {
+	if tailLines <= 0 {
+		return headTail(b)
+	}
+	n := min(tailLines, maxTailLines)
+	lines := strings.Split(string(b), "\n")
+	if len(lines) > n {
+		omitted := len(lines) - n
+		lines = lines[len(lines)-n:]
+		return fmt.Sprintf("…（前面省略 %d 行）…\n", omitted) + strings.Join(lines, "\n")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// envKeyBlocked env 注入键黑名单：进程定位类关键变量被改写 = 沙箱/工具链
+// 语义旁路（PATH 劫持 exec、HOME 改写凭证寻址）——fail-closed 整批拒。
+// Windows 环境变量名大小写不敏感，比对折叠。
+var envKeyBlocked = map[string]bool{
+	"PATH": true, "HOME": true, "PWD": true, "SHELL": true,
+	"USER": true, "USERNAME": true, "TMP": true, "TEMP": true,
+	"LD_PRELOAD": true, "DYLD_INSERT_LIBRARIES": true, // 动态库注入面
+}
+
+// parseEnvPairs 校验并归一 env 注入（[]string "K=V"）。键名形态、黑名单、
+// 项数与值长全查；任一非法整批拒（fail-closed——不带病注入）。
+func parseEnvPairs(pairs []string) ([]string, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	if len(pairs) > maxEnvPairs {
+		return nil, fmt.Errorf("env 至多 %d 项（收到 %d）", maxEnvPairs, len(pairs))
+	}
+	for _, kv := range pairs {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("env 项须为 K=V 形态（收到 %q）", strutil.Truncate(kv, 40))
+		}
+		if envKeyBlocked[strings.ToUpper(k)] {
+			return nil, fmt.Errorf("env 键 %s 在黑名单内（进程定位类关键变量不可注入）", k)
+		}
+		if !validEnvKey(k) {
+			return nil, fmt.Errorf("env 键名非法（须字母/下划线开头，字母数字下划线组成）：%s", strutil.Truncate(k, 40))
+		}
+		if len(v) > maxEnvValBytes {
+			return nil, fmt.Errorf("env 值超长（上限 %d 字节）：键 %s", maxEnvValBytes, k)
+		}
+	}
+	return pairs, nil
+}
+
+// validEnvKey 键名字符集（shell 合法 env 名子集）。
+func validEnvKey(k string) bool {
+	for i, r := range k {
+		switch {
+		case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return k != ""
 }
 
 // safeReadOnly 只读白名单（无 shell 元字符前提下直过审批——部署可按需扩）。
@@ -413,11 +507,14 @@ var safeGitSub = map[string]bool{
 	"blame": true, "remote": true, "tag": true, "rev-parse": true,
 }
 
-// IsSafeReadCommand 参数级审批豁免判定：纯只读命令（无元字符组合、无重定向、
-// 无命令替换）直过；其余（rm/mvn/sudo/管道/重定向/任何白名单外）必审批。
-// 判定从宽于「无害」从严于「白名单」：白名单程序 + 零元字符 + 参数形态只读
-// 才豁免（写型形态显式拒：find 写型 flag、git branch/tag/remote 非纯列表
-// 形态、tree 整体）。
+// IsSafeReadCommand 参数级审批豁免判定：纯只读命令直过；其余必审批。
+// 2026-09-22 增量增强（zcode bash-readonly-policy 对位取两档）：管道分段
+// 判定（每段各自过白名单——`grep x | head` 高频形态免审批；空段 = `||`/
+// 尾管道等病态形态整体拒）与 env 赋值前缀剥离（`VAR=x git status`——赋值
+// 词形态严格 K=V）。其余元字符（组合/重定向/替换/后台）仍一票否决。
+// 判定从宽于「无害」从严于「白名单」：白名单程序 + 参数形态只读才豁免
+// （写型形态显式拒：find 写型 flag、git branch/tag/remote 非纯列表形态、
+// tree 整体）。
 func IsSafeReadCommand(args string) bool {
 	var in runIn
 	if json.Unmarshal([]byte(args), &in) != nil {
@@ -427,15 +524,37 @@ func IsSafeReadCommand(args string) bool {
 	if cmdLine == "" {
 		return false
 	}
-	// 元字符一票否决：组合/重定向/替换/管道均不可豁免
-	for _, ch := range []string{";", "|", "&", ">", "<", "`", "$(", "(", ")"} {
+	// 元字符一票否决（| 除外——管道走分段判定）：组合/后台/重定向/替换均不可豁免
+	for _, ch := range []string{";", "&", ">", "<", "`", "$(", "(", ")"} {
 		if strings.Contains(cmdLine, ch) {
 			return false
 		}
 	}
-	fields := strings.Fields(cmdLine)
+	for _, seg := range strings.Split(cmdLine, "|") {
+		if !readOnlySegment(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+// isEnvAssign env 赋值词形态（K=V，K 合法 env 名——`VAR=x cmd` 前缀剥离用）。
+func isEnvAssign(f string) bool {
+	k, _, ok := strings.Cut(f, "=")
+	return ok && k != "" && validEnvKey(k)
+}
+
+// readOnlySegment 单段纯判定（无元字符前提由调用方保证）：env 赋值前缀
+// 剥离后过白名单 + 参数形态校验。空段（`||`/尾管道）拒。
+func readOnlySegment(seg string) bool {
+	fields := strings.Fields(seg)
+	n := 0
+	for n < len(fields) && isEnvAssign(fields[n]) {
+		n++
+	}
+	fields = fields[n:]
 	if len(fields) == 0 {
-		return false
+		return false // 纯赋值无命令 / 空段——拒绝豁免
 	}
 	prog := fields[0]
 	if prog == "git" {

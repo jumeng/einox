@@ -2,7 +2,8 @@ package einoext
 
 // eino-ext 官方工具面全量接入（自产品 internal/tools/einoutils.go 迁入）：
 //   零依赖直接构造：sequentialthinking / httprequest(get|post|put|delete 族)
-//     / wikipedia(中文站) / duckduckgo(免凭证)
+//     / wikipedia（缺省英文站，EINO_WIKIPEDIA_BASEURL 覆盖——语言属部署决策，
+//     基座不预设）/ duckduckgo(免凭证)
 //   env 凭证/端点，有配置即生效：bingsearch(BING_API_KEY)
 //     / googlesearch(GOOGLE_API_KEY+GOOGLE_CSE_ID) / searxng(SEARXNG_URL)
 //     / mcp(EINO_MCP_URL，SSE 端点，启动时握手拉取远端工具，拉取工具一律
@@ -41,15 +42,20 @@ import (
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/sandbox"
 	"github.com/jumeng/einox/tools"
 )
 
 // localOperator commandline.Operator 的本地实现（工作区限定：读写与命令
-// cwd 全部圈进 root，路径穿越显式拒绝）。注意其 RunCommand 是裸 exec——
-// 不经 sandbox 策略（python_execute 的内层执行面，真源 2026-08-26 沙箱设计
-// 缝隙①，与 run_command 的围栏语义不同面）；工具调用本身照常过 hitl 审批
-// 与 ToolWrap（ProcessTools 面的标准链路）。
-type localOperator struct{ root string }
+// cwd 全部圈进 root，路径穿越显式拒绝）。RunCommand 经 sandbox.BuildCommand
+// （D2 缝隙①收口：python_execute 内层执行面与 run_command 同一围栏语义——
+// sb 为 nil 时保持直执行现状，路径圈禁仍在；require 姿态后端不可用拒跑）；
+// 工具调用本身照常过 hitl 审批与 ToolWrap（ProcessTools 面的标准链路）。
+type localOperator struct {
+	root string
+	sb   *sandbox.Policy  // nil = 直执行现状（ExtConfig.OperatorSandbox 注入）
+	sp   sandbox.Provider // nil = OSProvider（BuildCommand 内归一）
+}
 
 // abs 归一并校验 containment。filepath.Join 会把 ".." 清洗进结果路径——
 // Join(root, "../../etc") 结果逃出 root，必须以 Rel 显式拒绝（P0 安全修复）。
@@ -113,9 +119,13 @@ func (o *localOperator) RunCommand(ctx context.Context, command []string) (*comm
 	if err := os.MkdirAll(o.root, 0o755); err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	cmd.Dir = o.root // 命令 cwd 圈进工作区（相对路径产物落工作区）
-	out, err := cmd.CombinedOutput()
+	cmd, _, err := sandbox.BuildCommand(ctx, o.root, o.root, o.sb, o.sp, command, nil)
+	if err != nil {
+		// require 姿态 fail-closed：拒跑经 errFeed 语义回喂（非零退出同款
+		// 形态——输出并入 Stdout，模型可见可自纠/转告用户）
+		return &commandline.CommandOutput{Stdout: "[沙箱拒绝] " + err.Error()}, nil
+	}
+	out, err := cmd.CombinedOutput() // 命令 cwd 圈进工作区（相对路径产物落工作区）
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, err // 会话取消：保持上抛，不伪装成命令失败
@@ -230,11 +240,34 @@ func mcpFaceOf(ctx context.Context, spec MCPSpec) *mcpFace {
 	return f
 }
 
+// envOr env 后备取值（空值视为未配置回退缺省）。
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// ExtConfig 可选扩展配置（零值 = NewExtTools 兼容门面的等价形态——零变化）。
+type ExtConfig struct {
+	// OperatorSandbox python_execute 内层执行面沙箱（D2 缝隙①收口：nil =
+	// 直执行现状〔localOperator 的路径圈禁仍在〕；注入后与 run_command
+	// 同一围栏语义，require 姿态后端不可用拒跑）。
+	OperatorSandbox  *sandbox.Policy
+	OperatorProvider sandbox.Provider // nil = sandbox.OSProvider
+}
+
 // NewExtTools 组装 eino-ext 全部工具（一个不少；失败容忍降级），经 Bridge
 // 入契约面。root = commandline 工作区根（.tmp 同级临时域，惰性创建；
 // EINO_OPERATOR_ROOT 显式覆盖——运维需要更大面时的显式让渡）。
 // mcp = MCP 接入来源（应用配置解出；空则 env 后备）。
 func NewExtTools(root string, mcp MCPSpec) []contract.Tool {
+	return NewExtToolsWith(root, mcp, ExtConfig{})
+}
+
+// NewExtToolsWith 全量装配面（NewExtTools 的带配置版——python_execute
+// 沙箱经 ExtConfig 注入，其余同款）。
+func NewExtToolsWith(root string, mcp MCPSpec, cfg ExtConfig) []contract.Tool {
 	ctx := context.Background()
 	var out []tool.BaseTool
 
@@ -246,8 +279,10 @@ func NewExtTools(root string, mcp MCPSpec) []contract.Tool {
 		out = append(out, ts...)
 	}
 	if t, err := wikipedia.NewTool(ctx, &wikipedia.Config{
-		BaseURL:   "https://zh.wikipedia.org/w/api.php",
-		UserAgent: "github.com/jumeng/einox/0.1 (team-wiki-agent)",
+		// 语言站点属部署决策不进基座默认（2026-09-22 边界审查：此前硬编码
+		// 中文站+产品名 UA 属产品迁移残留）；缺省英文站 = 上游组件默认。
+		BaseURL:   envOr("EINO_WIKIPEDIA_BASEURL", "https://en.wikipedia.org/w/api.php"),
+		UserAgent: "github.com/jumeng/einox/0.1",
 	}); err == nil {
 		out = append(out, t)
 	}
@@ -280,7 +315,7 @@ func NewExtTools(root string, mcp MCPSpec) []contract.Tool {
 		root = filepath.Join(os.TempDir(), "einox-workspace") // 无数据目录兜底
 	}
 	root, _ = filepath.Abs(root)
-	op := &localOperator{root: root} // 根不随组装落盘，惰性建（见 RunCommand）
+	op := &localOperator{root: root, sb: cfg.OperatorSandbox, sp: cfg.OperatorProvider} // 根不随组装落盘，惰性建（见 RunCommand）
 	if py, err := commandline.NewPyExecutor(ctx, &commandline.PyExecutorConfig{Operator: op}); err == nil {
 		out = append(out, py)
 	}

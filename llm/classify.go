@@ -63,7 +63,7 @@ func Classify(err error) Classified {
 		if s, _ := oe.Code.(string); s == "context_length_exceeded" {
 			return Classified{Code: CodeOverflow, Message: "上下文超出模型窗口——本轮输入过长"}
 		}
-		if c, ok := classifyBizCode(oe.Code); ok {
+		if c, ok := classifyBizCode(oe.HTTPStatusCode, oe.Code); ok {
 			return c
 		}
 		return classifyStatus(oe.HTTPStatusCode, detailOf(oe.Message, oe.Error()))
@@ -156,10 +156,16 @@ func classifyStatus(status int, detail string) Classified {
 // classifyBizCode openai 协议错误体业务码细化（机制厂家中立，码表是数据）：
 // 状态码 ≠ 处置语义的缺口只有一处——智谱（GLM）429 族里混着「等待救不活」
 // 的欠费/套餐类码（docs.bigmodel.cn 错误码表 1113/1309/1311/1314/1315，均
-// 429），状态码面会误报频率上限并空转重试。未命中码一律走状态码面——码表
-// 按厂家编号空间天然不冲突（DeepSeek/OpenAI 的 error.code 是语义字符串）。
+// 429），状态码面会误报频率上限并空转重试。未命中码一律走状态码面。
+// 联合校验（2026-09-22 边界审查）：码表仅对 HTTP 429 生效——应用可自定义
+// ProviderSpec 接任意 openai 兼容端点（网关透传数字码），纯数字字符串码
+// 不再「天然只可能来自智谱」，状态码联合把误伤面缩到「非智谱服务在 429
+// 里恰好返回这五个数字字符串码」；误判方向是致命停机不降级，从严值得。
 // 码仅取字符串形态（智谱文档示例形态；数值码不细化退状态码面）。
-func classifyBizCode(code any) (Classified, bool) {
+func classifyBizCode(status int, code any) (Classified, bool) {
+	if status != 429 {
+		return Classified{}, false
+	}
 	s, _ := code.(string)
 	if s == "" {
 		return Classified{}, false

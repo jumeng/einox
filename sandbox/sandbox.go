@@ -73,6 +73,11 @@ type Policy struct {
 	ExcludeSlashTmp   bool     // true = /tmp 不计入可写根（默认 false = 计入）
 	ProtectedReadOnly []string // 可写区内希望只读的子路径（Landlock 做不到——探测报 partial）
 	Limit             Limit
+	// Backend 后端姿态（D1 接线，真源 §1.3/§10.4）：require = 后端不可用即拒跑
+	// （fail-closed，拒跑点见 sandbox.BuildCommand）；缺省零值与 auto 同义
+	// （探测落位，不可用裸跑 + 告警——既有行为零变化）。off 无字段语义
+	//（不沙箱 = Policy 为 nil）。
+	Backend Backend
 }
 
 // Provider 沙箱后端面：把 Policy 翻译成一次命令的执行参数（默认 OSProvider
@@ -99,10 +104,17 @@ type Provider interface {
 func (p *Policy) Validate() error {
 	switch p.Mode {
 	case ModeReadOnly, ModeWorkspaceWrite, ModeDangerFullAccess:
-		return nil
 	default:
 		return fmt.Errorf("sandbox: 未知模式 %q（可用 read-only/workspace-write/danger-full-access）", p.Mode)
 	}
+	switch p.Backend {
+	case "", BackendAuto, BackendRequire: // 零值 = auto 同义（既有行为零变化）
+	case BackendOff:
+		return fmt.Errorf("sandbox: Backend=off 无字段语义（不沙箱 = Policy 为 nil）")
+	default:
+		return fmt.Errorf("sandbox: 未知后端姿态 %q（可用 auto/require，缺省 auto）", p.Backend)
+	}
+	return nil
 }
 
 // Status 后端探测结果：三态 + partial 时的未覆盖项清单 + 诊断说明。

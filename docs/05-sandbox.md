@@ -25,10 +25,10 @@
 | | macOS | Seatbelt（`/usr/bin/sandbox-exec` 固定路径，不查 PATH） |
 | | Windows | restricted token（剥特权 + 可写根 ACL 授权） |
 | | 其余 Linux 架构 | 运行时桩如实报 `unusable`（seccomp 号表仅 x86_64 / aarch64）——不做编译期拦截，保证仓库在任意平台可构建 |
-| `sandbox.DockerProvider` | 任意平台，一次性容器（`--rm`） | 策略翻译为容器参数：`read-only` → `--read-only` + 工作区 `:ro`；`workspace-write` → 容器根 `--read-only` + 工作区 `:rw`；断网 → `--network none`；`WritableRoots` 同路径 `:rw` 挂载；`ProtectedReadOnly` 以嵌套 `:ro` bind 遮蔽（Landlock 做不到的回盖此处可治）；`NProc` → `--pids-limit`（`FileSizeMB` 无等价面不翻译）。默认镜像 `alpine:3.20`，需工具链请自备镜像。**daemon 不可达 = 容器隔离失效**：按姿态降级（当前接线 auto——命令裸跑于宿主进程环境 + 启动告警；需要 fail-closed 拒跑的部署待 require 姿态接线） |
+| `sandbox.DockerProvider` | 任意平台，一次性容器（`--rm`） | 策略翻译为容器参数：`read-only` → `--read-only` + 工作区 `:ro`；`workspace-write` → 容器根 `--read-only` + 工作区 `:rw`；断网 → `--network none`；`WritableRoots` 同路径 `:rw` 挂载；`ProtectedReadOnly` 以嵌套 `:ro` bind 遮蔽（Landlock 做不到的回盖此处可治）；`NProc` → `--pids-limit`（`FileSizeMB` 无等价面不翻译）。默认镜像 `alpine:3.20`，需工具链请自备镜像。**daemon 不可达 = 容器隔离失效**：按姿态降级（`Policy.Backend` 缺省 auto——命令裸跑于宿主进程环境 + 启动告警；`Backend: BackendRequire` 即 fail-closed 拒跑，2026-09-22 D1 接线） |
 | 自定义后端 | 经 `engine.Options.SandboxProvider` 注入 | gVisor / 微 VM 等按 `sandbox.Provider` 接口实现（两个方法：`Wrap` 构造执行参数、`Probe` 上报状态） |
 
-`Provider` 契约：**Probe 必须如实上报**（执行力三态，见下节）；**只许收紧不许放宽**——翻译结果宽于策略即实现违约；本次不可沙箱时返回 nil argv，由调用方按后端姿态降级。已知缝隙：Docker 一次性形态下杀 docker CLI 进程不终止容器（`--rm` 缓解，长任务仍有残留窗口），随每会话长驻容器形态治理。
+`Provider` 契约：**Probe 必须如实上报**（执行力三态，见下节）；**只许收紧不许放宽**——翻译结果宽于策略即实现违约；本次不可沙箱时返回 nil argv，由调用方（`sandbox.BuildCommand` 单点）按 `Policy.Backend` 姿态降级：auto 裸跑已告警、require 拒跑。已知缝隙：Docker 一次性形态下杀 docker CLI 进程不终止容器（`--rm` 缓解，长任务仍有残留窗口），随每会话长驻容器形态治理。
 
 ## re-exec 哨兵协议
 
@@ -51,7 +51,7 @@ Landlock / seccomp / rlimit 必须在 fork 后、exec 前于子进程内施加�
 - **partial**：生效但有未覆盖项，`Uncovered` 逐项列出（如 Linux 旧内核 ABI 缺位：ABI<2 缺 `refer`、<3 缺 `truncate`、<5 缺 `ioctl-dev`——不在受控位集的访问即不受围栏，上报口径偏保守）；
 - **unusable**：后端不可用（未挂钩 / 内核不支持 / 平台未实现），`Detail` 给出诊断。
 
-探测不可用时的处置由 `Backend` 姿态决定：`off`（nil 即此态，默认不沙箱）/ `auto`（不可用则裸跑 + 启动告警——不允许隐式 fail-closed）/ `require`（不可用即拒跑，fail-closed）。
+探测不可用时的处置由 `Policy.Backend` 姿态决定（2026-09-22 D1 接线，缺省零值 = auto 零变化）：`off`（无字段语义——不沙箱 = `Policy` 为 nil，默认态）/ `auto`（不可用则裸跑 + 启动告警——不允许隐式 fail-closed）/ `require`（不可用即拒跑，fail-closed——拒跑点两处：Wrap 返回 nil argv 与 OS 后端 token 构造失败，单点收口在 `sandbox.BuildCommand`，`run_command` 与 `python_execute` 内层面共用）。
 
 ## 部署前提
 
