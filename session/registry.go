@@ -132,6 +132,8 @@ type sessionRecord struct {
 	PendingKind   string                 `json:"pending_kind,omitempty"`   // 挂起类型（approval|ask|plan——续表/超时翻转动作分叉）
 	PendingDue    time.Time              `json:"pending_due,omitempty"`    // 挂起截止（超时兜底跨重启——内存计时器随进程丢）
 	PendingItems  []string               `json:"pending_items,omitempty"`  // 合并决议卡项标识清单（重启续接——超时批量拒/决议覆盖校验依据）
+	PendingTools  map[string]string      `json:"pending_tools,omitempty"`  // 挂起项 item_id→工具名（重启续接——Always 决议授权解析）
+	WriteGrants   []string               `json:"write_grants,omitempty"`   // 会话域写授权工具集（重启续接——「本会话内始终允许」不因重启失效）
 	TaskGranted   bool                   `json:"task_granted,omitempty"`   // plan 档任务期写授权（重启续接——批准的计划不因进程重启失效）
 	PlanSeq       int                    `json:"plan_seq,omitempty"`       // 计划文档序号末号（新提交接续递增）
 	Participants  []contract.Participant `json:"participants,omitempty"`   // T6 参与者名册（Fork/Side/Reattach 继承）
@@ -147,6 +149,33 @@ func fileChangesCopy(s *Session) map[string]fileChange {
 	for k, v := range s.fileChanges {
 		out[k] = v
 	}
+	return out
+}
+
+// pendingToolsCopy 挂起项工具映射拷贝（持锁块内调用）。
+func pendingToolsCopy(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// writeGrantsOf 授权集合落盘形态（有序——记录确定性）。
+func writeGrantsOf(m map[string]bool) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		if v {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -193,6 +222,8 @@ func recordOf(s *Session) sessionRecord {
 		Pending:      append([]QueuedMsg(nil), s.pendingMsgs...),
 		PendingAppID: s.curAppID, PendingKind: s.pendingKind, PendingDue: s.pendingDue,
 		PendingItems:  append([]string(nil), s.pendingItems...),
+		PendingTools:  pendingToolsCopy(s.pendingTools),
+		WriteGrants:   writeGrantsOf(s.writeGrants),
 		PendingTarget: s.pendingTarget,
 		Participants:  append([]contract.Participant(nil), s.participants...),
 		TaskGranted:   s.taskGrant, PlanSeq: s.planSeq,
@@ -497,6 +528,12 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 		s.curAppID, s.pendingKind, s.pendingDue = rec.PendingAppID, rec.PendingKind, rec.PendingDue
 		s.pendingItems = append([]string(nil), rec.PendingItems...) // 合并决议项清单续接（超时批量拒依据）
 		s.pendingTarget = rec.PendingTarget                         // T6 路由目标续接
+		if len(rec.PendingTools) > 0 {
+			s.pendingTools = make(map[string]string, len(rec.PendingTools))
+			for k, v := range rec.PendingTools {
+				s.pendingTools[k] = v
+			}
+		}
 	}
 	// seq 接续末位事件 ID——不接续则新事件 ID 从 1 重来，与恢复事件撞号
 	if n := len(s.Events); n > 0 {
@@ -505,6 +542,12 @@ func (r *Registry) Reattach(owner, sid string) *Session {
 	s.history = rec.Messages
 	s.pendingMsgs = append([]QueuedMsg(nil), rec.Pending...) // 排队消息续接（下一轮前置带回）
 	s.taskGrant, s.planSeq = rec.TaskGranted, rec.PlanSeq    // 任务期授权/计划序号续接（执行中重启不丢授权）
+	if len(rec.WriteGrants) > 0 {                            // 会话域写授权续接（「本会话内始终允许」——用户显式让渡不因重启失效）
+		s.writeGrants = make(map[string]bool, len(rec.WriteGrants))
+		for _, t := range rec.WriteGrants {
+			s.writeGrants[t] = true
+		}
+	}
 	r.mu.Lock()
 	r.sessions[s.SID] = s
 	r.mu.Unlock()

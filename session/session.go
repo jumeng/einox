@@ -124,10 +124,12 @@ type Session struct {
 	pendingKind   string                 // 挂起类型（"approval"|"ask"——跨重启续表用）
 	pendingDue    time.Time              // 挂起截止时刻（超时兜底跨重启——进程重启丢内存计时器）
 	pendingItems  []string               // 合并决议卡项标识清单（kind=approval；超时批量拒与端点覆盖校验依据）
+	pendingTools  map[string]string      // 挂起项 item_id→工具名（Always 决议登记会话域写授权的 fail-closed 边界——只能授权本次问过的）
 	pendingTarget string                 // T6 挂起审批路由目标（ApprovalRouter 裁决；guard 校验依据——随挂起清空）
 	askDecision   *AskDecision           // ask_user 作答（answer 端点写入；Resume 消费后清空）
 	turnGrant     bool                   // plan 档本轮写授权（首个批准置位；session_end 清零）
 	taskGrant     bool                   // plan 档任务期写授权（计划批准置位；任务成功收尾/换档/新计划提交清零）
+	writeGrants   map[string]bool        // 会话域写授权（「本会话内始终允许」决议档——Always 批准置位；用户显式让渡，不随轮次/换档清理，随会话记录持久）
 	planSeq       int                    // 计划文档序号（submit_plan 自增取号；修订递增留痕）
 	turnUserMsg   string                 // 轮次用户消息（跨审批中断保留）
 	turnFirst     bool                   // 本轮开始前历史无 assistant（首轮标记——Run 入口判定跨挂起保留，U-1；不落盘：跨进程恢复的挂起轮零值回退，与标题输入 turnUserMsg 同降级）
@@ -363,6 +365,7 @@ func (s *Session) SetPendingApproval(appID string) {
 		s.pendingKind = ""
 		s.pendingDue = time.Time{}
 		s.pendingItems = nil
+		s.pendingTools = nil
 		s.pendingTarget = "" // T6 挂起清空同步清目标（防陈旧目标误拒下一卡）
 	}
 	s.UpdatedAt = time.Now()
@@ -406,6 +409,7 @@ func (s *Session) ClearPendingIf(appID string) ([]string, bool) {
 	s.pendingKind = ""
 	s.pendingDue = time.Time{}
 	s.pendingItems = nil
+	s.pendingTools = nil
 	s.UpdatedAt = time.Now()
 	return items, true
 }
@@ -450,6 +454,26 @@ func (s *Session) PendingItems() []string {
 	return append([]string(nil), s.pendingItems...)
 }
 
+// SetPendingItemTools 挂起项 item_id→工具名登记（pump 聚合发卡后调用——
+// Always 决议登记会话域写授权的 fail-closed 边界：决议端点只能授权本次
+// 挂起实际涉及的工具；与 SetPendingItems 同生命周期）。
+func (s *Session) SetPendingItemTools(tools map[string]string) {
+	s.mu.Lock()
+	s.pendingTools = tools
+	s.mu.Unlock()
+}
+
+// PendingItemTools 挂起项工具映射快照（approve 端点 Always 授权解析用）。
+func (s *Session) PendingItemTools() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]string, len(s.pendingTools))
+	for k, v := range s.pendingTools {
+		out[k] = v
+	}
+	return out
+}
+
 // GrantTurn plan 档本轮写授权置位 / 查询 / 清零。
 func (s *Session) GrantTurn()        { s.mu.Lock(); s.turnGrant = true; s.mu.Unlock() }
 func (s *Session) TurnGranted() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.turnGrant }
@@ -461,6 +485,28 @@ func (s *Session) ClearTurnGrant()   { s.mu.Lock(); s.turnGrant = false; s.mu.Un
 func (s *Session) GrantTask()        { s.mu.Lock(); s.taskGrant = true; s.mu.Unlock() }
 func (s *Session) TaskGranted() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.taskGrant }
 func (s *Session) ClearTaskGrant()   { s.mu.Lock(); s.taskGrant = false; s.mu.Unlock() }
+
+// GrantWrite 会话域写授权置位（approve 端点 Always 决议调用——fail-closed：
+// 决议链解析自挂起项工具映射，本方法不做名单校验，开放面信任决议端点纪律）。
+// WriteGranted 命中查询（hitl needsApproval consult）。授权是用户显式让渡，
+// 不随轮次/换档清理（与 turnGrant/taskGrant 的清理语义刻意不同）。
+func (s *Session) GrantWrite(tool string) {
+	if tool == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.writeGrants == nil {
+		s.writeGrants = map[string]bool{}
+	}
+	s.writeGrants[tool] = true
+	s.mu.Unlock()
+}
+
+func (s *Session) WriteGranted(tool string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeGrants[tool]
+}
 
 // NextPlanSeq 计划文档序号自增取号（提交即定号——文档先落盘再挂起，跨重启
 // 由 sessionRecord.PlanSeq 接续）。
@@ -712,6 +758,7 @@ func (s *Session) BeginResume() bool {
 	s.pendingKind = ""
 	s.pendingDue = time.Time{}
 	s.pendingItems = nil
+	s.pendingTools = nil
 	s.State = StateRunning
 	s.runDone = make(chan struct{})
 	s.UpdatedAt = time.Now()

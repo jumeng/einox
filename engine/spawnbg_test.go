@@ -392,6 +392,7 @@ func (*decisionSourceStub) TurnGranted() bool                                 { 
 func (*decisionSourceStub) GrantTurn()                                        {}
 func (*decisionSourceStub) TaskGranted() bool                                 { return false }
 func (*decisionSourceStub) GrantTask()                                        {}
+func (*decisionSourceStub) WriteGranted(string) bool                          { return false }
 
 // TestBgNotifyBudgetGuard B-8：连续自续预算 3——第 4 次只入队不自续；用户
 // 消息消费恢复预算。

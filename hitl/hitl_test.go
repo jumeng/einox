@@ -117,6 +117,7 @@ type stubDecisions struct {
 	decision  *contract.ApprovalDecision
 	byItem    map[string]*contract.ApprovalDecision // 合并决议多槽（item_id → 决议）
 	resumeCtx bool
+	grants    map[string]bool // 会话域写授权（Always 决议档）
 }
 
 func (d *stubDecisions) TakeDecision() *contract.ApprovalDecision { return d.decision }
@@ -135,6 +136,8 @@ func (d *stubDecisions) GrantTurn()        { d.granted = true }
 func (d *stubDecisions) TaskGranted() bool { return d.taskGrant }
 func (d *stubDecisions) GrantTask()        { d.taskGrant = true }
 
+func (d *stubDecisions) WriteGranted(tool string) bool { return d.grants[tool] }
+
 func TestManualModeSuspends(t *testing.T) {
 	stub := &countingTool{name: "create_issues"}
 	src := &stubDecisions{}
@@ -150,6 +153,31 @@ func TestManualModeSuspends(t *testing.T) {
 	}
 	if stub.calls != 0 {
 		t.Fatal("挂起时不应执行内层")
+	}
+}
+
+// TestWriteGrantSkipsSuspension 会话域写授权（「本会话内始终允许」决议档）：
+// manual/plan 档授权命中即免审直通——needsApproval consult（设计件
+// findings/2026-09-23-session-write-grant-design.md）。
+func TestWriteGrantSkipsSuspension(t *testing.T) {
+	// manual：授权命中直通
+	stub := &countingTool{name: "create_issues"}
+	granted := &stubDecisions{grants: map[string]bool{"create_issues": true}}
+	wrapped := WrapTools([]contract.Tool{stub}, granted, "manual", testConfig())
+	if _, err := wrapped[0].Invoke(context.Background(), json.RawMessage(`{}`)); err != nil || stub.calls != 1 {
+		t.Fatalf("manual 授权命中应直通：%v calls=%d", err, stub.calls)
+	}
+	// plan：授权与轮/任务期授权并列（任一在即免审）
+	stub2 := &countingTool{name: "create_issues"}
+	wrapped2 := WrapTools([]contract.Tool{stub2}, granted, "plan", testConfig())
+	if _, err := wrapped2[0].Invoke(context.Background(), json.RawMessage(`{}`)); err != nil || stub2.calls != 1 {
+		t.Fatalf("plan 授权命中应直通：%v calls=%d", err, stub2.calls)
+	}
+	// 授权不覆盖其他写工具（data_sync 在写名单内但未授权）
+	stub3 := &countingTool{name: "data_sync"}
+	wrapped3 := WrapTools([]contract.Tool{stub3}, granted, "manual", testConfig())
+	if _, err := wrapped3[0].Invoke(context.Background(), json.RawMessage(`{}`)); err == nil {
+		t.Fatal("未授权工具仍应挂起")
 	}
 }
 

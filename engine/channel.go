@@ -420,6 +420,28 @@ func (g *ChannelGateway) Approve(sid, itemID string, decider *contract.Participa
 	} else {
 		s.SetDecision(d)
 	}
+	// 「本会话内始终允许」决议档（findings/2026-09-23-session-write-grant-design.md）：
+	// 批准且勾选 Always → 对本次挂起涉及的工具登记会话域写授权（fail-closed——
+	// 工具集解析自挂起项映射，只能授权「刚刚问过的」；plan 卡不适用——批准即
+	// 任务期授权；拒绝时 Always 忽略）。
+	if kind == "approval" && d.Approve && d.Always {
+		tools := s.PendingItemTools()
+		grants := map[string]bool{}
+		if itemID != "" {
+			if t := tools[itemID]; t != "" {
+				grants[t] = true
+			}
+		} else {
+			for _, t := range tools {
+				if t != "" {
+					grants[t] = true
+				}
+			}
+		}
+		for t := range grants {
+			s.GrantWrite(t)
+		}
+	}
 	if kind == "plan" {
 		s.RecordPlanDecision(appID, d)
 	} else {

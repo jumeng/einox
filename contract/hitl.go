@@ -14,9 +14,13 @@ const (
 
 // ApprovalDecision 审批决议（应用 approve 端点 → 审批包装工具消费）。
 // Decider*（T6）：谁决议的——空 = 单用户零变化；落 DecisionOut 回执可审计。
+// Always：批准并勾选「本会话内始终允许」——决议端点据此对本次挂起涉及的工具
+// 登记会话域写授权（findings/2026-09-23-session-write-grant-design.md），后续
+// 同工具写调用免逐次审批；拒绝时忽略。零值 = 既有单次语义。
 type ApprovalDecision struct {
 	Approve     bool
 	Reason      string
+	Always      bool
 	DeciderID   string
 	DeciderName string
 }

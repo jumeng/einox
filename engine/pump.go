@@ -273,8 +273,10 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 					}
 				}
 				ids := make([]string, 0, len(cards))
+				tools := make(map[string]string, len(cards)) // item_id→工具（Always 决议授权解析）
 				for _, c := range cards {
 					ids = append(ids, c.ItemID)
+					tools[c.ItemID] = c.Tool
 					req.Items = append(req.Items, contract.ApprovalItem{
 						ItemID: c.ItemID, Tool: c.Tool, Action: c.Action, Plan: c.Plan,
 						PlanMode: c.PlanMode, Note: c.Note, Diff: c.Diff,
@@ -286,7 +288,8 @@ func (m *Manager) pump(s *session.Session, iter *adk.AsyncIterator[*adk.AgentEve
 				req.PlanMode, req.Note, req.Diff = cards[0].PlanMode, cards[0].Note, cards[0].Diff
 				m.emit(s, fn, contract.EvApprovalRequest, req)
 				s.SetPendingApproval(appID)
-				s.SetPendingItems(ids) // 超时批量拒 / 端点覆盖校验依据
+				s.SetPendingItems(ids)       // 超时批量拒 / 端点覆盖校验依据
+				s.SetPendingItemTools(tools) // Always 决议授权解析（fail-closed 边界）
 				return m.suspendTurn(s, acc, appID, timeoutAt, "approval")
 			}
 		}

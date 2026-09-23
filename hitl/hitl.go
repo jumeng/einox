@@ -76,7 +76,7 @@ func (c ApprovalConfig) IsWrite(name string) bool {
 }
 
 // DecisionSource 会话域决议源（approve 端点写入 → Resume 消费；plan 档
-// 本轮/任务期写授权跟随会话）。
+// 本轮/任务期写授权跟随会话；manual 档会话域写授权——Always 决议档）。
 type DecisionSource interface {
 	TakeDecision() *contract.ApprovalDecision
 	// TakeDecisionFor 合并决议多槽取用（H4-2：按挂起时生成的 item_id 领
@@ -86,6 +86,9 @@ type DecisionSource interface {
 	GrantTurn()
 	TaskGranted() bool
 	GrantTask()
+	// WriteGranted 会话域写授权命中（「本会话内始终允许」决议档——Always
+	// 批准登记；needsApproval consult，manual/plan 档免逐次审批）。
+	WriteGranted(tool string) bool
 }
 
 // approvalState 中断保存态（恢复时带回：原始调用参数 + 项标识 + 是否强制
@@ -119,15 +122,16 @@ type approvalTool struct {
 }
 
 // needsApproval 模式 × 授权判定（plan 档：本轮授权或任务期授权任一在即免审；
-// bg 档：后台子代理面——写工具 auto 语义直落，ArgsForce 不走本判定）。
+// manual 档：会话域写授权（Always 决议档）命中即免审；bg 档：后台子代理面——
+// 写工具 auto 语义直落，ArgsForce 不走本判定）。
 func (a *approvalTool) needsApproval() bool {
 	switch a.mode {
 	case "auto", "bg":
 		return false
 	case "plan":
-		return !a.src.TurnGranted() && !a.src.TaskGranted()
+		return !a.src.TurnGranted() && !a.src.TaskGranted() && !a.src.WriteGranted(a.opName)
 	default: // manual
-		return true
+		return !a.src.WriteGranted(a.opName)
 	}
 }
 
