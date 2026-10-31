@@ -10,6 +10,11 @@ const (
 	ModeManual = "manual" // 写工具逐次审批
 	ModePlan   = "plan"   // 计划模式：submit_plan 出计划文档供审，批准授权任务期全部写（taskGrant）
 	ModeAuto   = "auto"   // 裸传直落（硬红线仍在工具实现内代码级拒绝）
+	// ModeGuarded 自主模式（guarded，第五档——ZCode 对位「Ask when there's
+	// risk」）：写工具直落，仅 GuardedRisk 风险集命中仍挂起审批；ArgsForce
+	// 优先级不变（判断权在人的写值任何档不豁免）。风险判定内容归应用装配
+	// 注入（findings/2026-10-31-hitl-guarded-mode-design.md）。
+	ModeGuarded = "guarded"
 )
 
 // ApprovalDecision 审批决议（应用 approve 端点 → 审批包装工具消费）。

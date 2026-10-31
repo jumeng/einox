@@ -52,6 +52,11 @@ type ApprovalConfig struct {
 	ForceNotes map[string]string
 	// Actions 工具动作名（审批卡直白话；缺省回退工具名）。
 	Actions map[string]string
+	// GuardedRisk guarded 档参数级风险判定（可选，第五档；nil = guarded
+	// 退化为 auto 语义零新增行为）。键为工具名，值为参数级判定——命中即在
+	// guarded 档挂起审批（「自主模式，有风险时询问」）；名单与判定内容由
+	// 应用装配注入，基座只持机制（同 ArgsForce 纪律）。
+	GuardedRisk map[string]func(args string) bool
 }
 
 // ActionNameOf 工具动作名（缺省回退工具名）。
@@ -123,10 +128,16 @@ type approvalTool struct {
 
 // needsApproval 模式 × 授权判定（plan 档：本轮授权或任务期授权任一在即免审；
 // manual 档：会话域写授权（Always 决议档）命中即免审；bg 档：后台子代理面——
-// 写工具 auto 语义直落，ArgsForce 不走本判定）。
-func (a *approvalTool) needsApproval() bool {
+// 写工具 auto 语义直落，ArgsForce 不走本判定；guarded 档：仅 GuardedRisk
+// 风险集命中挂起，其余直落（nil 判定表 = 退化 auto））。
+func (a *approvalTool) needsApproval(args string) bool {
 	switch a.mode {
 	case "auto", "bg":
+		return false
+	case "guarded":
+		if f := a.cfg.GuardedRisk[a.opName]; f != nil {
+			return f(args)
+		}
 		return false
 	case "plan":
 		return !a.src.TurnGranted() && !a.src.TaskGranted() && !a.src.WriteGranted(a.opName)
@@ -156,7 +167,7 @@ func (a *approvalTool) Invoke(ctx context.Context, args json.RawMessage) (json.R
 		}
 	} else if skip := a.cfg.ArgsSkip[a.opName]; skip != nil && skip(string(args)) {
 		return a.t.Invoke(ctx, args) // 参数级只读豁免（view 类）
-	} else if !a.needsApproval() {
+	} else if !a.needsApproval(string(args)) {
 		return a.t.Invoke(ctx, args)
 	}
 
