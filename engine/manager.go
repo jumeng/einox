@@ -159,6 +159,10 @@ type Options struct {
 	// 读面不受影响；nil/空 = 不设区零变化。命令面 run_command 不在此栏——
 	// 命令内容不可静态可靠解析，写的硬约束归 Sandbox 档位）。
 	WorkspaceProtect []string
+	// WorkspaceMounts 工作区顶层挂载区名（宿主自建越区挂载——project//visualize/
+	// 类;注入 applypatch/fsutil 写面圈禁放行。findings/2026-11-01-workspace-
+	// mounts-design.md;nil=零变化)。
+	WorkspaceMounts []string
 	// SubAgents spawn 子代理装配（H2；nil = 不装配 spawn）。
 	SubAgents *SubAgentsConfig
 	// Topology 确定性场景多 agent 拓扑（H5：supervisor/deep 官方 prebuilt 接线；
@@ -309,6 +313,9 @@ func NewManager(reg *session.Registry, opt Options) (*Manager, error) {
 			return nil, fmt.Errorf("engine: 未知的会话域工具族 %q（可用 %s/%s/%s/%s/%s/%s）",
 				f, FamilyTodo, FamilyAsk, FamilyPlan, FamilyFS, FamilyCmd, FamilyPatch)
 		}
+	}
+	if err := tools.CheckTopDirs("WorkspaceMounts", opt.WorkspaceMounts); err != nil {
+		return nil, err
 	}
 	if err := tools.CheckTopDirs("WorkspaceKeep", opt.WorkspaceKeep); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)

@@ -16,9 +16,39 @@ import (
 // 放行。已知残留窗口：检查通过后到实际打开前并发创建的 symlink 不在此拦
 // （并发对抗需 openat/O_NOFOLLOW 级改造，超出库基座形态——沙箱是第二层）。
 func ResolveUnder(root, p string) (string, error) {
+	return ResolveUnderMounts(root, p, nil)
+}
+
+// ResolveUnderMounts 带挂载区放行的圈禁解析（findings/2026-11-01-workspace-
+// mounts-design.md）：mounts=宿主自建顶层挂载名清单（链接目标由应用受控、
+// 有意越区——工作区 project//visualize/ 类）。p 首段命中挂载名时：剩余路径
+// 词法圈禁（禁 ../绝对），符号链接圈禁改为相对挂载点真身——挂载点本身允许
+// 越区，目标内部的进一步越区链接仍拒（fail-closed 不变）。mounts 为空时与
+// ResolveUnder 逐字节同义。返回词法路径（不解析链接，同 ResolveUnder）。
+func ResolveUnderMounts(root, p string, mounts []string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" || p == "." {
 		return root, nil
+	}
+	if len(mounts) > 0 {
+		first := strings.SplitN(strings.TrimPrefix(filepath.ToSlash(p), "./"), "/", 2)[0]
+		for _, m := range mounts {
+			if m == first {
+				rest := strings.TrimPrefix(strings.TrimPrefix(filepath.ToSlash(p), first), "/")
+				mountPoint := filepath.Join(root, first)
+				if rest == "" || rest == "." {
+					return mountPoint, nil // 挂载点本身
+				}
+				a := filepath.Join(mountPoint, filepath.FromSlash(rest))
+				if !underRoot(mountPoint, a) {
+					return "", fmt.Errorf("路径越界（仅限挂载区 %s 内）：%s", mountPoint, p)
+				}
+				if !symlinkContained(mountPoint, a) {
+					return "", fmt.Errorf("路径经符号链接越出挂载区（%s 内含指向区外的链接）：%s", mountPoint, p)
+				}
+				return a, nil
+			}
+		}
 	}
 	a := filepath.Join(root, filepath.FromSlash(p))
 	if !underRoot(root, a) {

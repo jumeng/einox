@@ -38,6 +38,9 @@ type Config struct {
 	Spill       string
 	ProtectDirs []string
 	ReadState   ReadState
+	// Mounts 顶层挂载区名（WorkspaceMounts 装配缝——宿主自建越区挂载放行,
+	// findings/2026-11-01-workspace-mounts-design.md;nil=零变化)。
+	Mounts []string
 }
 
 // NewTools 构造五件（读面：直过审批；写面：edit_file/delete_file 走审批）。
@@ -52,7 +55,10 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &helper{root: root, protect: cfg.ProtectDirs, state: cfg.ReadState}
+	if err := tools.CheckTopDirs("Mounts", cfg.Mounts); err != nil {
+		return nil, err
+	}
+	h := &helper{root: root, protect: cfg.ProtectDirs, mounts: cfg.Mounts, state: cfg.ReadState}
 	if h.state == nil {
 		h.state = NewReadState() // 内建轮内实例：单轮内 read→edit 门完整，跨轮由挂接方注入
 	}
@@ -99,6 +105,7 @@ type helper struct {
 	root    string
 	spill   string    // reduction 外置域（空 = spill/ 前缀同样走工作区解析）
 	protect []string  // 写保护区顶层目录名（空 = delete_file/edit_file 不设栏）
+	mounts  []string  // 顶层挂载区名（WorkspaceMounts 装配缝;nil=零变化）
 	state   ReadState // 读取状态锚（edit_file 防盲改门 + read_file unchanged 短路）
 }
 
@@ -110,7 +117,7 @@ func (h *helper) resolve(p string) (string, error) {
 	if h.spill != "" && (p == "spill" || strings.HasPrefix(p, "spill/")) {
 		return tools.ResolveUnder(h.spill, strings.TrimPrefix(strings.TrimPrefix(p, "spill"), "/"))
 	}
-	return tools.ResolveUnder(h.root, p)
+	return tools.ResolveUnderMounts(h.root, p, h.mounts)
 }
 
 // maxLineWidth 单行截断放宽上限（外置工具结果多为单行 JSON，3 万字符量级

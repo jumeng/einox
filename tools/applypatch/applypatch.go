@@ -26,6 +26,9 @@ import (
 type Config struct {
 	Root        string
 	ProtectDirs []string
+	// Mounts 顶层挂载区名（WorkspaceMounts 装配缝——宿主自建越区挂载放行,
+	// findings/2026-11-01-workspace-mounts-design.md;nil=零变化)。
+	Mounts []string
 }
 
 // ---- 补丁模型（parser 产物） ----
@@ -458,16 +461,25 @@ type FileResult struct {
 // Apply 应用补丁到 root 工作区（事务性：解析与计算全部成功才落盘）。
 // 返回逐文件摘要。
 func Apply(root string, ops []FileOp) ([]FileResult, error) {
-	return applyOps(root, ops, false)
+	return applyOps(root, ops, false, nil)
+}
+
+// ApplyMounts 带挂载区放行的应用（WorkspaceMounts 装配缝;nil=与 Apply 同义）。
+func ApplyMounts(root string, ops []FileOp, mounts []string) ([]FileResult, error) {
+	return applyOps(root, ops, false, mounts)
 }
 
 // ApplyDry 预检形态（C6）：解析/定位/冲突计算全跑、落盘段跳过——dry-run
 // 参数的消费面（补丁可应用性预验，模型自纠回路省一轮写审批）。
 func ApplyDry(root string, ops []FileOp) ([]FileResult, error) {
-	return applyOps(root, ops, true)
+	return applyOps(root, ops, true, nil)
 }
 
-func applyOps(root string, ops []FileOp, dry bool) ([]FileResult, error) {
+func applyDry(root string, ops []FileOp, mounts []string) ([]FileResult, error) {
+	return applyOps(root, ops, true, mounts)
+}
+
+func applyOps(root string, ops []FileOp, dry bool, mounts []string) ([]FileResult, error) {
 	type staged struct {
 		op      FileOp
 		content string
@@ -477,7 +489,7 @@ func applyOps(root string, ops []FileOp, dry bool) ([]FileResult, error) {
 	var results []FileResult
 
 	for _, op := range ops {
-		full, err := safeJoin(root, op.Path)
+		full, err := safeJoinM(root, op.Path, mounts)
 		if err != nil {
 			return nil, err
 		}
@@ -519,7 +531,7 @@ func applyOps(root string, ops []FileOp, dry bool) ([]FileResult, error) {
 			path := op.Path
 			action := "updated"
 			if op.MoveTo != "" {
-				moveFull, err := safeJoin(root, op.MoveTo)
+				moveFull, err := safeJoinM(root, op.MoveTo, mounts)
 				if err != nil {
 					return nil, err
 				}
@@ -544,7 +556,7 @@ func applyOps(root string, ops []FileOp, dry bool) ([]FileResult, error) {
 	// 文件落盘之前；新建目录留档，失败时回滚回收）
 	var createdDirs []string
 	for _, w := range writes {
-		full, err := safeJoin(root, w.op.Path)
+		full, err := safeJoinM(root, w.op.Path, mounts)
 		if err != nil {
 			return nil, err
 		}
@@ -569,7 +581,7 @@ func applyOps(root string, ops []FileOp, dry bool) ([]FileResult, error) {
 		return nil, fmt.Errorf(format, a...)
 	}
 	for _, w := range writes {
-		full, err := safeJoin(root, w.op.Path)
+		full, err := safeJoinM(root, w.op.Path, mounts)
 		if err != nil {
 			return nil, err
 		}
@@ -583,7 +595,7 @@ func applyOps(root string, ops []FileOp, dry bool) ([]FileResult, error) {
 		}
 	}
 	for _, d := range deletes {
-		full, err := safeJoin(root, d.Path)
+		full, err := safeJoinM(root, d.Path, mounts)
 		if err != nil {
 			return nil, err
 		}
@@ -710,11 +722,15 @@ func diffCount(old, new []string) (added, removed int) {
 // a..b.txt，同一文件 fsutil 可读而补丁拒改）；绝对路径显式拒保留（补丁语义：
 // 路径须相对工作区——静默改写进根内更迷惑）。
 func safeJoin(root, p string) (string, error) {
+	return safeJoinM(root, p, nil)
+}
+
+func safeJoinM(root, p string, mounts []string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
 		return "", fmt.Errorf("路径必须为工作区内相对路径：%s", p)
 	}
-	return tools.ResolveUnder(root, p)
+	return tools.ResolveUnderMounts(root, p, mounts)
 }
 
 // ---- 工具面 ----
@@ -732,6 +748,9 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 	if err := tools.CheckTopDirs("ProtectDirs", cfg.ProtectDirs); err != nil {
 		return nil, err
 	}
+	if err := tools.CheckTopDirs("Mounts", cfg.Mounts); err != nil {
+		return nil, err
+	}
 	root, err := filepath.Abs(cfg.Root)
 	if err != nil {
 		return nil, err
@@ -746,9 +765,8 @@ func NewTools(cfg Config) ([]contract.Tool, error) {
 			if p, dir := protectedTarget(ops, cfg.ProtectDirs); dir != "" {
 				return map[string]any{"ok": false, "error": "补丁未应用（整体回退）：" + p + " 位于写保护区 " + dir + " 内，禁止增改删——请在保护区外工作"}, nil
 			}
-			applier := Apply
-			if in.DryRun {
-				applier = ApplyDry
+			applier := func(r string, ops []FileOp) ([]FileResult, error) {
+				return applyOps(r, ops, in.DryRun, cfg.Mounts)
 			}
 			results, err := applier(root, ops)
 			if err != nil {
