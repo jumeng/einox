@@ -2,6 +2,34 @@
 
 einox 版本日志。v0.5.0 起发布时实时维护；更早四版于 2026-09-07 回溯补档——v0.2.0/v0.4.0 为 tag 注文原文搬运（零转述失真），v0.1.1/v0.3.0 为区间提交提炼（无版本说明原文，细节以 git log 区间为准）。
 
+## v0.6.0（2026-11-02）
+
+自 v0.5.1（2026-09-07）以来 17 个提交、89 文件 +8599/−471。版本主线：**HITL 审批面四缝扩展 + dsh/zcode 两系能力吸收收口 + eino 地基升 v0.9.19**。无破坏性变更、无 Go API 签名变化——全部为 Options/ApprovalConfig 可选装配缝与 additive 契约字段（nil/缺省 = 零行为变化）；einox-examples 自 v0.5.1 直升本版构建+vet 零改动验收在案。
+
+### 新增：HITL/审批域（应用 einox-work P14–P17 消费；设计件均在 findings/）
+
+- **会话域写授权——「本会话内始终允许」决议档**（1198fa3，findings/2026-09-23-session-write-grant-design.md）：`ApprovalDecision.Always` + session 写授权集（GrantWrite/WriteGranted，随会话记录持久）+ 挂起项工具映射（授权边界 = 只能授权「刚问过的」工具，fail-closed）。
+- **guarded 第五档**（73f0331，findings/2026-10-31-hitl-guarded-mode-design.md）：`contract.ModeGuarded` + `ApprovalConfig.GuardedRisk`（参数级风险判定，命中挂起其余直落；ZCode「自主模式，有风险时询问」对位）。
+- **WorkspaceMounts 挂载区写放行**（9357fc7，findings/2026-11-01-workspace-mounts-design.md）：ResolveUnder 对宿主自建越区挂载区放行（区内越区/穿越仍拒），applypatch/fsutil 透传——工作区产图与项目会话写轮缺口闭合。
+- **批 A′ 三缝**（10d74e2，findings/2026-11-01-hitl-batch-a-prime-design.md）：①edit 第四档（`ModeEdit`+`EditPass` 名单直落、其余回落 manual 逐审；上游 checkEditMode 提取）②D15 提问到点自动续行（`Options.AskAutoResolve`——CAS 登记 SetAskDecisionIf/记 ask_decision(Decider=auto)/Resume；闭包到点求值=实时生效；`DefaultAskResolve`=Options[0]/空文本）③D11 外部持久授权咨询（`Options.WriteGrantSource(SessionBrief, tool)`，会话域授权之后挂起之前，fail-closed；ArgsForce 不被豁免）。
+
+### 新增：引擎/工具面（dsh T14–T21 增量与 zcode 能力吸收）
+
+- **goal 域最小核**（e35ddb8，C4）：持久完成目标 + goal_change 事件 + direct-human 门控 + 模型工具面（get/create/update_goal）+ GoalDriver 自动续行装配位。
+- **auto 档模型评审门**（04c3cfe，C5）：`Options.AutoReview`——reviewer 模型分级裁决（low/medium+allow 放行、deny 挂起、high 硬拒、失败 fail-closed）。
+- **子代理 inbox 控制面**（d115fb0，C6/T19）：队列所有权围栏 + 渠道排队控制四件套（Approve/Answer/ EditQueue/RemoveQueue）+ 后台任务个体控制（Tasks/TaskOutput/StopTask 查询缝随 a5a95de 落 runcommand）。
+- **模型切换历史注入 + 系统提示生命周期**（5e210a5，C1/N1）：model_change 事件 + 上轮/本轮模型差异注记（只进模型投影面）；LastInstruction/AnchorInstruction 锚定语义。
+- **图片预算省略决策事件化**（4a2c741，C3）：occurrence 粘性选择集，vision 驱逐决策可审计。
+- **MCP resources/instructions 面**（1fd2a36，N2/T21）：资源三共享工具 + server instructions 指令段（空 provider 零成本）。
+- **read→spill→read 防环**（1c27522，C2/T15）：read_file 进 TruncExcludeTools。
+- **zcode 能力吸收四批**（2382900）：基座边界审查 + 编程工具链主干 + GoalDriver + 沙箱姿态 + 快照/超时转后台。
+
+### 依赖与修复
+
+- **eino v0.9.13 → v0.9.19**（f9f959b）：checkpoint 修复三连（嵌套流 backport/边界流转换器/嵌套载荷去重——adk 挂起恢复与子代理嵌套即目标路径）+ summarization 出错路径 nil ctx 修复 + agentsmd 单文件上限；eino-ext tool 族九模块快照随批同步。纯 drop-in 零源码改动，全量门禁+交叉编译亲跑验证。
+- **DeepSeek 预置目录对齐 V4.1 世代**（1a4dd42）：v4-flash 收敛/输出上限 384K/v4-pro 多模态标记；旧名服务端仍路由零兼容动作。
+- **两枚 -race 高压 flake 根因修复**：首轮标题在途注册窗口（f2ff084，MarkTitleFlight 前移建立 happens-before，注入延迟 3/3 红→绿实证）；后台通知自续链测试 join 收口（b463b3d，waitBgQuiescent 自然收口，五测试 150 连跑零失败）。
+
 ## v0.5.1（2026-09-07）
 
 自 v0.5.0（2026-09-06）以来 13 个提交、22 文件 +1461/−11（含 CHANGELOG 维护两笔）。版本主线：**装配知识层（einox-assemble）+ 挂起轮首轮标题修复**。无破坏性变更、无 Go API 变化——消费者零改动升级。
