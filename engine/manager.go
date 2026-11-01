@@ -146,6 +146,20 @@ type Options struct {
 	// 挂起卡有路由目标且决议带决议者时校验一致性，mismatch 拒绝（fail-closed
 	// ——防越权点批）。
 	DecisionGuard func(targetID, deciderID string) error
+	// WriteGrantSource 外部持久授权咨询（D11 项目级审批规则，nil = 零变化
+	// fail-closed）：needsApproval 在会话域授权（writeGrants/turnGrant/
+	// taskGrant）之后、回落挂起之前咨询——true 放行本次。规则存储/匹配/UI
+	// 归应用（approval-rules.json 形态基座不可见）；装配期经 wrapFace 绑定
+	// SessionBrief 成会话级闭包注入 hitl.ApprovalConfig（与 Tools/Instruction
+	// 的 per-session 绑定同式）。
+	WriteGrantSource func(sess SessionBrief, tool string) bool
+	// AskAutoResolve 提问到点自动续行（D15，nil = 现行取消分支零变化）：
+	// ask_user 挂起到点时以本次挂起的 AskReq 载荷调用——返回非 nil 决议即
+	// 登记（Decider 缺省补 "auto"）+ ask_decision 落流 + Resume 续流；返回
+	// nil（应用侧开关关闭/该问已被 snooze）回落既有取消分支。**实时生效**：
+	// 闭包到点才被调用（非装配期求值），设置翻转经原子值即时生效——应用闭
+	// 包应读当前设置而非捕获快照。默认决议语义见 DefaultAskResolve。
+	AskAutoResolve func(req contract.AskReq) *contract.AskDecision
 	// WorkspaceRoot 会话工作区根（用户域 workspaces/<sid>——WorkspaceKeep
 	// 声明的持久子区跨任务保留、其余一轮一清；惰性创建）。
 	WorkspaceRoot func(owner, sid string) string
@@ -989,7 +1003,7 @@ func (m *Manager) wrapFace(ctx context.Context, ts []contract.Tool, s *session.S
 			ts[i] = &outputContractTool{Tool: t, oc: oc}
 		}
 	}
-	wrapped := hitl.WrapTools(ts, s, mode, m.Opt.Approval)
+	wrapped := hitl.WrapTools(ts, s, mode, m.approvalCfgOf(s))
 	if review && m.Opt.AutoReview != nil { // C5：auto 档评审门（主面专用）
 		rev, err := m.newReviewerModel(ctx, s)
 		if err != nil {
@@ -1003,6 +1017,20 @@ func (m *Manager) wrapFace(ctx context.Context, ts []contract.Tool, s *session.S
 		}
 	}
 	return einoext.Adapt(m.hookFace(wrapped, m.briefOf(s))), nil
+}
+
+// approvalCfgOf 会话级审批配置（D11 外部授权咨询的 SessionBrief 绑定）：
+// WriteGrantSource 在场时把 Options 的会话概要形态经 briefOf 绑成闭包
+// 注入配置副本——WrapTools 每轮重建，闭包绑定天然随会话；其余字段零拷贝
+// 共享（map 只读面）。nil 缝 = 原样直传（零变化）。
+func (m *Manager) approvalCfgOf(s *session.Session) hitl.ApprovalConfig {
+	cfg := m.Opt.Approval
+	if m.Opt.WriteGrantSource == nil {
+		return cfg
+	}
+	brief, grants := m.briefOf(s), m.Opt.WriteGrantSource
+	cfg.WriteGrantSource = func(tool string) bool { return grants(brief, tool) }
+	return cfg
 }
 
 // imageCapableOf 会话模型是否声明图片输入（read_image 工具门禁——当前路由

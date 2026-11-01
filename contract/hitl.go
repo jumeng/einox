@@ -15,6 +15,12 @@ const (
 	// 优先级不变（判断权在人的写值任何档不豁免）。风险判定内容归应用装配
 	// 注入（findings/2026-10-31-hitl-guarded-mode-design.md）。
 	ModeGuarded = "guarded"
+	// ModeEdit 编辑档（edit，第四档——ZCode 对位「Edit automatically」）：
+	// EditPass 名单内的文件编辑类写工具直落，其余写工具回落 manual 逐审
+	// （上游 checkEditMode：permissionName=edit 且 sideEffectScope=workspace
+	// → 放行，其余 build 档逐审）。名单内容归应用风险规则表装配注入；nil
+	// = edit 退化 manual 零变化（findings/2026-11-01-hitl-batch-a-prime-design.md）。
+	ModeEdit = "edit"
 )
 
 // ApprovalDecision 审批决议（应用 approve 端点 → 审批包装工具消费）。

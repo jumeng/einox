@@ -5,6 +5,7 @@ package engine
 // 消耗模型轮次；checkpoint 保留——续聊时模型从工具拒绝/未作答反馈中自然知晓）。
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"sync"
@@ -75,7 +76,8 @@ func (m *Manager) startApprovalTimer(s *session.Session, appID string, timeoutAt
 	approvalMu.Unlock()
 }
 
-// expirePending 挂起超时动作（到点仍挂起且无决议 → 拒绝/取消 + 终态落盘）。
+// expirePending 挂起超时动作（到点仍挂起且无决议 → 拒绝/取消 + 终态落盘；
+// kind=ask 且 AskAutoResolve 在场 → 自动续行替代取消，见 autoResolveAsk）。
 // 决议已到达即让位：应用端点（决议登记 → Persist → BeginRun → go Resume）
 // 与停表之间存在窗口——Resume 的 stopApprovalTimer 是停表唯一入口，决议
 // 登记本身不清挂起态；窗口内到点若照常执行，会把用户刚 approve 的决议覆盖
@@ -84,6 +86,9 @@ func (m *Manager) startApprovalTimer(s *session.Session, appID string, timeoutAt
 func (m *Manager) expirePending(s *session.Session, appID, kind string) {
 	if s.Stopped() {
 		return // 已删除
+	}
+	if kind == "ask" && m.autoResolveAsk(s, appID) {
+		return // D15 自动续行已接管（决议 CAS 成功 + Resume 已派发）
 	}
 	// 条件原子清挂起：锁内校验「仍挂起该 appID 且无决议」才清（项清单随清
 	// 返回）——闭合「守卫检查→清挂起」两步间的 TOCTOU（用户 approve 与超时
@@ -118,6 +123,78 @@ func (m *Manager) expirePending(s *session.Session, appID, kind string) {
 	}
 	s.Record(contract.EvApprovalTimeout, map[string]string{"approval_id": appID, "reason": "审批超时，自动拒绝"})
 	m.finishOf(s)(session.StateEnded)
+}
+
+// autoResolveAsk 提问到点自动续行（D15；Options.AskAutoResolve 在场才有面，
+// 返回 true = 已接管本次到点）。判定序（每步失败回落既有取消分支，fail-closed）：
+// 回溯挂起 AskReq 载荷 → 闭包求值（nil = 应用侧关闭/已 snooze）→ CAS 登记
+// （SetAskDecisionIf：并发人工作答抢先即让位）→ ask_decision 落流（Decider
+// 缺省补 "auto"，可审计）→ Persist（决议先落盘再续流，与 Channels().Answer
+// 同序）→ go Resume（BeginResume 原子消费挂起态；失败路径与 Answer 同构）。
+func (m *Manager) autoResolveAsk(s *session.Session, askID string) bool {
+	if m.Opt.AskAutoResolve == nil {
+		return false
+	}
+	req, ok := lastAskReqOf(s, askID)
+	if !ok {
+		return false // 事件流缺提问载荷（不喂闭包空载荷）
+	}
+	d := m.Opt.AskAutoResolve(req)
+	if d == nil {
+		return false // 应用侧开关关闭/该问已 snooze → 取消分支
+	}
+	if d.DeciderID == "" {
+		d.DeciderID, d.DeciderName = "auto", "auto" // Decider=auto（回执可审计）
+	}
+	if !s.SetAskDecisionIf(askID, *d) {
+		return false // 人工作答已抢先到达（让位；Answer 的 Resume 将消费）
+	}
+	s.RecordAskDecision(askID, *d)
+	m.reg.Persist(s)
+	go m.Resume(context.Background(), s, noopEmit)
+	return true
+}
+
+// lastAskReqOf 回溯本次挂起的提问载荷（事件流倒序找 ask_id 匹配的
+// ask_user_request）。两种 Data 形态：在役会话 = contract.AskReq 原生；
+// 重启 Reattach 后 = JSON 回读的 map 形态（经 marshal/unmarshal 还原）。
+func lastAskReqOf(s *session.Session, askID string) (contract.AskReq, bool) {
+	evs := s.SnapshotEvents()
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Event != contract.EvAskRequest {
+			continue
+		}
+		switch d := evs[i].Data.(type) {
+		case contract.AskReq:
+			if d.AskID == askID {
+				return d, true
+			}
+		case map[string]any:
+			if id, _ := d["ask_id"].(string); id != askID {
+				continue
+			}
+			raw, err := json.Marshal(d)
+			if err != nil {
+				continue
+			}
+			var req contract.AskReq
+			if json.Unmarshal(raw, &req) == nil {
+				return req, true
+			}
+		}
+	}
+	return contract.AskReq{}, false
+}
+
+// DefaultAskResolve 提问自动续行的默认决议（上游语义基座化，D15）：
+// 决议 = Options[0]（首选项 value；上游「自动选默认答案续行」），无选项取
+// 空文本（AllowFreeText 问句的默认答案即空）。应用闭包 = 开关读数 + 本助手
+// 两行即得标准行为；需自定义决议形态（如登记差异口径）也可不用本助手。
+func DefaultAskResolve(req contract.AskReq) *contract.AskDecision {
+	if len(req.Options) > 0 {
+		return &contract.AskDecision{Answers: []string{req.Options[0].Value}}
+	}
+	return &contract.AskDecision{FreeText: ""}
 }
 
 // stopApprovalTimer 决议到达即停表（approve/reject 抢先于超时）。

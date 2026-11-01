@@ -8,6 +8,8 @@
 //	写工具 plan     未授权时首个写调用中断（批准授本轮）；submit_plan 计划获
 //	               批后任务期全免（taskGrant——批准计划 = 一口气执行）
 //	写工具 auto     裸传直落（用户显式让渡；硬红线仍在工具实现内代码级拒绝）
+//	写工具 guarded  GuardedRisk 风险集命中挂起（逐次），其余直落（第五档）
+//	写工具 edit     EditPass 名单直落（编辑免审），其余回落 manual 逐审（第四档）
 //	ArgsForce 命中  无视模式与授权状态一律中断（判断权在人的写值，如 status=
 //	               完成——人批准一代执行，任何模式/授权不豁免）
 //
@@ -57,6 +59,20 @@ type ApprovalConfig struct {
 	// guarded 档挂起审批（「自主模式，有风险时询问」）；名单与判定内容由
 	// 应用装配注入，基座只持机制（同 ArgsForce 纪律）。
 	GuardedRisk map[string]func(args string) bool
+	// EditPass edit 档直落名单（可选，第四档；nil 或未命中 = edit 回落
+	// manual 逐审零新增行为）。键为工具名——命中即 edit 档免审直落（上游
+	// 「编辑免审、其余逐审」语义：判定是工具级静态属性，无参数维度，故为
+	// map 而非 func）。文件编辑类工具集由应用风险规则表编译注入，基座只持
+	// 机制；ArgsForce 优先级不变（判断权在人的写值 edit 档不豁免）。
+	EditPass map[string]bool
+	// WriteGrantSource 外部持久授权咨询（可选，D11 项目级审批规则；nil =
+	// 零变化，fail-closed）。在会话域授权（writeGrants/turnGrant/
+	// taskGrant）之后、回落挂起之前咨询——返回 true 放行本次（manual/
+	// plan/edit 回落分支），false 照常挂起。规则存储/前缀匹配/UI 归应用
+	// （approval-rules.json 形态基座不可见）；engine 装配期把 Options 的
+	// SessionBrief 形态绑成会话级闭包注入此字段。ArgsForce 不被本缝豁免
+	// （强制判定先于 needsApproval，既有不变量）。
+	WriteGrantSource func(tool string) bool
 }
 
 // ActionNameOf 工具动作名（缺省回退工具名）。
@@ -129,7 +145,9 @@ type approvalTool struct {
 // needsApproval 模式 × 授权判定（plan 档：本轮授权或任务期授权任一在即免审；
 // manual 档：会话域写授权（Always 决议档）命中即免审；bg 档：后台子代理面——
 // 写工具 auto 语义直落，ArgsForce 不走本判定；guarded 档：仅 GuardedRisk
-// 风险集命中挂起，其余直落（nil 判定表 = 退化 auto））。
+// 风险集命中挂起，其余直落（nil 判定表 = 退化 auto）；edit 档：EditPass
+// 名单直落，其余回落 manual 逐审；WriteGrantSource 外部授权咨询在会话域
+// 授权之后、挂起之前（manual/plan/edit 回落分支；auto/guarded/bg 无判定面）。
 func (a *approvalTool) needsApproval(args string) bool {
 	switch a.mode {
 	case "auto", "bg":
@@ -140,10 +158,23 @@ func (a *approvalTool) needsApproval(args string) bool {
 		}
 		return false
 	case "plan":
-		return !a.src.TurnGranted() && !a.src.TaskGranted() && !a.src.WriteGranted(a.opName)
+		return !a.src.TurnGranted() && !a.src.TaskGranted() &&
+			!a.src.WriteGranted(a.opName) && !a.externalGrant()
+	case "edit":
+		if a.cfg.EditPass[a.opName] {
+			return false // 编辑免审（EditPass 名单直落）
+		}
+		return !a.src.WriteGranted(a.opName) && !a.externalGrant() // 其余回落 manual 逐审
 	default: // manual
-		return !a.src.WriteGranted(a.opName)
+		return !a.src.WriteGranted(a.opName) && !a.externalGrant()
 	}
+}
+
+// externalGrant 外部持久授权咨询（D11 项目级审批规则）：nil = 无此缝
+// （fail-closed 短路 false = 照常挂起）。调用点在会话域授权未命中之后——
+// 已有会话授权时不咨询（无信息泄露面，也省一次回调）。
+func (a *approvalTool) externalGrant() bool {
+	return a.cfg.WriteGrantSource != nil && a.cfg.WriteGrantSource(a.opName)
 }
 
 func (a *approvalTool) Info() *contract.ToolInfo { return a.t.Info() }

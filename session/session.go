@@ -160,6 +160,20 @@ func (s *Session) TakeAskDecision() *AskDecision {
 	return d
 }
 
+// SetAskDecisionIf 原子登记自动作答（D15 提问到点自动续行）：仍挂起该 ask
+// 且无作答才写——抢到锁者赢（并发人工作答/Answer 端点抢先即让位，与
+// ClearPendingIf 同 TOCTOU 纪律：守卫检查与登记一步完成）。false = 未登记
+// （已答/挂起已换/无挂起），调用方回落既有取消分支。
+func (s *Session) SetAskDecisionIf(askID string, d AskDecision) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.curAppID == "" || s.curAppID != askID || s.askDecision != nil {
+		return false
+	}
+	s.askDecision = &d
+	return true
+}
+
 // RecordAskDecision 作答回执落流（answer 端点在 SetAskDecision 后调用——
 // 切回/回放重建提问卡终态的真源）。
 func (s *Session) RecordAskDecision(askID string, d AskDecision) {
