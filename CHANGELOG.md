@@ -2,6 +2,19 @@
 
 einox 版本日志。v0.5.0 起发布时实时维护；更早四版于 2026-09-07 回溯补档——v0.2.0/v0.4.0 为 tag 注文原文搬运（零转述失真），v0.1.1/v0.3.0 为区间提交提炼（无版本说明原文，细节以 git log 区间为准）。
 
+## v0.7.0（2026-11-22）
+
+自 v0.6.0（2026-11-02）以来 2 个提交。版本主线：**eino 地基升 v0.9.23 + llm 契约类型再出口——三层架构红线（eino → einox → einox-work，严禁跨层调用）落地：应用侧 eino 契约消费唯一入口收敛到 `llm` 包**。纯 drop-in 升级 + additive 别名面，零行为变化、零既有 API 改动。
+
+### 新增：契约再出口（llm/types.go）
+
+- 应用（einox-work）消费的模型/消息/流式契约以类型别名再出口，与 eino 原类型同型零运行时成本：`Message`/`AgenticMessage`/`ToolCall`/`FunctionCall`/`RoleType`/`Assistant`（常量）/`AssistantMessage`/`StreamReader`/`StreamWriter`/`Pipe`（泛型函数薄包装）/`BaseModel`（泛型别名，密封联合 `*Message | *AgenticMessage`）/`ChatModel`（=`model.BaseChatModel` 特化）/`Option`——应用摘除 eino 直依赖的唯一适配面，后续 eino 升版只需保证此面稳定。
+
+### 依赖
+
+- **eino v0.9.19 → v0.9.23**：v0.9.21 model usage 暴露缓存写入 token（einox-work 批 B/D5 缓存命中明细的数据源）/ v0.9.22 媒体消息 provider 文件引用 / v0.9.23 流式 tool call 拼接保留 `Extra` + nil map panic 修复 / v0.9.20 adk 取消工具流 checkpoint 保留。官方无破坏性变更标注，drop-in 零源码改动，全量门禁 `go build ./... && go test ./... -race`（24 包）亲跑验证。
+- **eino-ext**：claude v0.1.25 → v0.1.26；tool 族十模块快照 2026-09-16 → 2026-11-19（openai v0.1.13 已最新不动）。
+
 ## v0.6.0（2026-11-02）
 
 自 v0.5.1（2026-09-07）以来 17 个提交、89 文件 +8599/−471。版本主线：**HITL 审批面四缝扩展 + dsh/zcode 两系能力吸收收口 + eino 地基升 v0.9.19**。无破坏性变更、无 Go API 签名变化——全部为 Options/ApprovalConfig 可选装配缝与 additive 契约字段（nil/缺省 = 零行为变化）；einox-examples 自 v0.5.1 直升本版构建+vet 零改动验收在案。
