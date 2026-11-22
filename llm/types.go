@@ -27,8 +27,14 @@ type FunctionCall = schema.FunctionCall
 // RoleType 消息角色类型。
 type RoleType = schema.RoleType
 
-// Assistant assistant 角色(模型侧消息)。
-const Assistant = schema.Assistant
+// 角色常量(批 B 补齐:记录/投影面按角色分类消息——Tool 角色的字符串内容
+// 即工具输出,应用侧投影需要判别)。
+const (
+	System    = schema.System
+	User      = schema.User
+	Assistant = schema.Assistant
+	Tool      = schema.Tool
+)
 
 // AssistantMessage 构造 assistant 角色消息(等价直通)。
 var AssistantMessage = schema.AssistantMessage
