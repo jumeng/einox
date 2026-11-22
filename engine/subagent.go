@@ -66,6 +66,15 @@ var spawnSchemaTokens = sync.OnceValue(func() int {
 	return estTokens(string(b))
 })
 
+// spawnSchemaChars 同形字符数（批 B/D5——breakdown chars 口径）。
+var spawnSchemaChars = sync.OnceValue(func() int {
+	b, err := json.Marshal(spawnParam)
+	if err != nil {
+		return 0
+	}
+	return estChars(string(b))
+})
+
 // subEventsOn 全量转发档开启判定（装配态；pump 内事件过滤用）。
 func (m *Manager) subEventsOn() bool {
 	return m.Opt.SubAgents != nil && m.Opt.SubAgents.EmitEvents
@@ -237,7 +246,7 @@ func (m *Manager) newSpawnTool(ctx context.Context, s *session.Session, cfg *Sub
 	if key == "" {
 		key = ms.Model
 	}
-	subCM, subSpec, err := m.newShapedModel(ctx, key, ms.Effort, "子代理模型")
+	subCM, subSpec, err := m.newShapedModel(ctx, s, key, ms.Effort, "子代理模型", llm.FaceSubagent)
 	if err != nil {
 		return nil, err
 	}

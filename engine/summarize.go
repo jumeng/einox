@@ -34,6 +34,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
 
@@ -81,7 +82,7 @@ const summarizeInstruction = `请把以上完整对话历史压缩为一份结�
 // newSummarizationMiddleware 摘要中间件 + 清窗兜底包装（window>0 才装配）。
 func (m *Manager) newSummarizationMiddleware(ctx context.Context, s *session.Session, window int) (adk.ChatModelAgentMiddleware, error) {
 	ms := s.ModelSnapshot() // 持锁快照（PUT settings 随时写并发）
-	cm, _, err := m.newShapedModel(ctx, ms.Model, ms.Effort, "摘要模型")
+	cm, _, err := m.newShapedModel(ctx, s, ms.Model, ms.Effort, "摘要模型", llm.FaceSummary)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +186,7 @@ func (m *Manager) summarizerFailover(ctx context.Context, s *session.Session, wi
 	if len(m.Opt.SummarizerFallbackModels) == 0 {
 		return nil, nil
 	}
-	chain, err := m.modelChain(ctx, s, m.Opt.SummarizerFallbackModels, "摘要")
+	chain, err := m.modelChain(ctx, s, m.Opt.SummarizerFallbackModels, "摘要", llm.FaceSummary)
 	if err != nil {
 		return nil, err
 	}

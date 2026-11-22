@@ -27,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/jumeng/einox/contract"
+	"github.com/jumeng/einox/llm"
 	"github.com/jumeng/einox/session"
 )
 
@@ -72,7 +73,7 @@ func (m *Manager) newTopologySub(ctx context.Context, s *session.Session, spec S
 	if key == "" {
 		key = ms.Model
 	}
-	cm, tspec, err := m.newShapedModel(ctx, key, ms.Effort, "拓扑子代理模型")
+	cm, tspec, err := m.newShapedModel(ctx, s, key, ms.Effort, "拓扑子代理模型", llm.FaceTopology)
 	if err != nil {
 		return nil, err
 	}

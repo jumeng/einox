@@ -25,13 +25,14 @@ import (
 )
 
 // modelChain 复合键清单 → 同链包装模型链（newShapedModel 逐键构造——包装序
-// 与主模型/摘要模型/子面同源单点，出站整形口径不因降级漂移）。摘要侧
-// （summarize.go）与主模型侧共用。
-func (m *Manager) modelChain(ctx context.Context, s *session.Session, keys []string, what string) ([]model.BaseModel[*schema.Message], error) {
-	effort := s.ModelSnapshot().Effort // 持锁快照（PUT settings 随时写并发）
+// 与主模型/摘要模型/子面同源单点，出站整形口径不因降级漂移；face=宿主面
+// 透传——降级是同面备选，记录归属宿主 face）。摘要侧（summarize.go）与主
+// 模型侧共用。
+func (m *Manager) modelChain(ctx context.Context, s *session.Session, keys []string, what, face string) ([]model.BaseModel[*schema.Message], error) {
+	effort := s.ModelSnapshot().Effort // 持锁快照（PUT settings 并发写）
 	chain := make([]model.BaseModel[*schema.Message], 0, len(keys))
 	for _, key := range keys {
-		cm, _, err := m.newShapedModel(ctx, key, effort, what+"降级")
+		cm, _, err := m.newShapedModel(ctx, s, key, effort, what+"降级", face)
 		if err != nil {
 			return nil, err
 		}
@@ -45,7 +46,7 @@ func (m *Manager) modelFailoverConfig(ctx context.Context, s *session.Session) *
 	if len(m.Opt.FallbackModels) == 0 {
 		return nil
 	}
-	chain, err := m.modelChain(ctx, s, m.Opt.FallbackModels, "主模型")
+	chain, err := m.modelChain(ctx, s, m.Opt.FallbackModels, "主模型", llm.FaceMain)
 	if err != nil {
 		// 装配期探测失败不阻断运行（清单错配降级即失效，主模型照常重试兜底）
 		// ——harness_note 通知卡留痕；与「单端点装配配了也白配」同一宽容语义。

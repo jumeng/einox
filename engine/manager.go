@@ -109,6 +109,14 @@ type Options struct {
 	Hooks *ToolHooks
 	// NewModel 模型构造口（缺省生产构造 llm.NewChatModel；测试注入假模型）。
 	NewModel llm.ModelFactory
+	// ModelRecorder 模型调用记录器构造（批 B——D16 留存/D6 轨迹/D7 网络记录/
+	// D5 缓存明细的基座地基；nil=零开销直通零行为变化）：每会话首触时以会话
+	// 概要调用一次（返回 nil 同样缓存=该会话恒直通）；六面（主/子代理/拓扑/
+	// 摘要/genTitle/auto review）统一挂 llm.NewRecordingModel 记录包装。子代理/
+	// 拓扑共享父会话实例（face 区分——对齐上游「子调用落父 model-io」）。
+	// 实现自行保证并发安全；投递 panic 由包装器兜底不影响模型路径。机制见
+	// findings/2026-11-22-model-io-recorder-design.md。
+	ModelRecorder func(sess SessionBrief) llm.ModelRecorder
 	// ImageResolve 图片引用解析（文档仓库路径 → 字节+MIME；nil = 图片不可用——
 	// 含图请求即错误面。vision 包装在模型调用边界消费）。
 	ImageResolve llm.ImageResolver
@@ -294,6 +302,11 @@ type Manager struct {
 	// 兜住共享工作区的跨会话并发）。条目随 Manager 生命周期（定长小结构，
 	// 量级 = 会话读过的文件数）。
 	readStates sync.Map // sid → *fsutil.ReadStateStore
+
+	// 模型记录域（批 B）：会话级 recorder 记忆化（Options.ModelRecorder 构造，
+	// recorderOf 单点；条目随 Manager 生命周期——量级 = 会话数）。
+	recMu sync.Mutex
+	recs  map[string]llm.ModelRecorder
 }
 
 // NewManager 构造（reg = 会话注册表；opt 必填项：Providers/Instruction/
@@ -777,12 +790,13 @@ func init() {
 }
 
 // newShapedModel 会话模型构造链（FindSpec → NewModel → Vision → HistoryShape
-// → SystemShape）——H1 出站整形口径（vision 图片引用解析/驱逐 + reasoning 剥离
-// + N1-b system 归一）在主模型/子代理/摘要/拓扑子/降级链五面同一包装序：单一
-// 实现防漂移（曾五处各写）。what = 错误文案主体（「模型」「子代理模型」「摘要
-// 模型」…）；effort 由调用方持快照传入（PUT settings 并发写——不裸读 s.Model）。
-// spec 回传（assemble 的 NoToolCalls 能力门控消费；其余调用方忽略）。
-func (m *Manager) newShapedModel(ctx context.Context, key, effort, what string) (model.BaseModel[*schema.Message], llm.ModelSpec, error) {
+// → SystemShape → Recording）——H1 出站整形口径（vision 图片引用解析/驱逐 +
+// reasoning 剥离 + N1-b system 归一）在主模型/子代理/摘要/拓扑子/降级链五面
+// 同一包装序：单一实现防漂移（曾五处各写）。what = 错误文案主体（「模型」
+// 「子代理模型」「摘要模型」…）；face = 记录面归属（批 B——llm.Face*；nil
+// 装配零行为变化）；effort 由调用方持快照传入（PUT settings 并发写——不裸读
+// s.Model）。spec 回传（assemble 的 NoToolCalls 能力门控消费；其余调用方忽略）。
+func (m *Manager) newShapedModel(ctx context.Context, s *session.Session, key, effort, what, face string) (model.BaseModel[*schema.Message], llm.ModelSpec, error) {
 	p, spec, ok := llm.FindSpec(m.Opt.Providers(), key)
 	if !ok {
 		return nil, spec, &configError{what + "不在可用清单内：" + key}
@@ -794,6 +808,7 @@ func (m *Manager) newShapedModel(ctx context.Context, key, effort, what string) 
 	cm = llm.NewVisionModel(cm, spec, m.Opt.ImageResolve)
 	cm = llm.NewHistoryShapeModel(cm, p.Kind)
 	cm = llm.NewSystemShapeModel(cm, spec.InHistorySystem)
+	cm = m.recordModel(s, cm, identityOf(p, spec, effort), face)
 	return cm, spec, nil
 }
 
@@ -808,7 +823,7 @@ func (m *Manager) assemble(ctx context.Context, s *session.Session) (*adk.ChatMo
 		return nil, nil, nil, &configError{"模型不在可用清单内：" + ms.Model + "（模型页检查配置）"}
 	}
 	s.NoteModelCall(ms.Model) // 调用边界比对：与上次实际调用不同才落切换注记（选择器切换不落）
-	cm, spec, err := m.newShapedModel(ctx, ms.Model, ms.Effort, "模型")
+	cm, spec, err := m.newShapedModel(ctx, s, ms.Model, ms.Effort, "模型", llm.FaceMain)
 	if err != nil {
 		return nil, nil, nil, err
 	}

@@ -378,6 +378,11 @@ type ErrorOut struct {
 // DeepSeek prompt_tokens 含缓存命中（= hit+miss，双口径展示归应用）。
 // SpawnID 非空 = 子代理面用量上卷（B2：子面无估算口径、四项为零；消费侧
 // 按 SpawnID 归组聚合，空 = 主面）。
+// cache_read/write（批 B/D5）：端点 PromptTokenDetails 透传（eino v0.9.21+
+// 暴露；基座 v0.7.0 升级注记在案）——cache_read=命中、cache_write=写入；
+// 命中率 = cache_read/prompt（DeepSeek 双口径同式成立：prompt=hit+miss）。
+// chars 三项（批 B/D5）：与 est_* 同源三段的字符数——上游 breakdown 条目为
+// chars 口径（token 估算不可逆），投影七源圆环用。
 type UsageOut struct {
 	PromptTokens     int    `json:"prompt_tokens"`
 	CompletionTokens int    `json:"completion_tokens"`
@@ -387,4 +392,10 @@ type UsageOut struct {
 	EstTools         int    `json:"est_tools"`
 	EstMessages      int    `json:"est_messages"`
 	EstSaved         int    `json:"est_saved,omitempty"` // 整形节省（原始-整形；0/负值省略）
+	// 批 B（D5）：缓存双字段+分类三段 chars（0=端点未报/无段，omitempty 省略）。
+	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
+	EstInstructionChars int `json:"est_instruction_chars,omitempty"`
+	EstToolsChars       int `json:"est_tools_chars,omitempty"`
+	EstMessagesChars    int `json:"est_messages_chars,omitempty"`
 }

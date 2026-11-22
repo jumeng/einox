@@ -90,7 +90,11 @@ func (m *Manager) newReviewerModel(ctx context.Context, s *session.Session) (mod
 	if cfg.NewModel != nil {
 		f = cfg.NewModel
 	}
-	return f(ctx, p, spec, "")
+	cm, err := f(ctx, p, spec, "")
+	if err != nil {
+		return nil, err
+	}
+	return m.recordModel(s, cm, identityOf(p, spec, ""), llm.FaceReview), nil // 批 B：review 面记录（直调逃逸汇点补挂）
 }
 
 // reviewerTool 评审包装（Info 透传——behaviors/白名单/toolsearch 寻址不变）。

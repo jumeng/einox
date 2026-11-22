@@ -7,6 +7,7 @@ package engine
 import (
 	"fmt"
 	"log"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
 
@@ -17,9 +18,14 @@ import (
 )
 
 // ctxEstimates 上下文分类估算（usage 事件的分类三项来源；每轮 Run 计算一次）。
-// messages = 整形后出站口径（H8-1）；saved = 原始口径与整形口径差额（整形
+// messages = 整形后出站口径（H8-1）；saved = 原始口径差额（整形
 // 节省注记——reasoning 剥离 + 空壳剔除的量化，不含 reduction 外置/摘要）。
-type ctxEstimates struct{ instruction, tools, messages, saved int }
+// *Chars 三项（批 B/D5）：同段字符数——上游 breakdown 条目 chars 口径，token
+// 估算不可逆故同点并算。
+type ctxEstimates struct {
+	instruction, tools, messages, saved         int
+	instructionChars, toolsChars, messagesChars int
+}
 
 // estTokens 无分词器的字符启发式：CJK ≈ 1 token/字，其余 ≈ 1/4。
 func estTokens(s string) int {
@@ -33,6 +39,9 @@ func estTokens(s string) int {
 	}
 	return cjk + other/4
 }
+
+// estChars 字符数（utf8 rune 计——CJK 1 字符=1，与 estTokens 同遍历面）。
+func estChars(s string) int { return utf8.RuneCountInString(s) }
 
 // msgTokenEst 单条消息 token 估算（文本 + reasoning + 角色开销 8 + tool_call
 // 名与参数）。触发判定（shapedTokenCounter）/usage 上报（estimateContext）/
@@ -49,6 +58,18 @@ func msgTokenEst(m *schema.Message) int {
 	return n
 }
 
+// msgCharEst 单条消息字符数（批 B/D5——与 msgTokenEst 同遍历面，不含角色开销）。
+func msgCharEst(m *schema.Message) int {
+	if m == nil {
+		return 0
+	}
+	n := estChars(msgTextOf(m)) + estChars(m.ReasoningContent)
+	for _, tc := range m.ToolCalls {
+		n += estChars(tc.Function.Name) + estChars(tc.Function.Arguments)
+	}
+	return n
+}
+
 // estimateContext 上下文分类估算（Run 在泵前已把本轮用户消息入史——中断保险，
 // CloneHistory 天然含本轮，无须另计）。工具面口径（B1 补齐）：业务面 + 进程件
 // + 会话域件 + recall + spawn，名+描述+参数 schema JSON 均计——会话域件恒
@@ -57,11 +78,13 @@ func msgTokenEst(m *schema.Message) int {
 func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
 	brief := m.briefOf(s)
 	est := ctxEstimates{instruction: estTokens(m.Opt.Instruction(brief))}
+	est.instructionChars = estChars(m.Opt.Instruction(brief))
 	dyn := dynamicToolSet(m.Opt.ToolSearchPolicy)
 	addFace := func(ts []contract.Tool) {
 		for _, t := range ts {
 			if info := t.Info(); info != nil && !dyn[info.Name] {
 				est.tools += estTokens(info.Name) + estTokens(info.Desc) + schemaTokens(info.Params)
+				est.toolsChars += estChars(info.Name) + estChars(info.Desc) + schemaChars(info.Params)
 			}
 		}
 	}
@@ -84,6 +107,7 @@ func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
 	}
 	if m.Opt.SubAgents != nil { // spawn 面走静态估算（构造工具本体需建模板 agent——重）
 		est.tools += estTokens(spawnToolName) + estTokens(spawnDesc) + spawnSchemaTokens()
+		est.toolsChars += estChars(spawnToolName) + estChars(spawnDesc) + spawnSchemaChars()
 	}
 	// H8-1 口径：est_messages = 整形后出站视图（真实发送面——与 H1 TokenCounter
 	// 同规则函数 llm.ShapeMessages）；saved = 原始口径差额（「整形节省」注记）。
@@ -91,6 +115,7 @@ func (m *Manager) estimateContext(s *session.Session) ctxEstimates {
 	shaped := llm.ShapeMessages(history)
 	for _, msg := range shaped {
 		est.messages += msgTokenEst(msg)
+		est.messagesChars += msgCharEst(msg)
 	}
 	for _, msg := range history {
 		est.saved += msgTokenEst(msg)
@@ -111,10 +136,22 @@ func schemaTokens(sc *contract.Schema) int {
 	return 0
 }
 
+// schemaChars 参数 schema 的 JSON 形字符数（批 B/D5——schemaTokens 同形）。
+func schemaChars(sc *contract.Schema) int {
+	if sc == nil {
+		return 0
+	}
+	if b, err := json.Marshal(sc); err == nil {
+		return estChars(string(b))
+	}
+	return 0
+}
+
 // emitUsage 流末 usage chunk 到达即发（每轮模型调用一次，react 多轮后值
 // 覆盖——最后一条 = 最终上下文规模）。Record 落事件流 → 刷新回放可恢复。
 // spawnID 非空 = 子代理面用量上卷（B2：估算四项传零——子面无 estimateContext；
-// 消费侧按 SpawnID 归组聚合）。
+// 消费侧按 SpawnID 归组聚合）。cache 双字段自 PromptTokenDetails 透传
+// （批 B/D5——端点不报即 0 省略）。
 func (m *Manager) emitUsage(s *session.Session, fn emitFn, u *schema.TokenUsage, est ctxEstimates, spawnID string) {
 	if u == nil || u.PromptTokens <= 0 {
 		return
@@ -124,7 +161,10 @@ func (m *Manager) emitUsage(s *session.Session, fn emitFn, u *schema.TokenUsage,
 		TotalTokens:    u.TotalTokens,
 		SpawnID:        spawnID,
 		EstInstruction: est.instruction, EstTools: est.tools, EstMessages: est.messages,
-		EstSaved: est.saved, // 整形节省注记（H8-1；原始-整形差额，>0 才有意义）
+		EstSaved:            est.saved, // 整形节省注记（H8-1；原始-整形差额，>0 才有意义）
+		CacheReadTokens:     u.PromptTokenDetails.CachedTokens,
+		CacheWriteTokens:    u.PromptTokenDetails.CacheWriteTokens,
+		EstInstructionChars: est.instructionChars, EstToolsChars: est.toolsChars, EstMessagesChars: est.messagesChars,
 	})
 }
 

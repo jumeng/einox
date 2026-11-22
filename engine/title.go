@@ -46,7 +46,8 @@ func (m *Manager) genTitle(s *session.Session, userMsg, assistant string) {
 	if err != nil {
 		return
 	}
-	speaker := "用户" // T6 说话人措辞（单用户零变化）
+	cm = m.recordModel(s, cm, identityOf(p, spec, "low"), llm.FaceTitle) // 批 B：title 面记录（直调逃逸汇点补挂）
+	speaker := "用户"                                                      // T6 说话人措辞（单用户零变化）
 	if a := s.TurnActorOf(); a != nil && a.Name != "" {
 		speaker = a.Name
 	}
