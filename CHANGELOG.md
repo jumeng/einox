@@ -2,6 +2,24 @@
 
 einox 版本日志。v0.5.0 起发布时实时维护；更早四版于 2026-09-07 回溯补档——v0.2.0/v0.4.0 为 tag 注文原文搬运（零转述失真），v0.1.1/v0.3.0 为区间提交提炼（无版本说明原文，细节以 git log 区间为准）。
 
+## v0.8.0（2026-11-22）
+
+自 v0.7.0 以来 2 个提交。版本主线：**模型调用记录缝（批 B——einox-work D16 留存/D6 轨迹/D7 网络记录/D5 缓存明细的基座地基）**。纯 additive：`Options.ModelRecorder` 可选装配缝 + `llm` 记录包装器 + `UsageOut` 增补字段，nil/缺省 = 零行为变化、零既有 API 改动（设计件 findings/2026-11-22-model-io-recorder-design.md）。
+
+### 新增：模型记录缝（llm/recording.go + engine/recorder.go）
+
+- **`Options.ModelRecorder func(SessionBrief) llm.ModelRecorder`**（每会话一实例，SID 记忆化；nil=零开销直通）：六面统一挂 `llm.NewRecordingModel` 记录包装——主/子代理/拓扑/摘要经 newShapedModel 链尾（SystemShape 之外=整形后真实出站面），genTitle/auto review 两处 `Opt.NewModel` 直调逃逸汇点补挂；子代理/拓扑共享父会话 recorder（face 区分，对齐上游「子调用落父 model-io」）。
+- **`llm.ModelCallRecord/ModelRecorder/NewRecordingModel`**：每次 attempt 两次投递（started 轻载荷+终态全量=上游 model-io 一行语义）；流式 Pipe 透传泵聚合（text/reasoning/toolCall Index 分片归并/usage 含缓存双字段/finishReason/首内容时点；EOF 归一防误分类——Classify 把 EOF 归可重试，直传会被记 failed）；attempt 归属=出站面指纹推断（同指纹连续失败=同请求续号）；stalled=ErrIdleTimeout 哨兵；WillRetry=Classify+MaxRetries 同源推断；投递 panic 兜底（铁律：记录失败绝不影响模型路径）。
+- **face 常量**：`FaceMain/FaceSubagent/FaceTopology/FaceSummary/FaceTitle/FaceReview`（应用映射上游 querySource：main_turn/subagent/compact/session_title/sidecar）。
+
+### 新增：契约增补（contract/event.go）
+
+- **`UsageOut` 六新字段**：`CacheReadTokens/CacheWriteTokens`（端点 `PromptTokenDetails` 透传，eino v0.9.21+ 数据源）+ `EstInstructionChars/EstToolsChars/EstMessagesChars`（分类三段字符数——上游 breakdown 条目 chars 口径，token 估算不可逆故同点并算）。
+
+### 新增：再出口补齐（llm/types.go）
+
+- 角色常量 `System/User/Assistant/Tool`（应用投影面按角色分类消息需要判别）。
+
 ## v0.7.0（2026-11-22）
 
 自 v0.6.0（2026-11-02）以来 2 个提交。版本主线：**eino 地基升 v0.9.23 + llm 契约类型再出口——三层架构红线（eino → einox → einox-work，严禁跨层调用）落地：应用侧 eino 契约消费唯一入口收敛到 `llm` 包**。纯 drop-in 升级 + additive 别名面，零行为变化、零既有 API 改动。
